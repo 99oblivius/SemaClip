@@ -634,13 +634,19 @@ SemaClip/
 │   ├── feedback.py            # Implicit feedback extraction
 │   ├── export.py              # FFmpeg clip export
 │   └── config.py              # Configuration, defaults, persistence
+├── data/                      # VODs and chat transcripts
+│   ├── training/              # Streams for development and calibration
+│   │   ├── video.mp4          # VOD file (gitignored)
+│   │   └── chat.json          # Twitch chat transcript
+│   └── testing/               # Held-out streams for evaluation only
+│       ├── video.mp4
+│       └── chat.json
 ├── tests/
 ├── models/                    # Pretrained model weights (gitignored)
 ├── ARCHITECTURE.md
 ├── README.md
 ├── pyproject.toml
 └── .gitignore
-```
 
 ---
 

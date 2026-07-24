@@ -12,14 +12,19 @@ models/
 *.bin
 *.safetensors
 *.joblib
+# Data (video files, large chat JSONs)
+data/training/*.mp4
+data/training/*.wav
+data/testing/*.mp4
+data/testing/*.wav
+data/training/*.part*
+data/testing/*.part*
+data/**/*.ytdl
 
 # Output
 output/
 clips/
 uploads/
-*.mp4
-*.wav
-*.mkv
 
 # Environment
 .env
