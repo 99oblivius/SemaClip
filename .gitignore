@@ -20,6 +20,7 @@ data/testing/*.wav
 data/training/*.part*
 data/testing/*.part*
 data/**/*.ytdl
+data/**/chat.json
 
 # Output
 output/
