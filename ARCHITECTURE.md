@@ -606,48 +606,59 @@ Things we are explicitly NOT building in v1:
 
 ---
 
-## 13. File Structure (Proposed)
+## 13. File Structure
+
+See [STACK.md](STACK.md) for the complete technology stack. The project uses a
+three-way split: `frontend/` (SvelteKit), `server/` (Deno backend), and
+`engine/` (Python ML), with `shared/` for TypeScript types.
 
 ```
 SemaClip/
-├── semaclip/
-│   ├── __init__.py
-│   ├── engine.py              # Main pipeline orchestrator
-│   ├── persona.py             # Cold-start persona model
-│   ├── segmentation.py        # Adaptive temporal segmentation
-│   ├── encoder.py             # Universal stream encoder
-│   ├── kalman.py              # Online state tracking
-│   ├── axes/                  # Per-axis detectors
-│   │   ├── __init__.py
-│   │   ├── base.py            # Base axis detector interface
-│   │   ├── hype.py
-│   │   ├── humor.py
-│   │   ├── skill.py
-│   │   ├── awkward.py
-│   │   ├── emotional.py
-│   │   └── tension.py
-│   ├── chat.py                # Chat parsing, classification, excitement signal
-│   ├── voice.py               # Voice analysis: prosody, topic boundaries
-│   ├── audio.py               # Audio scene analysis
-│   ├── endpoints.py           # Endpoint resolution logic
-│   ├── ranking.py             # Cross-axis ranking + diversity
-│   ├── feedback.py            # Implicit feedback extraction
-│   ├── export.py              # FFmpeg clip export
-│   └── config.py              # Configuration, defaults, persistence
-├── data/                      # VODs and chat transcripts
-│   ├── training/              # Streams for development and calibration
-│   │   ├── video.mp4          # VOD file (gitignored)
-│   │   └── chat.json          # Twitch chat transcript
-│   └── testing/               # Held-out streams for evaluation only
-│       ├── video.mp4
-│       └── chat.json
-├── tests/
-├── models/                    # Pretrained model weights (gitignored)
-├── ARCHITECTURE.md
+├── frontend/                     # SvelteKit SPA (Svelte 5 + Tailwind + GSAP)
+│   ├── src/
+│   │   ├── routes/               # SvelteKit routes (SPA mode)
+│   │   ├── lib/
+│   │   │   ├── components/        # Timeline, VideoPlayer, ClipCard, etc.
+│   │   │   ├── stores/           # Svelte stores (job progress, player state)
+│   │   │   ├── api/              # TanStack Query client
+│   │   │   └── actions/          # GSAP use:action directives
+│   └── static/
+├── server/                       # Deno backend (Deno Desktop + CEF)
+│   ├── deno.json                 # Deno config + desktop config
+│   ├── main.ts                   # Entry: window creation, server start
+│   ├── api/                      # REST API routes
+│   ├── ws/                       # WebSocket handler (progress streaming)
+│   ├── python/                   # Python subprocess manager
+│   └── db/                       # SQLite + Drizzle ORM schema + migrations
+├── engine/                       # Python ML engine (PyInstaller binary)
+│   ├── engine.py                 # Entry point (stdin/stdout IPC)
+│   ├── semaclip/
+│   │   ├── engine.py             # Main pipeline orchestrator
+│   │   ├── persona.py            # Cold-start persona model
+│   │   ├── segmentation.py       # Adaptive temporal segmentation
+│   │   ├── encoder.py            # Universal stream encoder
+│   │   ├── kalman.py             # Online state tracking
+│   │   ├── axes/                 # Per-axis detectors (hype, humor, skill, ...)
+│   │   ├── chat.py               # Chat parsing, classification, excitement signal
+│   │   ├── voice.py              # Voice analysis: prosody, topic boundaries
+│   │   ├── audio.py              # Audio scene analysis
+│   │   ├── endpoints.py          # Endpoint resolution logic
+│   │   ├── ranking.py            # Cross-axis ranking + diversity
+│   │   ├── feedback.py           # Implicit feedback extraction
+│   │   ├── export.py             # FFmpeg clip export
+│   │   └── config.py             # Configuration, defaults, persistence
+│   ├── pyproject.toml
+│   └── requirements.txt
+├── shared/                       # Shared TypeScript types (frontend + backend)
+│   └── types.ts
+├── data/                         # VODs and chat transcripts (gitignored)
+│   ├── training/                 # Streams for development and calibration
+│   └── testing/                  # Held-out streams for evaluation only
+├── ARCHITECTURE.md               # ML pipeline architecture (this document)
+├── STACK.md                      # Technology stack decisions
 ├── README.md
-├── pyproject.toml
 └── .gitignore
-
+```
 ---
 
 ## 14. Open Questions for v2
