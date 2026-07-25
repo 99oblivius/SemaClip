@@ -521,10 +521,35 @@ cd server && deno desktop --hmr main.ts
 - **Training the universal encoder in v1.** Architecture defined; pretraining is a separate project.
 - **Multi-streamer support in a single instance.** One streamer per installation.
 - **A web UI hosted on a server.** This is a local desktop application.
+- **Clip title/description generation (H5).** Useful but not a hole — streamers can write their own. v1.5.
+- **NLE export (H8: EDL/FCPXML/XML).** High value for pro editors but adds export complexity. v1.5.
+- **Clip compilation / highlight reel.** New screen (reel editor). v2.
 
 ---
 
-## 12. Open Questions for v2
+## 12. Frontend Design
+
+See [DESIGN.md](DESIGN.md) for the complete frontend design specification.
+
+**Design thesis:** SemaClip is a signal instrument, not a dashboard. The UI chrome is cool, dark, and quiet; the video player carries all the color. A single deep blood red (`#CC0000`) is used exclusively for the playhead, selected clip, and primary action — its scarcity makes it an event.
+
+**Palette:** "Carbon & Blood" — Skeleton.dev's charcoal-blue foundation (`#0B0B10`) with YouTube's dark red as the accent. Designed to sit alongside Twitch purple, Twitch live red, Kick green, and YouTube red without clashing.
+
+**Typography:** Space Grotesk (display) + Inter (body) + JetBrains Mono (data).
+
+**Signature element:** The signal terrain timeline — a layered canvas (waveform + chat density) with SVG overlay (clip marks + regime boundaries) and HTML (playhead + drag handles). The "key light" effect dims the terrain to 40% outside the selected clip's window.
+
+**v1 feature scope** (filled holes from end-user audit):
+- H1: VOD URL import (paste Twitch URL, auto-download via streamlink)
+- H2: Chat auto-fetch (automatic with URL import)
+- H3: Export aspect ratios (16:9, 9:16, 1:1 with crop preview)
+- H4: Caption/subtitle burn-in (from Whisper transcription)
+- H6: Batch/queue processing (queue multiple VODs)
+- H7: Frame-accurate endpoint trimming (zoom to frame, frame-step)
+
+---
+
+## 13. Open Questions for v2
 
 - **Live mode**: Real-time inference during the stream.
 - **Cross-stream memory**: Long-term memory of clip quality across streams.
