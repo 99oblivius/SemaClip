@@ -1,0 +1,8 @@
+[project]
+name = "semaclip-engine"
+version = "0.1.0"
+description = "SemaClip ML engine — multimodal Twitch clip detection"
+requires-python = ">=3.12"
+
+[project.scripts]
+semaclip-engine = "engine:main"

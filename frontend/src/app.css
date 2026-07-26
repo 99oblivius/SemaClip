@@ -1,0 +1,77 @@
+@import 'tailwindcss';
+
+@theme {
+  /* ── Foundation ramp (Carbon & Blood) ── */
+  --color-foundation: #0b0b10;
+  --color-surface: #16161f;
+  --color-surface-2: #24242f;
+  --color-surface-3: #2e2e3a;
+  --color-border: #2e2e3a;
+  --color-border-strong: #3d3d4a;
+
+  /* ── Text ── */
+  --color-ink: #ffffff;
+  --color-ash: #a1a1aa;
+  --color-ash-dim: #71717a;
+
+  /* ── Accent (blood red — scarce by design) ── */
+  --color-accent: #cc0000;
+  --color-accent-hover: #e60000;
+  --color-accent-deep: #8b0000;
+  --color-accent-glow: rgba(204, 0, 0, 0.2);
+
+  /* ── Semantic state ── */
+  --color-success: #22c55e;
+  --color-warning: #eab308;
+  --color-error: #ef4444;
+
+  /* ── Typography ── */
+  --font-display: 'Space Grotesk', system-ui, sans-serif;
+  --font-body: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  /* ── Spacing ── */
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+
+@layer base {
+  html {
+    background: var(--color-foundation);
+    color: var(--color-ink);
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  body {
+    margin: 0;
+    overflow: hidden;
+  }
+
+  ::selection {
+    background: var(--color-accent);
+    color: var(--color-ink);
+  }
+}
+
+@layer components {
+  .font-display { font-family: var(--font-display); }
+  .font-mono { font-family: var(--font-mono); }
+
+  /* Accent glow — applied to active/selected elements */
+  .accent-glow {
+    box-shadow: 0 0 80px var(--color-accent-glow);
+  }
+
+  /* Scrollbar — minimal, dark */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--color-foundation); }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-surface-3);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: var(--color-border-strong); }
+}

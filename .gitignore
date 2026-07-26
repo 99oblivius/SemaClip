@@ -42,3 +42,12 @@ Thumbs.db
 # Temp
 /tmp/
 *.log
+
+# Frontend (SvelteKit)
+frontend/node_modules/
+frontend/build/
+frontend/.svelte-kit/
+frontend/package
+
+# Deno
+server/node_modules/

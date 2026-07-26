@@ -1,0 +1,37 @@
+{
+  "name": "semaclip-server",
+  "version": "0.1.0",
+  "exports": "./main.ts",
+  "nodeModulesDir": "auto",
+  "tasks": {
+    "dev": "deno run --allow-all --watch main.ts",
+    "start": "deno run --allow-all main.ts",
+    "check": "deno check main.ts",
+    "test": "deno test --allow-all"
+  },
+  "lint": {
+    "rules": { "tags": ["recommended"] }
+  },
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "lib": ["deno.window", "deno.ns"]
+  },
+  "imports": {
+    "shared/types": "../shared/types.ts",
+    "@/": "./",
+    "hono": "jsr:@hono/hono@^4.6.14",
+    "hono/deno": "jsr:@hono/hono@^4.6.14/deno",
+    "hono/": "jsr:@hono/hono@^4.6.14/",
+    "hono/ws": "jsr:@hono/hono@^4.6.14/ws",
+    "drizzle-orm": "npm:drizzle-orm@^0.38.3",
+    "drizzle-orm/better-sqlite3": "npm:drizzle-orm@^0.38.3/better-sqlite3",
+    "drizzle-orm/sqlite-core": "npm:drizzle-orm@^0.38.3/sqlite-core",
+    "drizzle-orm/": "npm:drizzle-orm@^0.38.3/",
+    "better-sqlite3": "npm:better-sqlite3@^11.7.0",
+    "@std/assert": "jsr:@std/assert@^1.0.10",
+    "@std/path": "jsr:@std/path@^1.0.8",
+    "@std/streams": "jsr:@std/streams@^1.0.5"
+  }
+}
