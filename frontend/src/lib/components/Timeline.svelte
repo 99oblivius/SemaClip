@@ -34,83 +34,86 @@
   let isDraggingEndpoint = $state(false);
   let draggingEndpoint: 'start' | 'end' | null = null;
 
-  /** Sparse waveform: pre-allocated array, -1 = not yet loaded. Filled by SSE batches at their correct index. */
+  // ── Streaming waveform via SSE, managed by $effect ──
   let waveformPeaks = $state<number[]>(new Array(2000).fill(-1));
   let waveformDuration = $state(0);
   let waveformTotalPeaks = $state(2000);
 
-  const waveformQuery = createQuery(() => ({
-    queryKey: ['waveform', streamId],
-    queryFn: async ({ signal }) => {
-      const around = $playerStore.viewStart || 0;
-      const res = await fetch(`/api/streams/${streamId}/waveform?around=${Math.round(around)}`, {
-        signal,
-      });
-      if (!res.ok) throw new Error(`Waveform fetch failed: ${res.status}`);
-      const reader = res.body!.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let duration = 0;
-      let totalPeaks = 2000;
+  // Reconnect waveform when the user seeks, debounced to avoid reconnect storms.
+  let seekTarget = $state(0);
+  $effect(() => {
+    const t = $playerStore.currentTime || 0;
+    const timer = setTimeout(() => { seekTarget = t; }, 400);
+    return () => clearTimeout(timer);
+  });
 
-      while (true) {
-        if (signal?.aborted) break;
-        const { done, value } = await reader.read();
-        if (signal?.aborted) break;
-        if (value) buffer += decoder.decode(value, { stream: true });
+  $effect(() => {
+    const ctrl = new AbortController();
+    const around = seekTarget;
 
-        const lines = buffer.split('\n');
-        buffer = lines.pop()!;
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          try {
-            const data = JSON.parse(line.slice(6));
-            if (data.error) throw new Error(data.error);
-            if (data.duration) duration = data.duration;
-            if (data.totalPeaks) totalPeaks = data.totalPeaks;
-            if (data.firstIndex !== undefined && data.peaks) {
-              const arr = [...waveformPeaks];
-              for (let i = 0; i < data.peaks.length; i++) {
-                arr[data.firstIndex + i] = data.peaks[i];
-              }
-              waveformPeaks = arr;
+    (async () => {
+      try {
+        const res = await fetch(`/api/streams/${streamId}/waveform?around=${Math.round(around)}`, {
+          signal: ctrl.signal,
+        });
+        if (!res.ok || !res.body) return;
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let duration = 0;
+        let totalPeaks = 2000;
+
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            const lines = buffer.split('\n');
+            buffer = lines.pop()!;
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.error) throw new Error(data.error);
+                if (data.duration) duration = data.duration;
+                if (data.totalPeaks) totalPeaks = data.totalPeaks;
+                if (data.firstIndex !== undefined && data.peaks) {
+                  const arr = [...waveformPeaks];
+                  for (let i = 0; i < data.peaks.length; i++) {
+                    arr[data.firstIndex + i] = data.peaks[i];
+                  }
+                  waveformPeaks = arr;
+                }
+                if (data.done) continue;
+                waveformDuration = duration;
+                waveformTotalPeaks = totalPeaks;
+              } catch { /* skip malformed */ }
             }
-            if (data.done) continue;
-            waveformDuration = duration;
-            waveformTotalPeaks = totalPeaks;
-          } catch { /* skip malformed */ }
+          }
+        } finally {
+          try { reader.releaseLock(); } catch { /* ok */ }
         }
-        if (done) break;
+      } catch (e) {
+        if ((e as Error).name === 'AbortError') return; // clean abort
       }
-      return waveformPeaks;
-    },
-    staleTime: 0,
-  }));
+    })();
+
+    return () => ctrl.abort();
+  });
+
   const chatQuery = createQuery(() => ({
     queryKey: ['chat-density', streamId],
     queryFn: () => apiClient.chatDensity(streamId),
     staleTime: Infinity,
   }));
 
-  /** Waveform: uses sparse local state. -1 slots = not yet loaded. */
   const waveform = $derived(waveformPeaks);
   const chatDensity = $derived(chatQuery.data?.density ?? []);
   const player = $derived($playerStore);
-
   const viewStart = $derived(player.viewStart || 0);
   const viewEnd = $derived(player.viewEnd || duration);
   const viewSpan = $derived(Math.max(1, viewEnd - viewStart));
-
-  // Reconnect the waveform stream when the user seeks significantly.
-  let lastAround = $state(0);
-  $effect(() => {
-    const around = Math.round(viewStart);
-    if (Math.abs(around - lastAround) > 60) { // 1-minute threshold
-      lastAround = around;
-      waveformQuery.refetch();
-    }
-  });
-
   function xToTime(x: number): number {
     if (!containerEl) return 0;
     const w = containerEl.clientWidth;
@@ -340,8 +343,7 @@
   onDestroy(() => cancelAnimationFrame(rafId));
 
   $effect(() => {
-    // Re-draw when waveform data changes (streaming or complete).
-    waveformPeaks; waveformQuery.data; chatQuery.data;
+    waveformPeaks; chatQuery.data;
     draw();
   });
 
