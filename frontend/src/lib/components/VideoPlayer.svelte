@@ -29,10 +29,10 @@
   let videoEl = $state<HTMLVideoElement | undefined>(undefined);
   let containerEl = $state<HTMLDivElement | undefined>(undefined);
 
-  // Local UI state — updated directly in handlers for immediate reactivity.
+  // Local UI state — restored from localStorage for persistence across refreshes.
   let isPlaying = $state(false);
-  let isMuted = $state(false);
-  let currentVolume = $state(1);
+  let isMuted = $state(localStorage.getItem('semaclip-muted') === '1');
+  let currentVolume = $state(Number(localStorage.getItem('semaclip-volume') ?? '1'));
   let currentRate = $state(1);
   let isFullscreen = $state(false);
   let currentTime = $state(0);
@@ -82,7 +82,16 @@
 
   function toggleMute() {
     if (!videoEl) return;
-    videoEl.muted = !videoEl.muted;
+    if (videoEl.muted) {
+      // Unmuting: restore to full volume if currently at 0.
+      if (videoEl.volume === 0) {
+        videoEl.volume = 1;
+        currentVolume = 1;
+      }
+      videoEl.muted = false;
+    } else {
+      videoEl.muted = true;
+    }
     isMuted = videoEl.muted;
   }
 
@@ -90,12 +99,12 @@
     if (!videoEl) return;
     videoEl.volume = v;
     currentVolume = v;
-    if (v > 0 && videoEl.muted) {
-      videoEl.muted = false;
-      isMuted = false;
-    } else if (v === 0) {
+    if (v === 0) {
       videoEl.muted = true;
       isMuted = true;
+    } else if (videoEl.muted) {
+      videoEl.muted = false;
+      isMuted = false;
     }
   }
 
@@ -155,12 +164,14 @@
     isFullscreen = !!document.fullscreenElement;
   }
 
+  // Persist volume/mute to localStorage for session survival.
+  $effect(() => { localStorage.setItem('semaclip-muted', isMuted ? '1' : '0'); });
+  $effect(() => { localStorage.setItem('semaclip-volume', String(currentVolume)); });
+
   onDestroy(() => {
     if (browser && document.fullscreenElement) void document.exitFullscreen?.();
   });
 </script>
-
-<svelte:window onfullscreenchange={onFullscreenChange} />
 
 <!-- No bg-black — video element handles its own aspect; container is transparent -->
 <div bind:this={containerEl} class="relative flex-1 overflow-hidden rounded-lg">
@@ -171,14 +182,16 @@
     ontimeupdate={handleTimeUpdate}
     onloadedmetadata={(e: Event & { currentTarget: HTMLVideoElement }) => {
       videoDuration = e.currentTarget.duration;
-      currentVolume = e.currentTarget.volume;
-      isMuted = e.currentTarget.muted;
+      // Restore persisted volume/mute, overriding browser defaults.
+      e.currentTarget.volume = currentVolume;
+      e.currentTarget.muted = isMuted;
       playerStore.update((s) => ({ ...s, duration: e.currentTarget.duration }));
     }}
     onplay={() => { isPlaying = true; playerStore.update((s) => ({ ...s, isPlaying: true })); }}
     onpause={() => { isPlaying = false; playerStore.update((s) => ({ ...s, isPlaying: false })); }}
     onvolumechange={() => { if (videoEl) { isMuted = videoEl.muted; currentVolume = videoEl.volume; } }}
   ><track kind="captions" /></video>
+
 
   <!-- Minimal control bar — sits at the bottom, subtle gradient only behind controls -->
   <div class="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-4 pb-2 pt-6">
