@@ -308,6 +308,17 @@
       ctx.stroke();
       ctx.setLineDash([]);
     }
+
+    // ── Playhead (2px line + triangle cap, pixel-snapped on canvas) ──
+    const px = Math.round(timeToX(player.currentTime)); // integer, left edge of 2px line
+    ctx.fillStyle = '#cc0000';
+    ctx.fillRect(px, 0, 2, h);           // line at px..px+2, centre px+1
+    ctx.beginPath();                       // 8px triangle centred on px+1
+    ctx.moveTo(px - 3, 0);
+    ctx.lineTo(px + 5, 0);
+    ctx.lineTo(px + 1, 6);
+    ctx.closePath();
+    ctx.fill();
   }
 
   /** Format a tick label. Uses the step to pick the right precision:
@@ -471,13 +482,6 @@
 >
   <canvas bind:this={canvasEl} class="absolute inset-0 h-full w-full"></canvas>
 
-  <!-- Playhead: 2px red line + centered triangle, pixel-snapped, no transforms -->
-  <div
-    class="pointer-events-none absolute top-0 bottom-0"
-    style="left: {Math.round(timeToX(player.currentTime))}px; width: 2px; background: #cc0000;"
-  >
-    <div class="absolute -top-0" style="left: -3px; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 6px solid #cc0000;"></div>
-  </div>
 
   <!-- Endpoint handles for selected clip (HTML for better hit targets) -->
   {#if selectedClip && selectedStartX >= 0}
