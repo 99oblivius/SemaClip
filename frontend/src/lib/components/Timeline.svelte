@@ -34,9 +34,44 @@
   let isDraggingEndpoint = $state(false);
   let draggingEndpoint: 'start' | 'end' | null = null;
 
+  /** Progressive waveform: local state accumulates streaming data as it arrives. */
+  let waveformPeaks = $state<number[]>([]);
+  let waveformDuration = $state(0);
+
   const waveformQuery = createQuery(() => ({
     queryKey: ['waveform', streamId],
-    queryFn: () => apiClient.waveform(streamId),
+    queryFn: async () => {
+      const res = await fetch(`/api/streams/${streamId}/waveform`);
+      if (!res.ok) throw new Error(`Waveform fetch failed: ${res.status}`);
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let duration = 0;
+      let peaks: number[] = [];
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (value) buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split('\n');
+        buffer = lines.pop()!;
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.error) throw new Error(data.error);
+            if (data.duration) duration = data.duration;
+            if (data.peaks) peaks = [...peaks, ...data.peaks];
+            if (data.done) continue;
+            // Update local state progressively so the canvas re-renders as data arrives.
+            waveformPeaks = peaks;
+            waveformDuration = duration;
+          } catch { /* skip malformed */ }
+        }
+        if (done) break;
+      }
+      return { duration, peaks };
+    },
     staleTime: Infinity,
   }));
   const chatQuery = createQuery(() => ({
@@ -45,7 +80,8 @@
     staleTime: Infinity,
   }));
 
-  const waveform = $derived(waveformQuery.data?.peaks ?? []);
+  /** Use local state during streaming (fills progressively), query result once complete. */
+  const waveform = $derived(waveformPeaks.length > 0 ? waveformPeaks : (waveformQuery.data?.peaks ?? []));
   const chatDensity = $derived(chatQuery.data?.density ?? []);
   const player = $derived($playerStore);
 
@@ -283,7 +319,9 @@
   onDestroy(() => cancelAnimationFrame(rafId));
 
   $effect(() => {
-    if (waveformQuery.data || chatQuery.data) draw();
+    // Re-draw when waveform data changes (streaming or complete).
+    waveformPeaks; waveformQuery.data; chatQuery.data;
+    draw();
   });
 
   // ── Unified mouse handling ──

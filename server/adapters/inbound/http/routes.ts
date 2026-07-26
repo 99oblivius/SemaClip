@@ -200,57 +200,124 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     }
   });
 
-  // ── Audio waveform peaks (downsampled RMS) for signal terrain ──
-  // Uses ffprobe to get stream duration, then ffprobe to extract packets.
-  // Returns ~2000 peaks spanning the full VOD.
-  app.get("/api/streams/:id/waveform", async (c) => {
-    const stream = await deps.getStream.execute(c.req.param("id"));
-    if (!stream || !stream.vodPath) return c.json({ error: "Video not available" }, 404);
-    try {
-      // Get duration via ffprobe.
-      const probe = new Deno.Command("ffprobe", {
-        args: ["-v", "quiet", "-print_format", "json", "-show_format", stream.vodPath],
-        stdout: "piped",
-        stderr: "piped",
-      });
-      const probeOut = await probe.output();
-      const info = JSON.parse(new TextDecoder().decode(probeOut.stdout));
-      const duration = parseFloat(info.format?.duration ?? "0");
-      if (!duration) return c.json({ error: "Cannot determine duration" }, 500);
+  // ── Streaming audio waveform (SSE) ──
+  // Spawns ffmpeg to decode audio, streams peak values as they are computed.
+  // First event carries the duration (instant via ffprobe). Subsequent events
+  // carry batches of peak values. The frontend renders progressively.
 
-      // Sample 2000 points across the file.
-      const samples = 2000;
-      const peaks: number[] = [];
-      const step = duration / samples;
-      const cmd = new Deno.Command("ffmpeg", {
-        args: [
-          "-i", stream.vodPath,
-          "-vn",                    // no video
-          "-ac", "1",               // mono
-          "-ar", "8000",            // low sample rate for speed
-          "-f", "f32le",            // 32-bit float little-endian
-          "-",                      // stdout
-        ],
-        stdout: "piped",
-        stderr: "null",
-      });
-      const out = await cmd.output();
-      const pcm = new Float32Array(out.stdout.buffer, 0, Math.floor(out.stdout.length / 4));
-      const samplesPerBucket = Math.max(1, Math.floor(pcm.length / samples));
-      for (let i = 0; i < samples; i++) {
-        let max = 0;
-        const start = i * samplesPerBucket;
-        const end = Math.min(start + samplesPerBucket, pcm.length);
-        for (let j = start; j < end; j++) {
-          const v = Math.abs(pcm[j] ?? 0);
-          if (v > max) max = v;
+  app.get("/api/streams/:id/waveform", (c) => {
+    const streamId = c.req.param("id");
+
+    const body = new ReadableStream({
+      async start(controller) {
+        const encoder = new TextEncoder();
+        const send = (data: unknown) => {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+        };
+
+        try {
+          const stream = await deps.getStream.execute(streamId);
+          if (!stream || !stream.vodPath) {
+            send({ error: "Video not available" });
+            controller.close();
+            return;
+          }
+
+          // 1. Get duration (fast — ffprobe metadata only).
+          const probe = new Deno.Command("ffprobe", {
+            args: ["-v", "quiet", "-print_format", "json", "-show_format", stream.vodPath],
+            stdout: "piped", stderr: "piped",
+          });
+          const probeOut = await probe.output();
+          const info = JSON.parse(new TextDecoder().decode(probeOut.stdout));
+          const duration = parseFloat(info.format?.duration ?? "0");
+          if (!duration) {
+            send({ error: "Cannot determine duration" });
+            controller.close();
+            return;
+          }
+          send({ duration });
+
+          // 2. Stream-decode audio via ffmpeg → compute peaks on the fly.
+          const TARGET_PEAKS = 2000;
+          const SAMPLE_RATE = 8000;
+          const samplesPerPeak = Math.max(1, Math.floor((duration * SAMPLE_RATE) / TARGET_PEAKS));
+          // Send peaks in batches of 50 for smooth progressive rendering.
+          const BATCH_SIZE = 50;
+
+          const cmd = new Deno.Command("ffmpeg", {
+            args: [
+              "-i", stream.vodPath, "-vn", "-ac", "1",
+              "-ar", String(SAMPLE_RATE), "-f", "f32le", "-",
+            ],
+            stdout: "piped", stderr: "null",
+          });
+          const proc = cmd.spawn();
+          const reader = proc.stdout.getReader();
+
+          // Accumulate PCM samples and compute peaks in sliding windows.
+          let peakBuf: number[] = [];   // completed peaks waiting to be sent
+          let acc: Float32Array = new Float32Array(0);
+
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (value) {
+                // Append new PCM data to accumulator.
+                const incoming = new Float32Array(value.buffer, value.byteOffset, Math.floor(value.length / 4));
+                const merged = new Float32Array(acc.length + incoming.length);
+                merged.set(acc);
+                merged.set(incoming, acc.length);
+                acc = merged;
+
+                // Extract as many full peaks as we can from the accumulator.
+                while (acc.length >= samplesPerPeak) {
+                  let max = 0;
+                  for (let i = 0; i < samplesPerPeak; i++) max = Math.max(max, Math.abs(acc[i] ?? 0));
+                  peakBuf.push(max);
+                  acc = acc.slice(samplesPerPeak); // advance window
+                }
+              }
+
+              // Send completed peaks in batches.
+              while (peakBuf.length >= BATCH_SIZE) {
+                const batch = peakBuf.splice(0, BATCH_SIZE);
+                send({ peaks: batch });
+              }
+
+              if (done) break;
+            }
+
+            // Flush remaining accumulator.
+            if (acc.length > 0) {
+              let max = 0;
+              for (let i = 0; i < acc.length; i++) max = Math.max(max, Math.abs(acc[i] ?? 0));
+              peakBuf.push(max);
+            }
+          } finally {
+            try { reader.releaseLock(); } catch { /* ok */ }
+            try { await proc.status; } catch { /* process may have exited */ }
+          }
+
+          // Flush any remaining peaks.
+          if (peakBuf.length > 0) send({ peaks: peakBuf });
+
+          send({ done: true });
+        } catch (e) {
+          send({ error: `Waveform streaming failed: ${e}` });
+        } finally {
+          controller.close();
         }
-        peaks.push(max);
-      }
-      return c.json({ duration, peaks });
-    } catch (e) {
-      return c.json({ error: `Waveform extraction failed: ${e}` }, 500);
-    }
+      },
+    });
+
+    return c.newResponse(body, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
+    });
   });
 
   // ── Settings ──

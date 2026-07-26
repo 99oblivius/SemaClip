@@ -51,3 +51,4 @@ frontend/package
 
 # Deno
 server/node_modules/
+*.waveform.json

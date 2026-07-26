@@ -111,5 +111,5 @@ export const apiClient = {
     api<{ duration: number; density: number[] }>(`/streams/${streamId}/chat-density`),
 
   waveform: (streamId: string) =>
-    api<{ duration: number; peaks: number[] }>(`/streams/${streamId}/waveform`),
+    api<{ duration: number; peaks: number[]; resolution?: string }>(`/streams/${streamId}/waveform`),
 };
