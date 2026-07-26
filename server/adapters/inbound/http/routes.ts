@@ -175,6 +175,84 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     return c.json(result, 201);
   });
 
+  // ── Chat density (per-second message counts) for signal terrain ──
+  app.get("/api/streams/:id/chat-density", async (c) => {
+    const stream = await deps.getStream.execute(c.req.param("id"));
+    if (!stream || !stream.chatPath) return c.json({ error: "Chat not available" }, 404);
+    try {
+      const raw = await Deno.readTextFile(stream.chatPath);
+      const data = JSON.parse(raw);
+      const comments = Array.isArray(data) ? data : data.comments ?? [];
+      // Bucket messages by content_offset_seconds.
+      const duration = stream.duration ?? Math.max(
+        ...comments.map((m: { content_offset_seconds?: number }) => m.content_offset_seconds ?? 0),
+        0,
+      );
+      const bucketCount = Math.max(1, Math.ceil(duration));
+      const buckets = new Array(bucketCount).fill(0);
+      for (const msg of comments) {
+        const sec = Math.floor(msg.content_offset_seconds ?? 0);
+        if (sec >= 0 && sec < bucketCount) buckets[sec]++;
+      }
+      return c.json({ duration, density: buckets });
+    } catch {
+      return c.json({ error: "Cannot read chat file" }, 500);
+    }
+  });
+
+  // ── Audio waveform peaks (downsampled RMS) for signal terrain ──
+  // Uses ffprobe to get stream duration, then ffprobe to extract packets.
+  // Returns ~2000 peaks spanning the full VOD.
+  app.get("/api/streams/:id/waveform", async (c) => {
+    const stream = await deps.getStream.execute(c.req.param("id"));
+    if (!stream || !stream.vodPath) return c.json({ error: "Video not available" }, 404);
+    try {
+      // Get duration via ffprobe.
+      const probe = new Deno.Command("ffprobe", {
+        args: ["-v", "quiet", "-print_format", "json", "-show_format", stream.vodPath],
+        stdout: "piped",
+        stderr: "piped",
+      });
+      const probeOut = await probe.output();
+      const info = JSON.parse(new TextDecoder().decode(probeOut.stdout));
+      const duration = parseFloat(info.format?.duration ?? "0");
+      if (!duration) return c.json({ error: "Cannot determine duration" }, 500);
+
+      // Sample 2000 points across the file.
+      const samples = 2000;
+      const peaks: number[] = [];
+      const step = duration / samples;
+      const cmd = new Deno.Command("ffmpeg", {
+        args: [
+          "-i", stream.vodPath,
+          "-vn",                    // no video
+          "-ac", "1",               // mono
+          "-ar", "8000",            // low sample rate for speed
+          "-f", "f32le",            // 32-bit float little-endian
+          "-",                      // stdout
+        ],
+        stdout: "piped",
+        stderr: "null",
+      });
+      const out = await cmd.output();
+      const pcm = new Float32Array(out.stdout.buffer, 0, Math.floor(out.stdout.length / 4));
+      const samplesPerBucket = Math.max(1, Math.floor(pcm.length / samples));
+      for (let i = 0; i < samples; i++) {
+        let max = 0;
+        const start = i * samplesPerBucket;
+        const end = Math.min(start + samplesPerBucket, pcm.length);
+        for (let j = start; j < end; j++) {
+          const v = Math.abs(pcm[j] ?? 0);
+          if (v > max) max = v;
+        }
+        peaks.push(max);
+      }
+      return c.json({ duration, peaks });
+    } catch (e) {
+      return c.json({ error: `Waveform extraction failed: ${e}` }, 500);
+    }
+  });
+
   // ── Settings ──
   app.get("/api/settings", (c) => c.json(deps.settings.get()));
   app.put("/api/settings", async (c) => {

@@ -105,4 +105,11 @@ export const apiClient = {
   // ── Video ──
   videoUrl: (streamId: string) =>
     `${API_BASE}/video/${streamId}`,
+
+  // ── Signal terrain data ──
+  chatDensity: (streamId: string) =>
+    api<{ duration: number; density: number[] }>(`/streams/${streamId}/chat-density`),
+
+  waveform: (streamId: string) =>
+    api<{ duration: number; peaks: number[] }>(`/streams/${streamId}/waveform`),
 };
