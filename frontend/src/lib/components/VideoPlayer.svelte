@@ -3,6 +3,7 @@
   import { playerStore } from '$lib/stores/player';
   import Icon from '$lib/components/Icon.svelte';
   import VolumeControl from '$lib/components/VolumeControl.svelte';
+  import SpeedControl from '$lib/components/SpeedControl.svelte';
   import type { Clip } from '$shared/types';
   import { onDestroy } from 'svelte';
   import { browser } from '$app/environment';
@@ -216,20 +217,8 @@
 
       <div class="flex-1"></div>
 
-
-      <!-- Playback rate -->
-      <div class="flex items-center gap-1">
-        {#each [0.5, 1, 1.5, 2] as r}
-          <button
-            class="rounded px-1.5 font-mono text-xs transition-colors
-            {currentRate === r ? 'text-accent' : 'text-white/50 hover:text-white'}"
-            onclick={() => setRate(r)}
-            aria-label="{r}× speed"
-          >
-            {r}×
-          </button>
-        {/each}
-      </div>
+      <!-- Playback rate (hover to reveal snap-slider) -->
+      <SpeedControl rate={currentRate} onRate={setRate} />
 
       <!-- Volume (YouTube-style hover-expand slider) -->
       <VolumeControl
