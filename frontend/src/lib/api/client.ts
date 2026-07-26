@@ -41,6 +41,29 @@ export const apiClient = {
   importByUrl: (input: ImportByUrlInput) =>
     api<ImportResult>('/streams/import-url', { method: 'POST', body: JSON.stringify(input) }),
 
+  /** Upload VOD file via multipart form (for small/medium videos). */
+  uploadVod: (file: File, opts?: { title?: string; streamer?: string }) => {
+    const form = new FormData();
+    form.append('vod', file);
+    if (opts?.title) form.append('title', opts.title);
+    if (opts?.streamer) form.append('streamer', opts.streamer);
+    return api<ImportResult>('/streams/upload-vod', { method: 'POST', body: form });
+  },
+
+  /** Upload chat file and attach to existing stream. */
+  uploadChat: (streamId: string, file: File) => {
+    const form = new FormData();
+    form.append('chat', file);
+    return api<Stream>(`/streams/${streamId}/upload-chat`, { method: 'POST', body: form });
+  },
+
+  /** Attach chat by local file path. */
+  attachChat: (streamId: string, chatPath: string) =>
+    api<Stream>(`/streams/${streamId}/attach-chat`, {
+      method: 'POST',
+      body: JSON.stringify({ chatPath }),
+    }),
+
   deleteStream: (id: string) =>
     api<{ ok: boolean }>(`/streams/${id}`, { method: 'DELETE' }),
 

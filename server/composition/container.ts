@@ -15,6 +15,7 @@ import {
   ListStreamsUseCase,
   GetStreamUseCase,
   DeleteStreamUseCase,
+  AttachChatUseCase,
   StartJobUseCase,
   CancelJobUseCase,
   ListClipsUseCase,
@@ -81,6 +82,7 @@ export function buildContainer(config: AppConfig): AppContainer {
   const listStreams = new ListStreamsUseCase(streamRepo);
   const getStream = new GetStreamUseCase(streamRepo);
   const deleteStream = new DeleteStreamUseCase(streamRepo, jobRepo);
+  const attachChat = new AttachChatUseCase(streamRepo, fs);
   const startJob = new StartJobUseCase(streamRepo, jobRepo, clipRepo, engine, bus, fs);
   const cancelJob = new CancelJobUseCase(jobRepo, engine, bus);
   const listClips = new ListClipsUseCase(clipRepo);
@@ -98,6 +100,7 @@ export function buildContainer(config: AppConfig): AppContainer {
       listStreams,
       getStream,
       deleteStream,
+      attachChat,
       startJob,
       cancelJob,
       listClips,
@@ -106,6 +109,7 @@ export function buildContainer(config: AppConfig): AppContainer {
       exportClip,
       manageQueue,
       settings,
+      uploadDir: `${config.cacheDir}/uploads`,
     },
   };
 }

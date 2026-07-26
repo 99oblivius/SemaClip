@@ -1,4 +1,4 @@
-export { createStream, withStatus, withDownloaded } from "./Stream.ts";
+export { createStream, withStatus, withDownloaded, withChat } from "./Stream.ts";
 export type { NewStreamInput } from "./Stream.ts";
 export { createJob, start, complete, fail, cancel, isTerminal } from "./Job.ts";
 export type { NewJobInput } from "./Job.ts";

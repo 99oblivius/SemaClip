@@ -1,5 +1,6 @@
-import type { StreamRepository, JobRepository } from "@/application/ports/outbound.ts";
+import type { StreamRepository, JobRepository, FileSystemPort } from "@/application/ports/outbound.ts";
 import type { Stream, StreamStatus } from "shared/types";
+import { withChat } from "@/domain/mod.ts";
 
 export class ListStreamsUseCase {
   constructor(private readonly streams: StreamRepository) {}
@@ -27,5 +28,24 @@ export class DeleteStreamUseCase {
       await this.jobs.delete(job.id);
     }
     await this.streams.delete(streamId);
+  }
+}
+
+/** Attach a chat file to an existing stream — independent of VOD import. */
+export class AttachChatUseCase {
+  constructor(
+    private readonly streams: StreamRepository,
+    private readonly fs: FileSystemPort,
+  ) {}
+
+  async execute(streamId: string, chatPath: string): Promise<Stream> {
+    const stream = await this.streams.findById(streamId);
+    if (!stream) throw new Error(`Stream not found: ${streamId}`);
+    if (!(await this.fs.exists(chatPath))) {
+      throw new Error(`Chat file not found: ${chatPath}`);
+    }
+    const updated = withChat(stream, chatPath);
+    await this.streams.update(updated);
+    return updated;
   }
 }

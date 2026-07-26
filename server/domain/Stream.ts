@@ -30,6 +30,10 @@ export function withStatus(stream: Stream, status: StreamStatus): Stream {
   return { ...stream, status };
 }
 
+export function withChat(stream: Stream, chatPath: string | null): Stream {
+  return { ...stream, chatPath };
+}
+
 export function withDownloaded(stream: Stream, vodPath: string, chatPath: string | null): Stream {
   return { ...stream, vodPath, chatPath, status: "pending" };
 }

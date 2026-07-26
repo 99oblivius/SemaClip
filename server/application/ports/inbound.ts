@@ -36,6 +36,10 @@ export interface DeleteStream {
   execute(streamId: string): Promise<void>;
 }
 
+export interface AttachChat {
+  execute(streamId: string, chatPath: string): Promise<Stream>;
+}
+
 // ── Job use cases ──────────────────────────────────────────────
 
 export interface StartJob {

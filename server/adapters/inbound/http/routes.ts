@@ -6,6 +6,7 @@ import type {
   ListStreamsUseCase,
   GetStreamUseCase,
   DeleteStreamUseCase,
+  AttachChatUseCase,
   StartJobUseCase,
   CancelJobUseCase,
   ListClipsUseCase,
@@ -24,6 +25,7 @@ export interface HttpDeps {
   listStreams: ListStreamsUseCase;
   getStream: GetStreamUseCase;
   deleteStream: DeleteStreamUseCase;
+  attachChat: AttachChatUseCase;
   startJob: StartJobUseCase;
   cancelJob: CancelJobUseCase;
   listClips: ListClipsUseCase;
@@ -32,6 +34,8 @@ export interface HttpDeps {
   exportClip: ExportClipUseCase;
   manageQueue: ManageQueueUseCase;
   settings: SettingsUseCase;
+  /** Cache dir for uploaded files. */
+  uploadDir: string;
 }
 
 /** Domain errors → HTTP status codes. */
@@ -63,16 +67,61 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     return c.json(stream);
   });
 
+  // Import VOD by local file path (for large pre-downloaded videos).
   app.post("/api/streams/import-file", async (c) => {
     const body = await c.req.json();
     const result = await deps.importByFile.execute(body);
     return c.json(result, 201);
   });
 
+  // Import VOD by Twitch URL (auto-downloads video + chat).
   app.post("/api/streams/import-url", async (c) => {
     const body = await c.req.json();
     const result = await deps.importByUrl.execute(body);
     return c.json(result, 201);
+  });
+
+  // Upload a VOD file via multipart (for small/medium videos).
+  // Large VODs should use import-file with a path instead.
+  app.post("/api/streams/upload-vod", async (c) => {
+    const form = await c.req.formData();
+    const file = form.get("vod") as File | null;
+    const title = (form.get("title") as string | null) ?? undefined;
+    const streamer = (form.get("streamer") as string | null) ?? undefined;
+    if (!file) return c.json({ error: "No 'vod' file in form data" }, 400);
+
+    await Deno.mkdir(deps.uploadDir, { recursive: true });
+    const vodPath = `${deps.uploadDir}/${file.name}`;
+    await Deno.writeFile(vodPath, new Uint8Array(await file.arrayBuffer()));
+
+    const result = await deps.importByFile.execute({
+      vodPath,
+      title: title ?? file.name.replace(/\.[^.]+$/, ""),
+      ...(streamer !== undefined && { streamer }),
+    });
+    return c.json(result, 201);
+  });
+
+  // Upload a chat file and attach it to an existing stream.
+  app.post("/api/streams/:id/upload-chat", async (c) => {
+    const form = await c.req.formData();
+    const file = form.get("chat") as File | null;
+    if (!file) return c.json({ error: "No 'chat' file in form data" }, 400);
+
+    await Deno.mkdir(deps.uploadDir, { recursive: true });
+    const chatPath = `${deps.uploadDir}/${file.name}`;
+    await Deno.writeFile(chatPath, new Uint8Array(await file.arrayBuffer()));
+
+    const stream = await deps.attachChat.execute(c.req.param("id"), chatPath);
+    return c.json(stream, 200);
+  });
+
+  // Attach chat by local file path (for pre-downloaded chat files).
+  app.post("/api/streams/:id/attach-chat", async (c) => {
+    const body = await c.req.json();
+    if (!body?.chatPath) return c.json({ error: "chatPath required" }, 400);
+    const stream = await deps.attachChat.execute(c.req.param("id"), body.chatPath as string);
+    return c.json(stream, 200);
   });
 
   app.delete("/api/streams/:id", async (c) => {

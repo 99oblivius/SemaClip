@@ -3,8 +3,6 @@ import type { WsEvent } from '$shared/types';
 
 type WsState = { connected: boolean; events: WsEvent[] };
 
-const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
-
 function createWsStore(): Readable<WsState> & {
   connect: () => void;
   onEvent: <T extends WsEvent>(handler: (event: T) => void) => () => void;
@@ -16,6 +14,7 @@ function createWsStore(): Readable<WsState> & {
 
   function connect() {
     if (socket?.readyState === WebSocket.OPEN) return;
+    const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
     socket = new WebSocket(wsUrl);
     socket.onopen = () => set({ connected: true, events: [] });
     socket.onclose = () => set({ connected: false, events: [] });
