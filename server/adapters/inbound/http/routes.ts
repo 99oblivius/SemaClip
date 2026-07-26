@@ -207,7 +207,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
 
   const TARGET_PEAKS = 2000;
   const SAMPLE_RATE = 8000;
-  const BATCH_SIZE = 50;
+  const BATCH_SIZE = 10; // small first-batch latency (~1s), 200 total SSE events
 
   /** Run ffmpeg for a time range, compute peaks, yield batches. */
   async function* streamPeaks(
@@ -218,6 +218,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     totalSamples: number,
   ): AsyncGenerator<{ firstIndex: number; startTime: number; peaks: number[] }> {
     const args = [
+      "-threads", "0",        // auto-detect CPU cores
       "-vn", "-ac", "1", "-ar", String(SAMPLE_RATE), "-f", "f32le", "-",
     ];
     if (startSec > 0) args.unshift("-ss", String(startSec));
