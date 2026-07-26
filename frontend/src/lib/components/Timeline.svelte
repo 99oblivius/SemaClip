@@ -471,12 +471,12 @@
 >
   <canvas bind:this={canvasEl} class="absolute inset-0 h-full w-full"></canvas>
 
-  <!-- Playhead: 1px red line + centered triangle cap, pixel-snapped -->
+  <!-- Playhead: 2px red line + centered triangle, pixel-snapped, no transforms -->
   <div
     class="pointer-events-none absolute top-0 bottom-0"
-    style="left: {Math.round(timeToX(player.currentTime))}px; width: 1px; background: #cc0000;"
+    style="left: {Math.round(timeToX(player.currentTime))}px; width: 2px; background: #cc0000;"
   >
-    <div class="absolute -top-0 left-1/2 -translate-x-1/2" style="border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 6px solid #cc0000;"></div>
+    <div class="absolute -top-0" style="left: -3px; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 6px solid #cc0000;"></div>
   </div>
 
   <!-- Endpoint handles for selected clip (HTML for better hit targets) -->
