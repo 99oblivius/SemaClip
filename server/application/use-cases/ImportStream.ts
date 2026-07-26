@@ -3,6 +3,7 @@ import type {
   VodDownloadPort,
   EventBus,
   FileSystemPort,
+  MediaProbePort,
 } from "@/application/ports/outbound.ts";
 import { DOWNLOAD_PROGRESS_TOPIC } from "@/application/ports/outbound.ts";
 import type { ImportByFileInput, ImportByUrlInput, ImportResult } from "shared/types";
@@ -12,17 +13,20 @@ export class ImportStreamByFileUseCase {
   constructor(
     private readonly streams: StreamRepository,
     private readonly fs: FileSystemPort,
+    private readonly probe: MediaProbePort,
   ) {}
 
   async execute(input: ImportByFileInput): Promise<ImportResult> {
     if (!(await this.fs.exists(input.vodPath))) {
       throw new Error(`VOD file not found: ${input.vodPath}`);
     }
+    const duration = await this.probe.probeDuration(input.vodPath);
     const stream = createStream({
       vodPath: input.vodPath,
       chatPath: input.chatPath ?? null,
       title: input.title,
       streamer: input.streamer,
+      duration: duration ?? undefined,
     });
     await this.streams.save(stream);
     return { stream, downloadJobId: null };

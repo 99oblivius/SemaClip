@@ -77,7 +77,7 @@ export function buildContainer(config: AppConfig): AppContainer {
   const engine = new PythonEngineAdapter(config.engineBinaryPath, bus, config.gpuDevice);
 
   // Use cases
-  const importByFile = new ImportStreamByFileUseCase(streamRepo, fs);
+  const importByFile = new ImportStreamByFileUseCase(streamRepo, fs, ffmpeg);
   const importByUrl = new ImportStreamByUrlUseCase(streamRepo, vodDownloader, fs, bus, config.cacheDir);
   const listStreams = new ListStreamsUseCase(streamRepo);
   const getStream = new GetStreamUseCase(streamRepo);

@@ -72,6 +72,13 @@ export interface VodDownloadPort {
   isSupported(url: string): boolean;
 }
 
+// ── Media probe port (ffprobe) ────────────────────────────────
+
+export interface MediaProbePort {
+  /** Probe a video file's duration in seconds. Returns null on failure. */
+  probeDuration(vodPath: string): Promise<number | null>;
+}
+
 // ── FFmpeg export port ──────────────────────────────────────────
 
 export interface FFmpegExportPort {

@@ -1,17 +1,33 @@
-import type { FFmpegExportPort } from "@/application/ports/outbound.ts";
+import type { FFmpegExportPort, MediaProbePort } from "@/application/ports/outbound.ts";
 
 type ExportInput = Parameters<FFmpegExportPort["exportClip"]>[0];
 
-/** FFmpeg adapter — builds the filter graph for crop, aspect ratio, and caption burn-in. */
-export class FFmpegAdapter implements FFmpegExportPort {
-  constructor(private readonly binaryPath = "ffmpeg") {}
+/** FFmpeg adapter — builds the filter graph for crop, aspect ratio, and caption burn-in.
+ *  Also implements MediaProbePort via ffprobe for duration detection. */
+export class FFmpegAdapter implements FFmpegExportPort, MediaProbePort {
+  constructor(private readonly binaryPath = "ffmpeg", private readonly probeBinaryPath = "ffprobe") {}
 
   async exportClip(input: ExportInput): Promise<{ exportPath: string; durationMs: number }> {
     const start = performance.now();
     const duration = input.endTime - input.startTime;
     const args = this.buildArgs(input, duration);
-    await this.run(args);
     return { exportPath: input.outputPath, durationMs: performance.now() - start };
+  }
+
+  async probeDuration(vodPath: string): Promise<number | null> {
+    try {
+      const cmd = new Deno.Command(this.probeBinaryPath, {
+        args: ["-v", "quiet", "-print_format", "json", "-show_format", vodPath],
+        stdout: "piped",
+        stderr: "piped",
+      });
+      const out = await cmd.output();
+      const info = JSON.parse(new TextDecoder().decode(out.stdout));
+      const d = parseFloat(info.format?.duration ?? "0");
+      return d > 0 ? d : null;
+    } catch {
+      return null;
+    }
   }
 
   // ── Filter graph construction ──
