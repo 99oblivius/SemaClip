@@ -1,6 +1,7 @@
 import type {
   StreamRepository,
   JobRepository,
+  ClipRepository,
   EnginePort,
   EventBus,
   FileSystemPort,
@@ -8,7 +9,7 @@ import type {
 import { ENGINE_EVENT_TOPIC, JOB_STATUS_TOPIC, STREAM_STATUS_TOPIC } from "@/application/ports/outbound.ts";
 import type { Job, JobConfig, EngineEvent, Stream, Clip } from "shared/types";
 import { createJob, start as startJob, fail as failJob, complete as completeJob, cancel as cancelJob, isTerminal } from "@/domain/mod.ts";
-import { createClip, type ClipCandidate } from "@/domain/mod.ts";
+import { createClip } from "@/domain/mod.ts";
 
 /**
  * Orchestrates the full ML pipeline lifecycle:
@@ -18,6 +19,7 @@ export class StartJobUseCase {
   constructor(
     private readonly streams: StreamRepository,
     private readonly jobs: JobRepository,
+    private readonly clips: ClipRepository,
     private readonly engine: EnginePort,
     private readonly bus: EventBus,
     private readonly fs: FileSystemPort,
@@ -33,10 +35,12 @@ export class StartJobUseCase {
     const job = createJob({ streamId, config }, position);
     await this.jobs.save(job);
 
-    // If no job is running, start this one immediately.
+    // If no job is running, start this one in the background.
     const running = await this.jobs.listRunning();
     if (running.length === 0) {
-      await this.runJob(job, stream);
+      this.runJob(job, stream).catch((err) => {
+        console.error(`Job ${job.id} failed:`, err);
+      });
     }
 
     return job;
@@ -69,7 +73,6 @@ export class StartJobUseCase {
       unsub();
     }
   }
-
   private async handleEngineEvent(event: EngineEvent, jobId: string, stream: Stream): Promise<void> {
     switch (event.type) {
       case "clip": {
@@ -84,10 +87,9 @@ export class StartJobUseCase {
             peakTime: event.peak,
             justification: event.justification,
           },
-          null, // rank assigned on completion
+          null,
         );
-        // Persist via a side channel — the use case needs the clip repo.
-        // This is handled by the composition root wiring.
+        await this.clips.save(clip);
         this.bus.publish("clip:new", clip);
         break;
       }
@@ -100,7 +102,7 @@ export class StartJobUseCase {
         break;
       }
       default:
-        // progress, segment, candidate events are forwarded to WS clients via the bus.
+        // progress, segment, candidate events forwarded to WS clients via the bus.
         break;
     }
   }

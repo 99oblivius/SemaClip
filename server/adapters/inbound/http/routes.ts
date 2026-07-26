@@ -34,8 +34,22 @@ export interface HttpDeps {
   settings: SettingsUseCase;
 }
 
+/** Domain errors → HTTP status codes. */
+function errorStatus(msg: string): 400 | 404 | 500 {
+  if (/not found|not available/i.test(msg)) return 404;
+  if (/already terminal|can only reorder|invalid|unsupported|not yet downloaded/i.test(msg)) return 400;
+  return 500;
+}
+
 export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   const app = new Hono();
+
+  app.onError((err, c) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    const status = errorStatus(msg);
+    if (status === 500) console.error("Unhandled error:", err);
+    return c.json({ error: msg }, status);
+  });
 
   // ── Streams ──
   app.get("/api/streams", async (c) => {

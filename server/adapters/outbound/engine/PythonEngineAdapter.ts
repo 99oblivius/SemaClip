@@ -34,8 +34,13 @@ export class PythonEngineAdapter implements EnginePort {
     const env: Record<string, string> = {};
     if (this.gpuDevice !== null) env["CUDA_VISIBLE_DEVICES"] = String(this.gpuDevice);
 
-    this.process = new Deno.Command(this.engineBinaryPath, {
-      args: ["--ipc"],
+    // Split engineBinaryPath into binary + pre-args (e.g. "python3 /path/engine.py")
+    const parts = this.engineBinaryPath.split(/\s+/);
+    const cmd = parts[0] ?? this.engineBinaryPath;
+    const preArgs = parts.slice(1);
+
+    this.process = new Deno.Command(cmd, {
+      args: [...preArgs, "--ipc"],
       stdin: "piped",
       stdout: "piped",
       stderr: "piped",
@@ -46,6 +51,14 @@ export class PythonEngineAdapter implements EnginePort {
     this.readerLoop = this.readEvents();
 
     await this.send(command);
+
+    // Wait for the engine process to exit — start() returns only when the
+    // engine finishes, so the use-case's event subscription stays alive.
+    const status = await this.process.status;
+    await this.cleanup();
+    if (!status.success && status.code !== 0) {
+      throw new Error(`Engine exited with code ${status.code}`);
+    }
   }
 
   async cancel(): Promise<void> {

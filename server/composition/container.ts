@@ -81,7 +81,7 @@ export function buildContainer(config: AppConfig): AppContainer {
   const listStreams = new ListStreamsUseCase(streamRepo);
   const getStream = new GetStreamUseCase(streamRepo);
   const deleteStream = new DeleteStreamUseCase(streamRepo, jobRepo);
-  const startJob = new StartJobUseCase(streamRepo, jobRepo, engine, bus, fs);
+  const startJob = new StartJobUseCase(streamRepo, jobRepo, clipRepo, engine, bus, fs);
   const cancelJob = new CancelJobUseCase(jobRepo, engine, bus);
   const listClips = new ListClipsUseCase(clipRepo);
   const getClip = new GetClipUseCase(clipRepo);

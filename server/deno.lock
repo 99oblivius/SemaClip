@@ -2,20 +2,49 @@
   "version": "5",
   "specifiers": {
     "jsr:@hono/hono@^4.6.14": "4.12.32",
-    "npm:better-sqlite3@^11.7.0": "11.10.0",
-    "npm:drizzle-orm@~0.38.3": "0.38.4_better-sqlite3@11.10.0"
+    "jsr:@std/assert@^1.0.10": "1.0.19",
+    "jsr:@std/bytes@^1.0.6": "1.0.6",
+    "jsr:@std/internal@^1.0.12": "1.0.14",
+    "jsr:@std/internal@^1.0.14": "1.0.14",
+    "jsr:@std/path@^1.0.8": "1.1.6",
+    "jsr:@std/streams@^1.0.5": "1.1.1",
+    "npm:drizzle-orm@~0.38.3": "0.38.4_better-sqlite3@12.11.1"
   },
   "jsr": {
     "@hono/hono@4.12.32": {
       "integrity": "e1274e968ee724176d7e35946c184d3cb8508f05e3f8ae6cee157c4f29ef148d"
+    },
+    "@std/assert@1.0.19": {
+      "integrity": "eaada96ee120cb980bc47e040f82814d786fe8162ecc53c91d8df60b8755991e",
+      "dependencies": [
+        "jsr:@std/internal@^1.0.12"
+      ]
+    },
+    "@std/bytes@1.0.6": {
+      "integrity": "f6ac6adbd8ccd99314045f5703e23af0a68d7f7e58364b47d2c7f408aeb5820a"
+    },
+    "@std/internal@1.0.14": {
+      "integrity": "291516b3d4c35024d6ffbc0a9df5bf4c64116e05b50012cf846710152d2ffdf7"
+    },
+    "@std/path@1.1.6": {
+      "integrity": "c68485c2a4dfbb5ae3cc74fae4e8c4e5d874cf8a8ed12927917235c758b46cbe",
+      "dependencies": [
+        "jsr:@std/internal@^1.0.14"
+      ]
+    },
+    "@std/streams@1.1.1": {
+      "integrity": "92556d350e537e9dce527a6d08f6f15be3ff65e656079dea69d15252187c7613",
+      "dependencies": [
+        "jsr:@std/bytes"
+      ]
     }
   },
   "npm": {
     "base64-js@1.5.1": {
       "integrity": "sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA=="
     },
-    "better-sqlite3@11.10.0": {
-      "integrity": "sha512-EwhOpyXiOEL/lKzHz9AW1msWFNzGc/z+LzeB3/jnFJpxu+th2yqvzsSWas1v9jgs9+xiXJcD5A8CJxAG2TaghQ==",
+    "better-sqlite3@12.11.1": {
+      "integrity": "sha512-dq9AtApgg5PGFtBzPFSBl3HZQjHok5gaQCM6zh2Yk0aSmDCs1CbnVI8/HgASQkNKsWFpseIO9beg5xxpYhbIfA==",
       "dependencies": [
         "bindings",
         "prebuild-install"
@@ -58,7 +87,7 @@
     "detect-libc@2.1.2": {
       "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ=="
     },
-    "drizzle-orm@0.38.4_better-sqlite3@11.10.0": {
+    "drizzle-orm@0.38.4_better-sqlite3@12.11.1": {
       "integrity": "sha512-s7/5BpLKO+WJRHspvpqTydxFob8i1vo2rEx4pY6TGY7QSMuUfWUuzaY0DIpXCkgHOo37BaFC+SJQb99dDUXT3Q==",
       "dependencies": [
         "better-sqlite3"
@@ -227,7 +256,6 @@
       "jsr:@std/assert@^1.0.10",
       "jsr:@std/path@^1.0.8",
       "jsr:@std/streams@^1.0.5",
-      "npm:better-sqlite3@^11.7.0",
       "npm:drizzle-orm@~0.38.3"
     ]
   }

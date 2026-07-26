@@ -1,4 +1,4 @@
-import { eq, and, asc, ne } from "drizzle-orm";
+import { eq, and, asc } from "drizzle-orm";
 import type { Db } from "./db.ts";
 import { schema } from "./db.ts";
 import type {
@@ -275,6 +275,3 @@ export class SqlitePersonaRepository implements PersonaRepository {
     }).run();
   }
 }
-
-// Suppress unused import — ne is used in future filter expansion
-void ne;
