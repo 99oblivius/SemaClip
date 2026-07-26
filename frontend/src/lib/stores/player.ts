@@ -13,8 +13,8 @@ export interface PlayerState {
   playbackRate: number;    // 0.25-2
   isFullscreen: boolean;
   isScrubbing: boolean;
+  followClip: boolean;     // timeline view follows the selected clip's bounds
 }
-
 export const playerStore = writable<PlayerState>({
   currentTime: 0,
   duration: 0,
@@ -28,6 +28,7 @@ export const playerStore = writable<PlayerState>({
   playbackRate: 1,
   isFullscreen: false,
   isScrubbing: false,
+  followClip: false,
 });
 
 export function seek(time: number) {
@@ -42,6 +43,25 @@ export function selectClip(clipId: string | null) {
   playerStore.update((s) => ({ ...s, currentClipId: clipId }));
 }
 
+/** Set the visible timeline window directly. */
+export function setView(start: number, end: number): void {
+  playerStore.update((s) => ({ ...s, viewStart: start, viewEnd: end, zoomLevel: s.duration / Math.max(1, end - start) }));
+}
+
+/** Frame the timeline view around a clip with 10% padding on each side. */
+export function frameClip(clipStart: number, clipEnd: number, duration: number): void {
+  const clipLen = clipEnd - clipStart;
+  const pad = clipLen * 0.1;
+  let start = Math.max(0, clipStart - pad);
+  let end = Math.min(duration, clipEnd + pad);
+  // If padding clipped at 0 or duration, redistribute the saved pad to the other side.
+  const leftover = (pad - (clipStart - start)) + (pad - (end - clipEnd));
+  if (leftover > 0) {
+    if (start === 0) end = Math.min(duration, end + leftover);
+    else if (end === duration) start = Math.max(0, start - leftover);
+  }
+  playerStore.update((s) => ({ ...s, viewStart: start, viewEnd: end, followClip: true, zoomLevel: duration / Math.max(1, end - start) }));
+}
 export function setZoom(level: number, duration: number, centerTime: number) {
   const clamped = Math.max(1, Math.min(200, level));
   const windowSec = duration / clamped;

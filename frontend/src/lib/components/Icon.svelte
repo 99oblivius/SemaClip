@@ -5,7 +5,7 @@
     | 'queue' | 'check' | 'alert' | 'chevron-right' | 'chevron-left' | 'close' | 'search'
     | 'grid' | 'waveform' | 'clock' | 'cpu' | 'volume' | 'volume-mute' | 'expand' | 'compress'
     | 'rewind' | 'fast-forward' | 'zoom-in' | 'zoom-out' | 'keyboard' | 'back' | 'shuffle'
-    | 'eye' | 'bookmark' | 'film' | 'arrow-left' | 'arrow-right' | 'gauge';
+    | 'eye' | 'bookmark' | 'film' | 'arrow-left' | 'arrow-right' | 'gauge' | 'frame';
 
   interface Props {
     name: IconName;
@@ -42,8 +42,9 @@
     waveform: 'M3 12h2M7 8v8M11 5v14M15 9v6M19 11v2M21 12h0',
     clock: 'M12 4a8 8 0 100 16 8 8 0 000-16zM12 8v4l3 2',
     cpu: 'M6 6h12v12H6zM9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3',
-    volume: 'M11 5L6 9H2v6h4l5 4zM15 9a3 3 0 010 6M18 6a7 7 0 010 12',
-    'volume-mute': 'M11 5L6 9H2v6h4l5 4zM23 9l-6 6M17 9l6 6',
+    volume: 'M11 5L6 9H2v6h4l5 4zM15 9a3 3 0 010 6 M18 6a7 7 0 010 12',
+    'volume-mute': 'M11 5L6 9H2v6h4l5 4z M23 9l-6 6 M17 9l6 6',
+    frame: 'M4 4h16v16H4z M4 9h3 M17 9h3 M4 15h3 M17 15h3 M9 4v3 M9 17v3 M15 4v3 M15 17v3',
     expand: 'M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6',
     compress: 'M9 3v6H3M15 3v6h6M9 21v-6H3M15 21v-6h6',
     rewind: 'M11 5L2 12l9 7zM22 5l-9 7 9 7z',

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createQuery } from '@tanstack/svelte-query';
   import { apiClient } from '$lib/api/client';
-  import { playerStore, setZoom, pan } from '$lib/stores/player';
+  import { playerStore, setZoom } from '$lib/stores/player';
   import type { Clip } from '$shared/types';
   import { onMount, onDestroy } from 'svelte';
 
@@ -29,13 +29,11 @@
   let containerEl = $state<HTMLDivElement | undefined>(undefined);
   let rafId = 0;
   let hoveredClip = $state<Clip | null>(null);
-  let tooltipX = $state(0);
-  let tooltipY = $state(0);
-  let isDraggingPlayhead = $state(false);
+  let hoverX = $state(-1);           // -1 = not hovering
+  let isScrubbing = $state(false);
   let isDraggingEndpoint = $state(false);
   let draggingEndpoint: 'start' | 'end' | null = null;
 
-  // Fetch waveform + chat density in parallel.
   const waveformQuery = createQuery(() => ({
     queryKey: ['waveform', streamId],
     queryFn: () => apiClient.waveform(streamId),
@@ -49,18 +47,15 @@
 
   const waveform = $derived(waveformQuery.data?.peaks ?? []);
   const chatDensity = $derived(chatQuery.data?.density ?? []);
-
   const player = $playerStore;
 
-  // Visible window derived from player state.
   const viewStart = $derived(player.viewStart || 0);
   const viewEnd = $derived(player.viewEnd || duration);
   const viewSpan = $derived(Math.max(1, viewEnd - viewStart));
 
   function timeToX(t: number): number {
     if (!containerEl) return 0;
-    const w = containerEl.clientWidth;
-    return ((t - viewStart) / viewSpan) * w;
+    return ((t - viewStart) / viewSpan) * containerEl.clientWidth;
   }
 
   function xToTime(x: number): number {
@@ -68,6 +63,27 @@
     const w = containerEl.clientWidth;
     const t = viewStart + (x / w) * viewSpan;
     return Math.max(0, Math.min(duration, t));
+  }
+
+  const selectedClip = $derived(clips.find((c) => c.id === currentClipId));
+
+  /** Hit-test: is the cursor near an endpoint handle of the selected clip? */
+  function endpointAt(x: number): 'start' | 'end' | null {
+    if (!selectedClip) return null;
+    const startX = timeToX(selectedClip.startTime);
+    const endX = timeToX(selectedClip.endTime);
+    if (Math.abs(x - startX) < 7) return 'start';
+    if (Math.abs(x - endX) < 7) return 'end';
+    return null;
+  }
+
+  /** Hit-test: is the cursor near a clip mark? */
+  function clipAt(t: number): Clip | null {
+    const threshold = viewSpan / (containerEl?.clientWidth ?? 1) * 8;
+    for (const clip of clips) {
+      if (Math.abs(clip.peakTime - t) < threshold) return clip;
+    }
+    return null;
   }
 
   function draw() {
@@ -88,18 +104,18 @@
 
     const midY = h / 2;
 
-    // ── Layer 1a: Chat density (area chart below centerline) ──
+    // ── Chat density (area chart) ──
     if (chatDensity.length > 0) {
       const chatStart = Math.floor(viewStart);
       const chatEnd = Math.ceil(viewEnd);
       const slice = chatDensity.slice(chatStart, chatEnd + 1);
       const maxDensity = Math.max(1, ...slice);
-      ctx.fillStyle = 'rgba(46, 46, 58, 0.8)'; // surface-3
+      ctx.fillStyle = 'rgba(46, 46, 58, 0.8)';
       ctx.beginPath();
       ctx.moveTo(0, h);
       slice.forEach((d, i) => {
         const x = (i / Math.max(1, slice.length - 1)) * w;
-        const barH = (d / maxDensity) * (h * 0.35);
+        const barH = (d / maxDensity) * (h * 0.3);
         ctx.lineTo(x, h - barH);
       });
       ctx.lineTo(w, h);
@@ -107,14 +123,14 @@
       ctx.fill();
     }
 
-    // ── Layer 1b: Audio waveform (mirrored vertical fill, centered) ──
+    // ── Audio waveform (mirrored) ──
     if (waveform.length > 0) {
       const peakStart = Math.floor((viewStart / duration) * waveform.length);
       const peakEnd = Math.ceil((viewEnd / duration) * waveform.length);
       const slice = waveform.slice(peakStart, peakEnd + 1);
       const samplesPerPixel = Math.max(1, Math.floor(slice.length / w));
-      ctx.fillStyle = 'rgba(113, 113, 122, 0.6)'; // ash-dim
-      const ampH = h * 0.4; // waveform half-height
+      ctx.fillStyle = 'rgba(113, 113, 122, 0.55)';
+      const ampH = h * 0.35;
       for (let x = 0; x < w; x++) {
         const idx = Math.floor((x / w) * slice.length);
         let peak = 0;
@@ -127,47 +143,68 @@
       }
     }
 
-    // ── Layer 2: Regime boundaries (faint vertical hairlines) ──
-    // Draw at regular intervals as placeholder regime markers.
-    ctx.strokeStyle = 'rgba(45, 45, 58, 0.5)'; // border
+    // ── Time axis (adaptive tick spacing) ──
+    ctx.strokeStyle = 'rgba(45, 45, 58, 0.4)';
     ctx.lineWidth = 1;
-    const regimeInterval = 300; // every 5 min
-    for (let t = Math.ceil(viewStart / regimeInterval) * regimeInterval; t < viewEnd; t += regimeInterval) {
+    ctx.font = '10px JetBrains Mono';
+  ctx.fillStyle = 'rgba(161, 161, 170, 0.7)';
+    ctx.textBaseline = 'top';
+
+    // Pick a "nice" interval so labels never overlap. Target ~80px between labels.
+    const minLabelPx = 80;
+    const targetTicks = Math.max(2, Math.floor(w / minLabelPx));
+    const rawStep = viewSpan / targetTicks;
+    // Snap to a nice value: 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600…
+    const niceSteps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400];
+    let step = niceSteps[niceSteps.length - 1] ?? 3600;
+    for (const s of niceSteps) {
+      if (s >= rawStep) { step = s; break; }
+    }
+
+    // Draw ticks + labels
+    const firstTick = Math.ceil(viewStart / step) * step;
+    let lastLabelEnd = -Infinity;
+    for (let t = firstTick; t <= viewEnd; t += step) {
       const x = timeToX(t);
+      // Hairline
+      ctx.strokeStyle = 'rgba(45, 45, 58, 0.4)';
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, h);
       ctx.stroke();
-      // Label
-      ctx.fillStyle = 'rgba(113, 113, 122, 0.6)';
-      ctx.font = '10px JetBrains Mono';
-      ctx.fillText(fmtRegime(t), x + 4, 12);
+
+      // Label — only if it doesn't overlap the previous one
+      const label = fmtTick(t, step);
+      const labelW = ctx.measureText(label).width;
+      const labelX = Math.max(2, Math.min(x + 4, w - labelW - 2));
+      if (labelX < lastLabelEnd + 4) continue; // skip overlapping label
+      ctx.fillText(label, labelX, 2);
+      lastLabelEnd = labelX + labelW;
     }
 
-    // ── Layer 3: Clip marks (vertical ticks) ──
-    const selectedClip = clips.find((c) => c.id === currentClipId);
+    // ── Clip marks ──
     for (const clip of clips) {
       const x = timeToX(clip.peakTime);
       if (x < -10 || x > w + 10) continue;
       const isSelected = clip.id === currentClipId;
       if (isSelected) {
-        // Glow behind selected clip
+        // Selected clip bracket + glow
         const grad = ctx.createRadialGradient(x, h / 2, 0, x, h / 2, 40);
-        grad.addColorStop(0, 'rgba(204, 0, 0, 0.2)');
+        grad.addColorStop(0, 'rgba(204, 0, 0, 0.15)');
         grad.addColorStop(1, 'rgba(204, 0, 0, 0)');
         ctx.fillStyle = grad;
         ctx.fillRect(x - 40, 0, 80, h);
-        // Full-height tick
+        // Peak tick
         ctx.strokeStyle = '#cc0000';
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.moveTo(x, 0);
         ctx.lineTo(x, h);
         ctx.stroke();
-        // Bracket: start/end hairlines
+        // Start/end bracket
         const startX = timeToX(clip.startTime);
         const endX = timeToX(clip.endTime);
-        ctx.strokeStyle = '#cc0000';
+        ctx.strokeStyle = 'rgba(204, 0, 0, 0.6)';
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(startX, 0);
@@ -175,27 +212,49 @@
         ctx.moveTo(endX, 0);
         ctx.lineTo(endX, h);
         ctx.stroke();
-        // Endpoint handles
-        ctx.fillStyle = '#cc0000';
-        ctx.fillRect(startX - 3, 0, 6, 8);
-        ctx.fillRect(endX - 3, 0, 6, 8);
+        // Endpoint handles (drawn in HTML for better hit targets)
       } else {
-        // Non-selected: zinc-400, height proportional to score
-        const tickH = 4 + clip.score * (h * 0.4);
-        ctx.strokeStyle = hoveredClip?.id === clip.id ? '#a1a1aa' : 'rgba(161, 161, 170, 0.6)';
-        ctx.lineWidth = 1;
+        // Non-selected: zinc tick, height ∝ score
+        const tickH = 4 + clip.score * (h * 0.35);
+        const isHovered = hoveredClip?.id === clip.id;
+        ctx.strokeStyle = isHovered ? '#a1a1aa' : 'rgba(161, 161, 170, 0.5)';
+        ctx.lineWidth = isHovered ? 2 : 1;
         ctx.beginPath();
         ctx.moveTo(x, h - tickH);
         ctx.lineTo(x, h);
         ctx.stroke();
       }
     }
+
+    // ── Hover cursor line (seek preview) ──
+    if (hoverX >= 0 && !isDraggingEndpoint) {
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(hoverX, 0);
+      ctx.lineTo(hoverX, h);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
   }
 
-  function fmtRegime(t: number): string {
-    const m = Math.floor(t / 60);
-    const h = Math.floor(m / 60);
-    return h > 0 ? `${h}h${m % 60}m` : `${m}m`;
+  /** Format a tick label. Uses the step to pick the right precision:
+   *  - step < 60s: show seconds (e.g. "2:14" or "0:45")
+   *  - step < 3600s: show minutes (e.g. "5:00" or "42:00")
+   *  - step >= 3600s: show hours+minutes (e.g. "1:30:00" or "2:00:00")
+   *  All zero-padded for alignment. */
+  function fmtTick(t: number, step: number): string {
+    const totalSec = Math.round(t);
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    const hh = String(h).padStart(2, '0');
+    const mm = String(m).padStart(2, '0');
+    const ss = String(s).padStart(2, '0');
+    if (step >= 3600) return `${hh}:${mm}:00`;
+    if (step >= 60) return `${hh}:${mm}`;
+    return `${mm}:${ss}`;
   }
 
   function fmtTime(sec: number): string {
@@ -212,7 +271,6 @@
   }
 
   onMount(() => {
-    // Initialize view to full VOD.
     playerStore.update((s) => ({
       ...s,
       viewStart: 0,
@@ -224,26 +282,31 @@
 
   onDestroy(() => cancelAnimationFrame(rafId));
 
-  // Redraw when data arrives.
   $effect(() => {
     if (waveformQuery.data || chatQuery.data) draw();
   });
 
-  function handleMouseMove(e: MouseEvent) {
-    if (!containerEl) return;
-    const rect = containerEl.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    tooltipX = x;
-    tooltipY = e.clientY - rect.top;
+  // ── Unified mouse handling ──
+  // Default: seek/scrub. Click clip mark: select. Hover endpoint handle: drag.
 
-    if (isDraggingPlayhead) {
-      const t = xToTime(x);
+  function getMouseX(e: MouseEvent): number {
+    if (!containerEl) return 0;
+    return e.clientX - containerEl.getBoundingClientRect().left;
+  }
+
+  function handleMouseMove(e: MouseEvent) {
+    const x = getMouseX(e);
+    hoverX = x;
+    const t = xToTime(x);
+
+    if (isScrubbing) {
+      // Live-seek while dragging — immediate feedback.
+      if (onSeek) onSeek(t);
       playerStore.update((s) => ({ ...s, currentTime: t, isScrubbing: true }));
       return;
     }
 
     if (isDraggingEndpoint && selectedClip && onAdjustEndpoints) {
-      const t = xToTime(x);
       if (draggingEndpoint === 'start') {
         onAdjustEndpoints(selectedClip, Math.min(t, selectedClip.endTime - 1), selectedClip.endTime);
       } else {
@@ -252,76 +315,71 @@
       return;
     }
 
-    // Hover detection on clip marks.
-    const t = xToTime(x);
-    let found: Clip | null = null;
-    for (const clip of clips) {
-      if (Math.abs(clip.peakTime - t) < viewSpan / containerEl.clientWidth * 8) {
-        found = clip;
-        break;
-      }
+    // Hover detection: endpoints first, then clip marks.
+    const ep = endpointAt(x);
+    if (ep && containerEl) {
+      containerEl.style.cursor = 'ew-resize';
+      hoveredClip = null;
+      return;
     }
-    hoveredClip = found;
+    const clip = clipAt(t);
+    if (containerEl) {
+      containerEl.style.cursor = clip ? 'pointer' : 'text';
+    }
+    hoveredClip = clip;
   }
 
   function handleMouseDown(e: MouseEvent) {
-    if (!containerEl) return;
-    const rect = containerEl.getBoundingClientRect();
-    const x = e.clientX - rect.left;
+    const x = getMouseX(e);
     const t = xToTime(x);
 
-    // Check if clicking on endpoint handle of selected clip.
-    const sc = clips.find((c) => c.id === currentClipId);
-    if (sc) {
-      const startX = timeToX(sc.startTime);
-      const endX = timeToX(sc.endTime);
-      if (Math.abs(x - startX) < 6) {
-        isDraggingEndpoint = true;
-        draggingEndpoint = 'start';
-        return;
-      }
-      if (Math.abs(x - endX) < 6) {
-        isDraggingEndpoint = true;
-        draggingEndpoint = 'end';
-        return;
-      }
+    // 1. Endpoint drag?
+    const ep = endpointAt(x);
+    if (ep) {
+      isDraggingEndpoint = true;
+      draggingEndpoint = ep;
+      return;
     }
 
-    // Check if clicking on a clip mark.
-    for (const clip of clips) {
-      if (Math.abs(clip.peakTime - t) < viewSpan / containerEl.clientWidth * 8) {
-        onSelectClip(clip);
-        return;
-      }
+    // 2. Clip mark click? Select it (don't seek).
+    const clip = clipAt(t);
+    if (clip) {
+      onSelectClip(clip);
+      return;
     }
 
-    // Otherwise, scrub playhead.
-    isDraggingPlayhead = true;
+    // 3. Otherwise: seek immediately + begin scrub.
+    isScrubbing = true;
+    if (onSeek) onSeek(t);
     playerStore.update((s) => ({ ...s, currentTime: t, isScrubbing: true }));
   }
 
   function handleMouseUp() {
-    if (isDraggingPlayhead && onSeek) {
-      onSeek(player.currentTime);
-    }
-    isDraggingPlayhead = false;
+    isScrubbing = false;
     isDraggingEndpoint = false;
     draggingEndpoint = null;
     playerStore.update((s) => ({ ...s, isScrubbing: false }));
   }
 
+  function handleMouseLeave() {
+    hoverX = -1;
+    hoveredClip = null;
+    handleMouseUp();
+  }
+
   function handleWheel(e: WheelEvent) {
     e.preventDefault();
     if (!containerEl) return;
-    const rect = containerEl.getBoundingClientRect();
-    const x = e.clientX - rect.left;
+    const x = getMouseX(e);
     const centerTime = xToTime(x);
     const factor = e.deltaY > 0 ? 0.8 : 1.25;
     const newZoom = (player.zoomLevel || 1) * factor;
     setZoom(newZoom, duration, centerTime);
   }
 
-  let selectedClip = $derived(clips.find((c) => c.id === currentClipId));
+  // Endpoint handle positions for HTML overlay
+  const selectedStartX = $derived(selectedClip ? timeToX(selectedClip.startTime) : -1);
+  const selectedEndX = $derived(selectedClip ? timeToX(selectedClip.endTime) : -1);
 </script>
 
 <div
@@ -336,7 +394,7 @@
   onmousemove={handleMouseMove}
   onmousedown={handleMouseDown}
   onmouseup={handleMouseUp}
-  onmouseleave={handleMouseUp}
+  onmouseleave={handleMouseLeave}
   onwheel={handleWheel}
 >
   <canvas bind:this={canvasEl} class="absolute inset-0 h-full w-full"></canvas>
@@ -349,20 +407,42 @@
     <div class="absolute -top-0 -left-1.5" style="border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 6px solid #cc0000;"></div>
   </div>
 
-  <!-- Hover tooltip -->
-  {#if hoveredClip}
+  <!-- Endpoint handles for selected clip (HTML for better hit targets) -->
+  {#if selectedClip && selectedStartX >= 0}
     <div
-      class="pointer-events-none absolute z-10 rounded-md border border-border-strong bg-surface-2 px-2 py-1 font-mono text-xs text-ink shadow-lg"
-      style="left: {Math.min(tooltipX + 12, (containerEl?.clientWidth ?? 0) - 120)}px; top: {tooltipY + 12}px"
+      class="absolute top-0 h-full w-2 -translate-x-1/2 cursor-ew-resize"
+      style="left: {selectedStartX}px"
+      role="button"
+      aria-label="Drag clip start"
+      tabindex={0}
+    ></div>
+    <div
+      class="absolute top-0 h-full w-2 -translate-x-1/2 cursor-ew-resize"
+      style="left: {selectedEndX}px"
+      role="button"
+      aria-label="Drag clip end"
+      tabindex={0}
+    ></div>
+  {/if}
+
+  <!-- Hover tooltip: time preview + clip info -->
+  {#if hoverX >= 0}
+    <div
+      class="pointer-events-none absolute z-10 -translate-x-1/2 rounded-md border border-border-strong bg-surface-2 px-2 py-1 font-mono text-xs text-ink shadow-lg"
+      style="left: {Math.min(Math.max(hoverX, 60), (containerEl?.clientWidth ?? 0) - 60)}px; top: 2px;"
     >
-      <span class="text-accent">{hoveredClip.axis.toUpperCase()}</span>
-      <span class="text-ash"> · {hoveredClip.score.toFixed(2)}</span>
-      <span class="text-ash-dim"> · {fmtTime(hoveredClip.peakTime)}</span>
+      {#if hoveredClip}
+        <span class="text-accent">{hoveredClip.axis.toUpperCase()}</span>
+        <span class="text-ash"> · {hoveredClip.score.toFixed(2)} · </span>
+        <span class="text-ash-dim">{fmtTime(hoveredClip.peakTime)}</span>
+      {:else}
+        <span class="text-ash">{fmtTime(xToTime(hoverX))}</span>
+      {/if}
     </div>
   {/if}
 
   <!-- Zoom indicator -->
-  <div class="pointer-events-none absolute bottom-1 right-2 font-mono text-xs text-ash-dim">
-    {player.zoomLevel > 1 ? `${player.zoomLevel.toFixed(0)}×` : '1×'}
+  <div class="pointer-events-none absolute bottom-0.5 right-1.5 font-mono text-xs text-ash-dim/60">
+    {player.zoomLevel > 1 ? `${player.zoomLevel.toFixed(0)}×` : ''}
   </div>
 </div>

@@ -20,10 +20,14 @@
     {
       title: 'Timeline',
       keys: [
+        { key: 'Click', action: 'Seek to position (timeline is the scrub bar)' },
+        { key: 'Drag', action: 'Scrub through video' },
+        { key: 'Hover', action: 'Preview cursor + time tooltip' },
+        { key: 'Click clip mark', action: 'Select clip (does not seek)' },
+        { key: 'Drag handles', action: 'Adjust clip endpoints' },
+        { key: 'C', action: 'Frame timeline to selected clip bounds' },
         { key: '+ / -', action: 'Zoom timeline in / out' },
         { key: 'Scroll', action: 'Zoom timeline at cursor' },
-        { key: 'Drag playhead', action: 'Scrub through video' },
-        { key: 'Drag handles', action: 'Adjust clip endpoints' },
       ],
     },
     {

@@ -2,7 +2,7 @@
   import { createQuery, createMutation, useQueryClient } from '@tanstack/svelte-query';
   import { apiClient } from '$lib/api/client';
   import { wsStore } from '$lib/stores/ws';
-  import { playerStore, seek, selectClip, setZoom, pan } from '$lib/stores/player';
+  import { playerStore, seek, selectClip, setZoom, pan, frameClip, setView } from '$lib/stores/player';
   import Icon from '$lib/components/Icon.svelte';
   import VideoPlayer from '$lib/components/VideoPlayer.svelte';
   import Timeline from '$lib/components/Timeline.svelte';
@@ -132,6 +132,18 @@
     );
   }
 
+  /** Toggle clip-follow: frame the timeline to the selected clip's bounds
+   *  with 10% padding, or reset to full VOD view. */
+  function handleFollowClip() {
+    if (!currentClip || !stream?.duration) return;
+    if ($playerStore.followClip) {
+      // Reset to full view.
+      setView(0, stream.duration);
+      playerStore.update((s) => ({ ...s, followClip: false }));
+    } else {
+      frameClip(currentClip.startTime, currentClip.endTime, stream.duration);
+    }
+  }
   const AXES: Axis[] = ['hype', 'humor', 'skill', 'awkward', 'emotional', 'tension'];
 
   function handleKey(e: KeyboardEvent) {
@@ -212,6 +224,10 @@
         e.preventDefault();
         playerComp?.toggleFullscreenExported();
         break;
+      case 'c': case 'C':
+        e.preventDefault();
+        handleFollowClip();
+        break;
       case '?':
         e.preventDefault();
         showKeyboardHelp = true;
@@ -286,10 +302,11 @@
         currentClip={currentClip}
         onTimeUpdate={handleTimeUpdate}
         onClipEnd={handleClipEnd}
+        onFollowClip={handleFollowClip}
       />
 
-      <!-- Signal terrain timeline -->
-      <div class="h-24 rounded-md border border-border bg-surface p-1">
+      <!-- Signal terrain timeline — transparent, no darkening wrapper -->
+      <div class="h-20">
         {#if stream?.duration}
           <Timeline
             {streamId}

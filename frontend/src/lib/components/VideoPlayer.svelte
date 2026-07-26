@@ -2,6 +2,7 @@
   import { apiClient } from '$lib/api/client';
   import { playerStore } from '$lib/stores/player';
   import Icon from '$lib/components/Icon.svelte';
+  import VolumeControl from '$lib/components/VolumeControl.svelte';
   import type { Clip } from '$shared/types';
   import { onDestroy } from 'svelte';
   import { browser } from '$app/environment';
@@ -13,6 +14,7 @@
     currentClip: Clip | undefined;
     onTimeUpdate: (time: number) => void;
     onClipEnd: () => void;
+    onFollowClip: () => void;
   }
 
   let {
@@ -22,6 +24,7 @@
     currentClip,
     onTimeUpdate,
     onClipEnd,
+    onFollowClip,
   }: Props = $props();
 
   let videoEl = $state<HTMLVideoElement | undefined>(undefined);
@@ -30,6 +33,7 @@
   // Local UI state — updated directly in handlers for immediate reactivity.
   let isPlaying = $state(false);
   let isMuted = $state(false);
+  let currentVolume = $state(1);
   let currentRate = $state(1);
   let isFullscreen = $state(false);
   let currentTime = $state(0);
@@ -45,8 +49,6 @@
     onTimeUpdate(v.currentTime);
     playerStore.update((s) => ({ ...s, currentTime: v.currentTime }));
 
-    // Only auto-advance if we're explicitly playing through a clip
-    // AND the user hasn't manually seeked away from it.
     if (autoAdvanceClip && v.currentTime >= autoAdvanceClip.endTime) {
       autoAdvanceClip = null;
       v.pause();
@@ -56,16 +58,12 @@
 
   function togglePlay() {
     if (!videoEl) return;
-    if (videoEl.paused) {
-      void videoEl.play();
-    } else {
-      videoEl.pause();
-    }
+    if (videoEl.paused) void videoEl.play();
+    else videoEl.pause();
   }
 
   function seekTo(time: number) {
     if (!videoEl) return;
-    // Manual seek — disable auto-advance so we don't immediately pause.
     autoAdvanceClip = null;
     videoEl.currentTime = time;
     currentTime = time;
@@ -89,6 +87,19 @@
     isMuted = videoEl.muted;
   }
 
+  function setVolume(v: number) {
+    if (!videoEl) return;
+    videoEl.volume = v;
+    currentVolume = v;
+    if (v > 0 && videoEl.muted) {
+      videoEl.muted = false;
+      isMuted = false;
+    } else if (v === 0) {
+      videoEl.muted = true;
+      isMuted = true;
+    }
+  }
+
   function toggleFullscreen() {
     if (!containerEl) return;
     if (!document.fullscreenElement) {
@@ -106,16 +117,6 @@
     currentRate = rate;
   }
 
-  function scrubTo(e: MouseEvent) {
-    if (!videoEl || !e.currentTarget) return;
-    autoAdvanceClip = null;
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const pct = (e.clientX - rect.left) / rect.width;
-    const t = pct * (videoEl.duration || 0);
-    videoEl.currentTime = t;
-    currentTime = t;
-  }
-
   function fmtTime(sec: number): string {
     if (!isFinite(sec) || sec < 0) return '--:--';
     const h = Math.floor(sec / 3600);
@@ -124,6 +125,8 @@
     if (h > 0) return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
     return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   }
+
+  const followClip = $derived($playerStore.followClip);
 
   // ── Exposed methods for parent keyboard shortcuts ──
 
@@ -153,6 +156,7 @@
   function onFullscreenChange() {
     isFullscreen = !!document.fullscreenElement;
   }
+
   onDestroy(() => {
     if (browser && document.fullscreenElement) void document.exitFullscreen?.();
   });
@@ -160,7 +164,8 @@
 
 <svelte:window onfullscreenchange={onFullscreenChange} />
 
-<div bind:this={containerEl} class="relative flex-1 overflow-hidden rounded-lg bg-black">
+<!-- No bg-black — video element handles its own aspect; container is transparent -->
+<div bind:this={containerEl} class="relative flex-1 overflow-hidden rounded-lg">
   <video
     bind:this={videoEl}
     src={apiClient.videoUrl(streamId)}
@@ -168,28 +173,17 @@
     ontimeupdate={handleTimeUpdate}
     onloadedmetadata={(e: Event & { currentTarget: HTMLVideoElement }) => {
       videoDuration = e.currentTarget.duration;
+      currentVolume = e.currentTarget.volume;
+      isMuted = e.currentTarget.muted;
       playerStore.update((s) => ({ ...s, duration: e.currentTarget.duration }));
     }}
     onplay={() => { isPlaying = true; playerStore.update((s) => ({ ...s, isPlaying: true })); }}
     onpause={() => { isPlaying = false; playerStore.update((s) => ({ ...s, isPlaying: false })); }}
-    onvolumechange={() => { if (videoEl) { isMuted = videoEl.muted; } }}
+    onvolumechange={() => { if (videoEl) { isMuted = videoEl.muted; currentVolume = videoEl.volume; } }}
   ><track kind="captions" /></video>
 
-  <!-- Custom controls overlay -->
-  <div class="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent px-4 pb-3 pt-8">
-    <!-- Progress bar (clickable scrub) -->
-    <button
-      type="button"
-      class="group relative mb-2 block h-1.5 w-full cursor-pointer rounded-full bg-white/20 transition-[height] hover:h-2"
-      onclick={scrubTo}
-      aria-label="Video progress"
-    >
-      <div
-        class="absolute inset-y-0 left-0 rounded-full bg-accent"
-        style="width: {videoDuration ? (currentTime / videoDuration) * 100 : 0}%"
-      ></div>
-    </button>
-
+  <!-- Minimal control bar — sits at the bottom, subtle gradient only behind controls -->
+  <div class="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-4 pb-2 pt-6">
     <div class="flex items-center gap-3">
       <!-- Play/pause -->
       <button onclick={togglePlay} class="text-white transition-colors hover:text-accent" aria-label={isPlaying ? 'Pause' : 'Play'}>
@@ -225,6 +219,19 @@
 
       <div class="flex-1"></div>
 
+      <!-- Clip-follow toggle — frames timeline to selected clip's bounds -->
+      {#if currentClip}
+        <button
+          class="flex items-center gap-1 rounded px-1.5 py-1 font-mono text-xs transition-colors
+          {followClip ? 'text-accent' : 'text-white/50 hover:text-white'}"
+          onclick={onFollowClip}
+          aria-label="Frame timeline to clip"
+          title="Frame timeline to clip bounds"
+        >
+          <Icon name="frame" size={14} />
+        </button>
+      {/if}
+
       <!-- Playback rate -->
       <div class="flex items-center gap-1">
         {#each [0.5, 1, 1.5, 2] as r}
@@ -239,10 +246,13 @@
         {/each}
       </div>
 
-      <!-- Volume -->
-      <button onclick={toggleMute} class="text-white/70 transition-colors hover:text-white" aria-label={isMuted ? 'Unmute' : 'Mute'}>
-        <Icon name={isMuted ? 'volume-mute' : 'volume'} size={18} />
-      </button>
+      <!-- Volume (YouTube-style hover-expand slider) -->
+      <VolumeControl
+        volume={currentVolume}
+        muted={isMuted}
+        onVolume={setVolume}
+        onToggleMute={toggleMute}
+      />
 
       <!-- Fullscreen -->
       <button onclick={toggleFullscreen} class="text-white/70 transition-colors hover:text-white" aria-label="Fullscreen">
