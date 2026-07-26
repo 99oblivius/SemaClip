@@ -47,6 +47,8 @@
     return () => clearTimeout(timer);
   });
 
+  let readerRef: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
   $effect(() => {
     const ctrl = new AbortController();
     const around = seekTarget;
@@ -57,7 +59,12 @@
           signal: ctrl.signal,
         });
         if (!res.ok || !res.body) return;
+
+        // If a new effect cleanup ran while fetch was in flight, abort.
+        if (ctrl.signal.aborted) return;
+
         const reader = res.body.getReader();
+        readerRef = reader;
         const decoder = new TextDecoder();
         let buffer = '';
         let duration = 0;
@@ -92,14 +99,18 @@
             }
           }
         } finally {
+          readerRef = null;
           try { reader.releaseLock(); } catch { /* ok */ }
         }
       } catch (e) {
-        if ((e as Error).name === 'AbortError') return; // clean abort
+        if ((e as Error).name === 'AbortError') return;
       }
     })();
 
-    return () => ctrl.abort();
+    return () => {
+      ctrl.abort();                  // abort in-flight fetch
+      readerRef?.cancel().catch(() => {}); // force-close established SSE reader
+    };
   });
 
   const chatQuery = createQuery(() => ({
