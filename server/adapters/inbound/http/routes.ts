@@ -200,13 +200,87 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     }
   });
 
-  // ── Streaming audio waveform (SSE) ──
-  // Spawns ffmpeg to decode audio, streams peak values as they are computed.
-  // First event carries the duration (instant via ffprobe). Subsequent events
-  // carry batches of peak values. The frontend renders progressively.
+  // ── Seek-aware streaming waveform (SSE) ──
+  // Each peak batch carries {firstIndex, startTime, peaks} so the frontend
+  // knows WHERE on the timeline to place the data (regardless of arrival order).
+  // Accepts ?around=<seconds> to prioritize decoding near the seek point.
+
+  const TARGET_PEAKS = 2000;
+  const SAMPLE_RATE = 8000;
+  const BATCH_SIZE = 50;
+
+  /** Run ffmpeg for a time range, compute peaks, yield batches. */
+  async function* streamPeaks(
+    vodPath: string,
+    startSec: number,
+    durationSec: number | null, // null = to end of file
+    firstIndex: number,
+    totalSamples: number,
+  ): AsyncGenerator<{ firstIndex: number; startTime: number; peaks: number[] }> {
+    const args = [
+      "-vn", "-ac", "1", "-ar", String(SAMPLE_RATE), "-f", "f32le", "-",
+    ];
+    if (startSec > 0) args.unshift("-ss", String(startSec));
+    if (durationSec !== null) args.unshift("-t", String(durationSec));
+    args.unshift("-i", vodPath);
+
+    const cmd = new Deno.Command("ffmpeg", { args, stdout: "piped", stderr: "null" });
+    const proc = cmd.spawn();
+    const reader = proc.stdout.getReader();
+
+    let peakBuf: number[] = [];
+    let acc = new Float32Array(0);
+    let peakIdx = firstIndex;
+    const peakTime = totalSamples / TARGET_PEAKS; // seconds per peak
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (value) {
+          const incoming = new Float32Array(value.buffer, value.byteOffset, Math.floor(value.length / 4));
+          const merged = new Float32Array(acc.length + incoming.length);
+          merged.set(acc);
+          merged.set(incoming, acc.length);
+          acc = merged;
+
+          while (acc.length >= totalSamples) {
+            let max = 0;
+            for (let i = 0; i < totalSamples; i++) max = Math.max(max, Math.abs(acc[i] ?? 0));
+            peakBuf.push(max);
+            acc = acc.slice(totalSamples);
+          }
+        }
+
+        while (peakBuf.length >= BATCH_SIZE) {
+          const batch = peakBuf.splice(0, BATCH_SIZE);
+          const startTime = peakIdx * peakTime;
+          peakIdx += BATCH_SIZE;
+          yield { firstIndex: peakIdx - BATCH_SIZE, startTime, peaks: batch };
+        }
+
+        if (done) break;
+      }
+
+      // Flush remainder.
+      if (acc.length > 0) {
+        let max = 0;
+        for (let i = 0; i < acc.length; i++) max = Math.max(max, Math.abs(acc[i] ?? 0));
+        peakBuf.push(max);
+      }
+      if (peakBuf.length > 0) {
+        const startTime = peakIdx * peakTime;
+        peakIdx += peakBuf.length;
+        yield { firstIndex: peakIdx - peakBuf.length, startTime, peaks: [...peakBuf] };
+      }
+    } finally {
+      try { reader.releaseLock(); } catch { /* ok */ }
+      try { await proc.status; } catch { /* ok */ }
+    }
+  }
 
   app.get("/api/streams/:id/waveform", (c) => {
     const streamId = c.req.param("id");
+    const around = parseFloat(c.req.query("around") ?? "0") || 0;
 
     const body = new ReadableStream({
       async start(controller) {
@@ -223,7 +297,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
             return;
           }
 
-          // 1. Get duration (fast — ffprobe metadata only).
+          // 1. Get duration.
           const probe = new Deno.Command("ffprobe", {
             args: ["-v", "quiet", "-print_format", "json", "-show_format", stream.vodPath],
             stdout: "piped", stderr: "piped",
@@ -236,70 +310,38 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
             controller.close();
             return;
           }
-          const TARGET_PEAKS = 2000;
           send({ duration, totalPeaks: TARGET_PEAKS });
 
-          // 2. Stream-decode audio via ffmpeg → compute peaks on the fly.
-          const SAMPLE_RATE = 8000;
+          // 2. Compute peaks per bucket and priority region.
           const samplesPerPeak = Math.max(1, Math.floor((duration * SAMPLE_RATE) / TARGET_PEAKS));
-          const BATCH_SIZE = 50;
+          const peakTime = duration / TARGET_PEAKS;
+          const aroundIndex = Math.max(0, Math.min(TARGET_PEAKS - 1, Math.floor((around / duration) * TARGET_PEAKS)));
 
-          const cmd = new Deno.Command("ffmpeg", {
-            args: [
-              "-i", stream.vodPath, "-vn", "-ac", "1",
-              "-ar", String(SAMPLE_RATE), "-f", "f32le", "-",
-            ],
-            stdout: "piped", stderr: "null",
-          });
-          const proc = cmd.spawn();
-          const reader = proc.stdout.getReader();
-
-          // Accumulate PCM samples and compute peaks in sliding windows.
-          let peakBuf: number[] = [];   // completed peaks waiting to be sent
-          let acc: Float32Array = new Float32Array(0);
-
-          try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (value) {
-                // Append new PCM data to accumulator.
-                const incoming = new Float32Array(value.buffer, value.byteOffset, Math.floor(value.length / 4));
-                const merged = new Float32Array(acc.length + incoming.length);
-                merged.set(acc);
-                merged.set(incoming, acc.length);
-                acc = merged;
-
-                // Extract as many full peaks as we can from the accumulator.
-                while (acc.length >= samplesPerPeak) {
-                  let max = 0;
-                  for (let i = 0; i < samplesPerPeak; i++) max = Math.max(max, Math.abs(acc[i] ?? 0));
-                  peakBuf.push(max);
-                  acc = acc.slice(samplesPerPeak); // advance window
-                }
-              }
-
-              // Send completed peaks in batches.
-              while (peakBuf.length >= BATCH_SIZE) {
-                const batch = peakBuf.splice(0, BATCH_SIZE);
-                send({ peaks: batch });
-              }
-
-              if (done) break;
-            }
-
-            // Flush remaining accumulator.
-            if (acc.length > 0) {
-              let max = 0;
-              for (let i = 0; i < acc.length; i++) max = Math.max(max, Math.abs(acc[i] ?? 0));
-              peakBuf.push(max);
-            }
-          } finally {
-            try { reader.releaseLock(); } catch { /* ok */ }
-            try { await proc.status; } catch { /* process may have exited */ }
+          // 3. Stream priority region (from aroundIndex to end) first.
+          for await (const batch of streamPeaks(
+            stream.vodPath,
+            aroundIndex * peakTime, // start time in seconds
+            null,                    // to end of file
+            aroundIndex,
+            samplesPerPeak,
+          )) {
+            if (controller.desiredSize === null) break; // client disconnected
+            send(batch);
           }
 
-          // Flush any remaining peaks.
-          if (peakBuf.length > 0) send({ peaks: peakBuf });
+          // 4. Then stream the beginning (0 to aroundIndex), filling the gap.
+          if (aroundIndex > 0) {
+            for await (const batch of streamPeaks(
+              stream.vodPath,
+              0,
+              aroundIndex * peakTime,
+              0,
+              samplesPerPeak,
+            )) {
+              if (controller.desiredSize === null) break;
+              send(batch);
+            }
+          }
 
           send({ done: true });
         } catch (e) {

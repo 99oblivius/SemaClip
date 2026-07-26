@@ -34,24 +34,29 @@
   let isDraggingEndpoint = $state(false);
   let draggingEndpoint: 'start' | 'end' | null = null;
 
-  /** Progressive waveform: local state accumulates streaming data as it arrives. */
-  let waveformPeaks = $state<number[]>([]);
+  /** Sparse waveform: pre-allocated array, -1 = not yet loaded. Filled by SSE batches at their correct index. */
+  let waveformPeaks = $state<number[]>(new Array(2000).fill(-1));
   let waveformDuration = $state(0);
-  let waveformTotalPeaks = $state(2000); // updated from SSE, default matches server
+  let waveformTotalPeaks = $state(2000);
 
   const waveformQuery = createQuery(() => ({
     queryKey: ['waveform', streamId],
-    queryFn: async () => {
-      const res = await fetch(`/api/streams/${streamId}/waveform`);
+    queryFn: async ({ signal }) => {
+      const around = $playerStore.viewStart || 0;
+      const res = await fetch(`/api/streams/${streamId}/waveform?around=${Math.round(around)}`, {
+        signal,
+      });
       if (!res.ok) throw new Error(`Waveform fetch failed: ${res.status}`);
       const reader = res.body!.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
       let duration = 0;
-      let peaks: number[] = [];
+      let totalPeaks = 2000;
 
       while (true) {
+        if (signal?.aborted) break;
         const { done, value } = await reader.read();
+        if (signal?.aborted) break;
         if (value) buffer += decoder.decode(value, { stream: true });
 
         const lines = buffer.split('\n');
@@ -62,18 +67,24 @@
             const data = JSON.parse(line.slice(6));
             if (data.error) throw new Error(data.error);
             if (data.duration) duration = data.duration;
-            if (data.totalPeaks) waveformTotalPeaks = data.totalPeaks;
-            if (data.peaks) peaks = [...peaks, ...data.peaks];
+            if (data.totalPeaks) totalPeaks = data.totalPeaks;
+            if (data.firstIndex !== undefined && data.peaks) {
+              const arr = [...waveformPeaks];
+              for (let i = 0; i < data.peaks.length; i++) {
+                arr[data.firstIndex + i] = data.peaks[i];
+              }
+              waveformPeaks = arr;
+            }
             if (data.done) continue;
-            waveformPeaks = peaks;
             waveformDuration = duration;
+            waveformTotalPeaks = totalPeaks;
           } catch { /* skip malformed */ }
         }
         if (done) break;
       }
-      return { duration, peaks };
+      return waveformPeaks;
     },
-    staleTime: Infinity,
+    staleTime: 0,
   }));
   const chatQuery = createQuery(() => ({
     queryKey: ['chat-density', streamId],
@@ -81,8 +92,8 @@
     staleTime: Infinity,
   }));
 
-  /** Use local state during streaming (fills progressively), query result once complete. */
-  const waveform = $derived(waveformPeaks.length > 0 ? waveformPeaks : (waveformQuery.data?.peaks ?? []));
+  /** Waveform: uses sparse local state. -1 slots = not yet loaded. */
+  const waveform = $derived(waveformPeaks);
   const chatDensity = $derived(chatQuery.data?.density ?? []);
   const player = $derived($playerStore);
 
@@ -90,10 +101,15 @@
   const viewEnd = $derived(player.viewEnd || duration);
   const viewSpan = $derived(Math.max(1, viewEnd - viewStart));
 
-  function timeToX(t: number): number {
-    if (!containerEl) return 0;
-    return ((t - viewStart) / viewSpan) * containerEl.clientWidth;
-  }
+  // Reconnect the waveform stream when the user seeks significantly.
+  let lastAround = $state(0);
+  $effect(() => {
+    const around = Math.round(viewStart);
+    if (Math.abs(around - lastAround) > 60) { // 1-minute threshold
+      lastAround = around;
+      waveformQuery.refetch();
+    }
+  });
 
   function xToTime(x: number): number {
     if (!containerEl) return 0;
@@ -102,6 +118,10 @@
     return Math.max(0, Math.min(duration, t));
   }
 
+  function timeToX(t: number): number {
+    if (!containerEl) return 0;
+    return ((t - viewStart) / viewSpan) * containerEl.clientWidth;
+  }
   const selectedClip = $derived(clips.find((c) => c.id === currentClipId));
 
   /** Hit-test: is the cursor near an endpoint handle of the selected clip? */
@@ -160,7 +180,7 @@
       ctx.fill();
     }
 
-    if (waveform.length > 0) {
+    if (waveform.some((v) => v >= 0)) {
       const totalPeaks = waveformTotalPeaks || 2000;
       const peakStart = Math.floor((viewStart / duration) * totalPeaks);
       const peakEnd = Math.ceil((viewEnd / duration) * totalPeaks);
@@ -172,8 +192,8 @@
         const idx = Math.floor((x / w) * slice.length);
         let peak = 0;
         for (let j = 0; j < samplesPerPixel; j++) {
-          const v = slice[idx + j] ?? 0;
-          if (v > peak) peak = v;
+          const v = slice[idx + j] ?? -1;
+          if (v >= 0 && v > peak) peak = v;
         }
         const barH = peak * ampH;
         ctx.fillRect(x, midY - barH, 1, barH * 2);
