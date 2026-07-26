@@ -37,6 +37,7 @@
   /** Progressive waveform: local state accumulates streaming data as it arrives. */
   let waveformPeaks = $state<number[]>([]);
   let waveformDuration = $state(0);
+  let waveformTotalPeaks = $state(2000); // updated from SSE, default matches server
 
   const waveformQuery = createQuery(() => ({
     queryKey: ['waveform', streamId],
@@ -61,9 +62,9 @@
             const data = JSON.parse(line.slice(6));
             if (data.error) throw new Error(data.error);
             if (data.duration) duration = data.duration;
+            if (data.totalPeaks) waveformTotalPeaks = data.totalPeaks;
             if (data.peaks) peaks = [...peaks, ...data.peaks];
             if (data.done) continue;
-            // Update local state progressively so the canvas re-renders as data arrives.
             waveformPeaks = peaks;
             waveformDuration = duration;
           } catch { /* skip malformed */ }
@@ -159,11 +160,11 @@
       ctx.fill();
     }
 
-    // ── Audio waveform (mirrored) ──
     if (waveform.length > 0) {
-      const peakStart = Math.floor((viewStart / duration) * waveform.length);
-      const peakEnd = Math.ceil((viewEnd / duration) * waveform.length);
-      const slice = waveform.slice(peakStart, peakEnd + 1);
+      const totalPeaks = waveformTotalPeaks || 2000;
+      const peakStart = Math.floor((viewStart / duration) * totalPeaks);
+      const peakEnd = Math.ceil((viewEnd / duration) * totalPeaks);
+      const slice = waveform.slice(Math.max(0, peakStart), Math.min(waveform.length, peakEnd + 1));
       const samplesPerPixel = Math.max(1, Math.floor(slice.length / w));
       ctx.fillStyle = 'rgba(113, 113, 122, 0.55)';
       const ampH = h * 0.35;

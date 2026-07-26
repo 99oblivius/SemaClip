@@ -236,13 +236,12 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
             controller.close();
             return;
           }
-          send({ duration });
+          const TARGET_PEAKS = 2000;
+          send({ duration, totalPeaks: TARGET_PEAKS });
 
           // 2. Stream-decode audio via ffmpeg → compute peaks on the fly.
-          const TARGET_PEAKS = 2000;
           const SAMPLE_RATE = 8000;
           const samplesPerPeak = Math.max(1, Math.floor((duration * SAMPLE_RATE) / TARGET_PEAKS));
-          // Send peaks in batches of 50 for smooth progressive rendering.
           const BATCH_SIZE = 50;
 
           const cmd = new Deno.Command("ffmpeg", {
