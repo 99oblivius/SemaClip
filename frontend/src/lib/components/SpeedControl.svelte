@@ -33,9 +33,7 @@
     onRate(rateFromPos(pos));
   }
 
-  function handleMouseUp() {
-    isDragging = false;
-  }
+  function handleMouseUp() { isDragging = false; }
 
   function handleMouseMove(e: MouseEvent) {
     if (!isDragging || !trackEl) return;
@@ -61,13 +59,14 @@
   onmouseenter={() => (isHovering = true)}
   onmouseleave={() => (isHovering = false)}
 >
-  <div class="w-20 h-7 shrink-0 flex items-center justify-end">
+  <div
+    class="shrink-0 flex items-center overflow-hidden"
+    style="width: {isHovering || isDragging ? '80px' : '0px'}; transition: width 0.2s ease-out;"
+  >
     <div
       bind:this={trackEl}
-      class="relative h-1 rounded-full bg-white/20 cursor-pointer"
-      style="width: {isHovering || isDragging ? '80px' : '0px'};
-             opacity: {isHovering || isDragging ? 1 : 0};
-             transition: width 0.2s ease-out, opacity 0.2s ease-out;"
+      class="relative h-1 w-20 rounded-full bg-white/20 cursor-pointer"
+      style="opacity: {isHovering || isDragging ? 1 : 0}; transition: opacity 0.15s ease-out;"
       onmousedown={handleTrackDown}
       role="slider"
       tabindex={0}

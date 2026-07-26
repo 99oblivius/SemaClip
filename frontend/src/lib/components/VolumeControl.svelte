@@ -27,9 +27,7 @@
     onVolume(sliderPos(e));
   }
 
-  function handleMouseUp() {
-    isDragging = false;
-  }
+  function handleMouseUp() { isDragging = false; }
 
   function handleMouseMove(e: MouseEvent) {
     if (!isDragging) return;
@@ -39,6 +37,8 @@
 
 <svelte:window onmouseup={handleMouseUp} onmousemove={handleMouseMove} />
 
+<!-- YouTube-style: the entire slider area grows/shrinks, pushing the icon naturally.
+     The track inside is always 80px wide but fades opacity. -->
 <div
   class="flex items-center"
   role="group"
@@ -46,13 +46,15 @@
   onmouseenter={() => (isHovering = true)}
   onmouseleave={() => (isHovering = false)}
 >
-  <div class="w-20 h-7 shrink-0 flex items-center justify-end">
+  <!-- Slider area transitions width → icon slides when opening/closing -->
+  <div
+    class="shrink-0 flex items-center overflow-hidden"
+    style="width: {isHovering || isDragging ? '80px' : '0px'}; transition: width 0.2s ease-out;"
+  >
     <div
       bind:this={trackEl}
-      class="h-1 rounded-full bg-white/20 cursor-pointer"
-      style="width: {isHovering || isDragging ? '80px' : '0px'};
-             opacity: {isHovering || isDragging ? 1 : 0};
-             transition: width 0.2s ease-out, opacity 0.2s ease-out;"
+      class="h-1 w-20 rounded-full bg-white/20 cursor-pointer"
+      style="opacity: {isHovering || isDragging ? 1 : 0}; transition: opacity 0.15s ease-out;"
       onmousedown={handleTrackDown}
       role="slider"
       tabindex={0}
@@ -70,7 +72,7 @@
 
   <button
     onclick={onToggleMute}
-    class="shrink-0 -ml-1 text-white/70 transition-colors hover:text-white"
+    class="shrink-0 text-white/70 transition-colors hover:text-white"
     aria-label={muted || volume === 0 ? 'Unmute' : 'Mute'}
   >
     <Icon name={muted || volume === 0 ? 'volume-mute' : 'volume'} size={18} />
