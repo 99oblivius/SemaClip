@@ -48,10 +48,13 @@ export function setView(start: number, end: number): void {
   playerStore.update((s) => ({ ...s, viewStart: start, viewEnd: end, zoomLevel: s.duration / Math.max(1, end - start) }));
 }
 
-/** Frame the timeline view around a clip with 10% padding on each side. */
+/** Frame the timeline view around a clip with 10% padding on each side.
+ *  Padding never shrinks below 2.5s per side (5s minimum total window)
+ *  so very short clips remain navigable. */
 export function frameClip(clipStart: number, clipEnd: number, duration: number): void {
   const clipLen = clipEnd - clipStart;
-  const pad = clipLen * 0.1;
+  // 10% padding, but at least 2.5s per side so short clips get a usable view.
+  const pad = Math.max(clipLen * 0.1, 2.5);
   let start = Math.max(0, clipStart - pad);
   let end = Math.min(duration, clipEnd + pad);
   // If padding clipped at 0 or duration, redistribute the saved pad to the other side.

@@ -9,7 +9,7 @@
   import SignalBar from '$lib/components/SignalBar.svelte';
   import ExportSheet from '$lib/components/ExportSheet.svelte';
   import KeyboardHelp from '$lib/components/KeyboardHelp.svelte';
-  import { fadeIn, keyLight } from '$lib/actions/gsap';
+  import { fadeIn } from '$lib/actions/gsap';
   import type { Clip, EngineEvent, Axis } from '$shared/types';
   import { onMount, onDestroy } from 'svelte';
 
@@ -144,8 +144,15 @@
       frameClip(currentClip.startTime, currentClip.endTime, stream.duration);
     }
   }
-  const AXES: Axis[] = ['hype', 'humor', 'skill', 'awkward', 'emotional', 'tension'];
 
+  // When followClip is active and the selected clip changes, auto-reframe the timeline.
+  $effect(() => {
+    if (!currentClip || !stream?.duration) return;
+    if (!$playerStore.followClip) return;
+    frameClip(currentClip.startTime, currentClip.endTime, stream.duration);
+  });
+
+  const AXES: Axis[] = ['hype', 'humor', 'skill', 'awkward', 'emotional', 'tension'];
   function handleKey(e: KeyboardEvent) {
     // Ignore if typing in an input.
     const target = e.target as HTMLElement;
@@ -324,7 +331,7 @@
 
       <!-- Active clip detail -->
       {#if currentClip}
-        <div class="rounded-md border border-border bg-surface p-4" use:keyLight>
+        <div class="rounded-md border border-border bg-surface p-4">
           <div class="mb-3 flex items-center justify-between">
             <div class="flex items-center gap-3">
               <span class="font-mono text-xs text-ash-dim">{String(currentClipIndex + 1).padStart(2, '0')}</span>

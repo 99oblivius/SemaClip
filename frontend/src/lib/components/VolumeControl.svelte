@@ -11,12 +11,11 @@
 
   let { volume, muted, onVolume, onToggleMute }: Props = $props();
 
-  let wrapperEl = $state<HTMLDivElement | undefined>(undefined);
   let sliderEl = $state<HTMLDivElement | undefined>(undefined);
   let isHovering = $state(false);
   let isDragging = $state(false);
 
-  /** Animate the slider open/closed on hover. */
+  /** Animate the slider open/closed on hover. Slider is to the LEFT of the icon. */
   $effect(() => {
     if (!sliderEl) return;
     if (isHovering || isDragging) {
@@ -53,24 +52,19 @@
 
 <svelte:window onmouseup={handleMouseUp} onmousemove={handleSliderMove} />
 
+<!-- Slider is to the LEFT of the icon. The icon stays fixed; the slider
+     expands leftward so clicking the icon always toggles mute. -->
 <div
-  bind:this={wrapperEl}
-  class="flex items-center gap-2"
+  class="flex items-center justify-end gap-2"
   role="group"
   aria-label="Volume control"
   onmouseenter={() => (isHovering = true)}
   onmouseleave={() => (isHovering = false)}
 >
-  <button
-    onclick={onToggleMute}
-    class="text-white/70 transition-colors hover:text-white"
-    aria-label={muted || volume === 0 ? 'Unmute' : 'Mute'}
-  >
-    <Icon name={muted || volume === 0 ? 'volume-mute' : 'volume'} size={18} />
-  </button>
-
   <div
     bind:this={sliderEl}
+    class="relative h-1 cursor-pointer overflow-hidden rounded-full bg-white/20"
+    style="width: 0px; opacity: 0;"
     onmousedown={handleMouseDown}
     role="slider"
     tabindex={0}
@@ -84,4 +78,12 @@
       style="width: {muted ? 0 : volume * 100}%"
     ></div>
   </div>
+
+  <button
+    onclick={onToggleMute}
+    class="shrink-0 text-white/70 transition-colors hover:text-white"
+    aria-label={muted || volume === 0 ? 'Unmute' : 'Mute'}
+  >
+    <Icon name={muted || volume === 0 ? 'volume-mute' : 'volume'} size={18} />
+  </button>
 </div>
