@@ -12,6 +12,7 @@
     currentClipId: string | null;
     onSelectClip: (clip: Clip) => void;
     onAdjustEndpoints?: (clip: Clip, start: number, end: number) => void;
+    onSeek?: (time: number) => void;
   }
 
   let {
@@ -21,6 +22,7 @@
     currentClipId,
     onSelectClip,
     onAdjustEndpoints,
+    onSeek,
   }: Props = $props();
 
   let canvasEl = $state<HTMLCanvasElement | undefined>(undefined);
@@ -299,6 +301,9 @@
   }
 
   function handleMouseUp() {
+    if (isDraggingPlayhead && onSeek) {
+      onSeek(player.currentTime);
+    }
     isDraggingPlayhead = false;
     isDraggingEndpoint = false;
     draggingEndpoint = null;

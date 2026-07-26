@@ -298,6 +298,7 @@
             currentClipId={currentClip?.id ?? null}
             onSelectClip={(clip) => { currentClipIndex = visibleClips.findIndex((c) => c.id === clip.id); jumpToClip(clip); }}
             onAdjustEndpoints={adjustEndpoints}
+            onSeek={(time) => playerComp?.seekToExported(time)}
           />
         {:else}
           <div class="flex h-full items-center justify-center text-xs text-ash-dim">Loading timeline...</div>
