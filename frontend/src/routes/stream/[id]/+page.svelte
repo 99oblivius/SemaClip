@@ -10,7 +10,7 @@
   import ExportSheet from '$lib/components/ExportSheet.svelte';
   import KeyboardHelp from '$lib/components/KeyboardHelp.svelte';
   import { fadeIn } from '$lib/actions/gsap';
-  import type { Clip, EngineEvent, Axis } from '$shared/types';
+  import type { Clip, EngineEvent } from '$shared/types';
   import { onMount, onDestroy } from 'svelte';
 
   let { params } = $props();
@@ -29,7 +29,6 @@
 
   let playerComp = $state<VideoPlayer | undefined>(undefined);
   let currentClipIndex = $state(0);
-  let axisFilter = $state<Axis | null>(null);
   let showKeyboardHelp = $state(false);
   let showExportSheet = $state(false);
   let exportAll = $state(false);
@@ -40,7 +39,6 @@
   const visibleClips = $derived(
     allClips
       .filter((c) => !c.rejected && !discarded.has(c.id))
-      .filter((c) => !axisFilter || c.axis === axisFilter)
       .sort((a, b) => b.score - a.score)
   );
   const currentClip = $derived(visibleClips[currentClipIndex]);
@@ -152,9 +150,7 @@
     frameClip(currentClip.startTime, currentClip.endTime, stream.duration);
   });
 
-  const AXES: Axis[] = ['hype', 'humor', 'skill', 'awkward', 'emotional', 'tension'];
   function handleKey(e: KeyboardEvent) {
-    // Ignore if typing in an input.
     const target = e.target as HTMLElement;
     if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
     if (showExportSheet || showKeyboardHelp) {
@@ -204,12 +200,6 @@
         e.preventDefault();
         if (stream?.duration) setZoom(($playerStore.zoomLevel || 1) / 1.5, stream.duration, $playerStore.currentTime);
         break;
-      case '1': case '2': case '3': case '4': case '5': case '6': {
-        const idx = parseInt(e.key) - 1;
-        const axis = AXES[idx];
-        if (axis) axisFilter = axisFilter === axis ? null : axis;
-        break;
-      }
       case 'e': case 'E':
         e.preventDefault();
         if (e.shiftKey) exportAllClips();
@@ -231,10 +221,6 @@
         e.preventDefault();
         playerComp?.toggleFullscreenExported();
         break;
-      case 'c': case 'C':
-        e.preventDefault();
-        handleFollowClip();
-        break;
       case '?':
         e.preventDefault();
         showKeyboardHelp = true;
@@ -252,11 +238,6 @@
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   }
 
-  // Reset clip index when filter changes.
-  $effect(() => {
-    axisFilter;
-    currentClipIndex = 0;
-  });
 </script>
 
 <svelte:window onkeydown={handleKey} />
@@ -309,11 +290,10 @@
         currentClip={currentClip}
         onTimeUpdate={handleTimeUpdate}
         onClipEnd={handleClipEnd}
-        onFollowClip={handleFollowClip}
       />
 
       <!-- Signal terrain timeline — transparent, no darkening wrapper -->
-      <div class="h-20">
+      <div class="rounded-md border border-border bg-surface h-20 overflow-hidden">
         {#if stream?.duration}
           <Timeline
             {streamId}
@@ -328,6 +308,19 @@
           <div class="flex h-full items-center justify-center text-xs text-ash-dim">Loading timeline...</div>
         {/if}
       </div>
+
+      <!-- Clip-follow toggle — frames timeline to selected clip bounds -->
+      {#if currentClip}
+        <button
+          class="flex items-center gap-2 rounded-md border px-3 py-2 text-xs transition-colors
+          {$playerStore.followClip ? 'border-accent bg-accent/10 text-accent' : 'border-border text-ash hover:border-border-strong hover:text-ink'}"
+          onclick={handleFollowClip}
+          aria-label="Frame timeline to clip"
+        >
+          <Icon name="frame" size={14} />
+          <span>{$playerStore.followClip ? 'Fit to full VOD' : 'Frame to clip'}</span>
+        </button>
+      {/if}
 
       <!-- Active clip detail -->
       <div class="rounded-md border border-border bg-surface p-4">
@@ -424,19 +417,6 @@
         <span class="font-mono text-xs text-ash-dim">{visibleClips.length}</span>
       </div>
 
-      <!-- Axis filters -->
-      <div class="flex flex-wrap gap-1 border-b border-border px-3 py-2">
-        {#each AXES as axis, i}
-          <button
-            class="rounded px-1.5 py-0.5 font-mono text-xs transition-colors
-            {axisFilter === axis ? 'border border-accent text-accent' : 'border border-transparent text-ash-dim hover:border-border hover:text-ash'}"
-            onclick={() => (axisFilter = axisFilter === axis ? null : axis)}
-            title={`${axis} (press ${i + 1})`}
-          >
-            {axis.slice(0, 4)}
-          </button>
-        {/each}
-      </div>
 
       <!-- Clip list -->
       <div class="flex-1 overflow-y-auto">

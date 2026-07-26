@@ -14,7 +14,6 @@
     currentClip: Clip | undefined;
     onTimeUpdate: (time: number) => void;
     onClipEnd: () => void;
-    onFollowClip: () => void;
   }
 
   let {
@@ -24,7 +23,6 @@
     currentClip,
     onTimeUpdate,
     onClipEnd,
-    onFollowClip,
   }: Props = $props();
 
   let videoEl = $state<HTMLVideoElement | undefined>(undefined);
@@ -126,7 +124,6 @@
     return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   }
 
-  const followClip = $derived($playerStore.followClip);
 
   // ── Exposed methods for parent keyboard shortcuts ──
 
@@ -219,18 +216,6 @@
 
       <div class="flex-1"></div>
 
-      <!-- Clip-follow toggle — frames timeline to selected clip's bounds -->
-      {#if currentClip}
-        <button
-          class="flex items-center gap-1 rounded px-1.5 py-1 font-mono text-xs transition-colors
-          {followClip ? 'text-accent' : 'text-white/50 hover:text-white'}"
-          onclick={onFollowClip}
-          aria-label="Frame timeline to clip"
-          title="Frame timeline to clip bounds"
-        >
-          <Icon name="frame" size={14} />
-        </button>
-      {/if}
 
       <!-- Playback rate -->
       <div class="flex items-center gap-1">
