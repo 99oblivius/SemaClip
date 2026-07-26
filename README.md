@@ -4,7 +4,7 @@
 
 SemaClip is an intelligent, local-first engine for automatically detecting clip-worthy moments in stream VODs. Unlike existing tools that reduce the problem to "find the loudest second," SemaClip models the multidimensional nature of what makes a moment worth clipping — hype, humor, skill, awkwardness, emotion, and tension — each with its own detection logic, its own temporal structure, and its own relationship to signal strength.
 
-**Status: Architecture phase. No code yet.**
+**Status: Alpha — full-stack implementation in progress.** Backend (Deno + Hono + SQLite), Python ML engine (stub), and SvelteKit frontend with signal-terrain timeline, keyboard-driven review, and export sheet. See [DESIGN.md](DESIGN.md) for the UI spec and [ARCHITECTURE.md](ARCHITECTURE.md) for the pipeline design.
 
 ## Philosophy
 
