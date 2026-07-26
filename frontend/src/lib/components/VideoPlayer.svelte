@@ -4,6 +4,7 @@
   import Icon from '$lib/components/Icon.svelte';
   import type { Clip } from '$shared/types';
   import { onDestroy } from 'svelte';
+  import { browser } from '$app/environment';
 
   interface Props {
     streamId: string;
@@ -152,9 +153,8 @@
   function onFullscreenChange() {
     isFullscreen = !!document.fullscreenElement;
   }
-
   onDestroy(() => {
-    if (document.fullscreenElement) void document.exitFullscreen?.();
+    if (browser && document.fullscreenElement) void document.exitFullscreen?.();
   });
 </script>
 
