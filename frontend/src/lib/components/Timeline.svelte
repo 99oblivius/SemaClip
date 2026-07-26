@@ -47,7 +47,7 @@
 
   const waveform = $derived(waveformQuery.data?.peaks ?? []);
   const chatDensity = $derived(chatQuery.data?.density ?? []);
-  const player = $playerStore;
+  const player = $derived($playerStore);
 
   const viewStart = $derived(player.viewStart || 0);
   const viewEnd = $derived(player.viewEnd || duration);

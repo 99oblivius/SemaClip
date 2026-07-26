@@ -330,8 +330,8 @@
       </div>
 
       <!-- Active clip detail -->
-      {#if currentClip}
-        <div class="rounded-md border border-border bg-surface p-4">
+      <div class="rounded-md border border-border bg-surface p-4">
+        {#if currentClip}
           <div class="mb-3 flex items-center justify-between">
             <div class="flex items-center gap-3">
               <span class="font-mono text-xs text-ash-dim">{String(currentClipIndex + 1).padStart(2, '0')}</span>
@@ -402,8 +402,12 @@
               </button>
             </div>
           </div>
-        </div>
-      {/if}
+        {:else}
+          <div class="flex items-center justify-center py-8">
+            <p class="text-sm text-ash-dim">No clip selected. Click a clip in the timeline or queue to inspect it.</p>
+          </div>
+        {/if}
+      </div>
 
       <!-- Undo toast for discarded clips -->
       {#if pendingUndo}

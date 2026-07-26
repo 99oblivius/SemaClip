@@ -15,7 +15,6 @@
   let isHovering = $state(false);
   let isDragging = $state(false);
 
-  /** Animate the slider open/closed on hover. Slider is to the LEFT of the icon. */
   $effect(() => {
     if (!sliderEl) return;
     if (isHovering || isDragging) {
@@ -25,37 +24,35 @@
     }
   });
 
-  function handleSliderClick(e: MouseEvent) {
-    if (!sliderEl) return;
+  function sliderPos(e: MouseEvent): number {
+    if (!sliderEl) return 0;
     const rect = sliderEl.getBoundingClientRect();
-    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    onVolume(pct);
-  }
-
-  function handleSliderMove(e: MouseEvent) {
-    if (!isDragging || !sliderEl) return;
-    const rect = sliderEl.getBoundingClientRect();
-    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    onVolume(pct);
+    return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
   }
 
   function handleMouseDown(e: MouseEvent) {
     e.stopPropagation();
+    e.preventDefault();
     isDragging = true;
-    handleSliderClick(e);
+    onVolume(sliderPos(e));
   }
 
   function handleMouseUp() {
     isDragging = false;
   }
+
+  function handleMouseMove(e: MouseEvent) {
+    if (!isDragging) return;
+    onVolume(sliderPos(e));
+  }
 </script>
 
-<svelte:window onmouseup={handleMouseUp} onmousemove={handleSliderMove} />
+<svelte:window onmouseup={handleMouseUp} onmousemove={handleMouseMove} />
 
-<!-- Slider is to the LEFT of the icon. The icon stays fixed; the slider
-     expands leftward so clicking the icon always toggles mute. -->
+<!-- Slider is absolutely positioned to the LEFT of the button.
+     The button stays fixed — no layout shift on hover. -->
 <div
-  class="flex items-center justify-end gap-2"
+  class="relative flex items-center"
   role="group"
   aria-label="Volume control"
   onmouseenter={() => (isHovering = true)}
@@ -63,7 +60,7 @@
 >
   <div
     bind:this={sliderEl}
-    class="relative h-1 cursor-pointer overflow-hidden rounded-full bg-white/20"
+    class="absolute right-full mr-2 top-1/2 -translate-y-1/2 h-1 cursor-pointer overflow-hidden rounded-full bg-white/20"
     style="width: 0px; opacity: 0;"
     onmousedown={handleMouseDown}
     role="slider"
