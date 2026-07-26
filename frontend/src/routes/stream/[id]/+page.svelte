@@ -29,6 +29,7 @@
 
   let playerComp = $state<VideoPlayer | undefined>(undefined);
   let currentClipIndex = $state(0);
+  let followClip = $state(false);
   let showKeyboardHelp = $state(false);
   let showExportSheet = $state(false);
   let exportAll = $state(false);
@@ -134,19 +135,18 @@
    *  with 10% padding, or reset to full VOD view. */
   function handleFollowClip() {
     if (!currentClip || !stream?.duration) return;
-    if ($playerStore.followClip) {
-      // Reset to full view.
+    if (followClip) {
       setView(0, stream.duration);
-      playerStore.update((s) => ({ ...s, followClip: false }));
+      followClip = false;
     } else {
       frameClip(currentClip.startTime, currentClip.endTime, stream.duration);
+      followClip = true;
     }
   }
 
-  // When followClip is active and the selected clip changes, auto-reframe the timeline.
+  // When followClip is active and the selected clip changes, auto-reframe.
   $effect(() => {
-    if (!currentClip || !stream?.duration) return;
-    if (!$playerStore.followClip) return;
+    if (!currentClip || !stream?.duration || !followClip) return;
     frameClip(currentClip.startTime, currentClip.endTime, stream.duration);
   });
 
@@ -292,8 +292,8 @@
         onClipEnd={handleClipEnd}
       />
 
-      <!-- Signal terrain timeline — transparent, no darkening wrapper -->
-      <div class="rounded-md border border-border bg-surface h-20 overflow-hidden">
+      <!-- Signal terrain timeline -->
+      <div class="relative rounded-md border border-border bg-surface h-20">
         {#if stream?.duration}
           <Timeline
             {streamId}
@@ -307,20 +307,20 @@
         {:else}
           <div class="flex h-full items-center justify-center text-xs text-ash-dim">Loading timeline...</div>
         {/if}
-      </div>
 
-      <!-- Clip-follow toggle — frames timeline to selected clip bounds -->
-      {#if currentClip}
-        <button
-          class="flex items-center gap-2 rounded-md border px-3 py-2 text-xs transition-colors
-          {$playerStore.followClip ? 'border-accent bg-accent/10 text-accent' : 'border-border text-ash hover:border-border-strong hover:text-ink'}"
-          onclick={handleFollowClip}
-          aria-label="Frame timeline to clip"
-        >
-          <Icon name="frame" size={14} />
-          <span>{$playerStore.followClip ? 'Fit to full VOD' : 'Frame to clip'}</span>
-        </button>
-      {/if}
+        <!-- Clip-follow toggle: minimal [ ] in top-right corner -->
+        {#if currentClip}
+          <button
+            class="absolute top-1 right-1 z-10 rounded p-0.5 transition-colors
+            {followClip ? 'bg-accent/15 text-accent' : 'text-ash-dim hover:bg-surface-2 hover:text-ash'}"
+            onclick={handleFollowClip}
+            aria-label={followClip ? 'Fit to full VOD' : 'Frame to clip'}
+            title={followClip ? 'Fit to full VOD (framing timeline to clip bounds)' : 'Frame timeline to selected clip'}
+          >
+            <Icon name="frame" size={16} fill={followClip} />
+          </button>
+        {/if}
+      </div>
 
       <!-- Active clip detail -->
       <div class="rounded-md border border-border bg-surface p-4">

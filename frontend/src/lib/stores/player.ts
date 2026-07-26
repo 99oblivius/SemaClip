@@ -13,7 +13,6 @@ export interface PlayerState {
   playbackRate: number;    // 0.25-2
   isFullscreen: boolean;
   isScrubbing: boolean;
-  followClip: boolean;     // timeline view follows the selected clip's bounds
 }
 export const playerStore = writable<PlayerState>({
   currentTime: 0,
@@ -28,7 +27,6 @@ export const playerStore = writable<PlayerState>({
   playbackRate: 1,
   isFullscreen: false,
   isScrubbing: false,
-  followClip: false,
 });
 
 export function seek(time: number) {
@@ -63,7 +61,7 @@ export function frameClip(clipStart: number, clipEnd: number, duration: number):
     if (start === 0) end = Math.min(duration, end + leftover);
     else if (end === duration) start = Math.max(0, start - leftover);
   }
-  playerStore.update((s) => ({ ...s, viewStart: start, viewEnd: end, followClip: true, zoomLevel: duration / Math.max(1, end - start) }));
+  playerStore.update((s) => ({ ...s, viewStart: start, viewEnd: end, zoomLevel: duration / Math.max(1, end - start) }));
 }
 export function setZoom(level: number, duration: number, centerTime: number) {
   const clamped = Math.max(1, Math.min(200, level));
