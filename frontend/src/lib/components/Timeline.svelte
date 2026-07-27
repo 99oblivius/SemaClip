@@ -35,9 +35,10 @@
   let draggingEndpoint: 'start' | 'end' | null = null;
 
   // ── Streaming waveform via SSE, managed by $effect ──
-  let waveformPeaks = $state<number[]>(new Array(2000).fill(-1));
+  // Pre-allocate empty; resized when the server sends totalPeaks.
+  let waveformPeaks = $state<number[]>([]);
   let waveformDuration = $state(0);
-  let waveformTotalPeaks = $state(2000);
+  let waveformTotalPeaks = $state(0);
 
   // Reconnect waveform when the user seeks, debounced to avoid reconnect storms.
   let seekTarget = $state(0);
@@ -82,9 +83,12 @@
               if (!line.startsWith('data: ')) continue;
               try {
                 const data = JSON.parse(line.slice(6));
-                if (data.error) throw new Error(data.error);
-                if (data.duration) duration = data.duration;
-                if (data.totalPeaks) totalPeaks = data.totalPeaks;
+                if (data.totalPeaks) {
+                  totalPeaks = data.totalPeaks;
+                  if (waveformPeaks.length < totalPeaks) {
+                    waveformPeaks = new Array(totalPeaks).fill(-1);
+                  }
+                }
                 if (data.firstIndex !== undefined && data.peaks) {
                   const arr = [...waveformPeaks];
                   for (let i = 0; i < data.peaks.length; i++) {
@@ -176,41 +180,55 @@
     const midY = h / 2;
 
     // ── Chat density (area chart) ──
+    // Aggregate per-second density to pixel resolution so detail survives
+    // at any zoom level. When zoomed out, many seconds per pixel → sum.
+    // When zoomed in, one second per pixel or finer → exact.
     if (chatDensity.length > 0) {
-      const chatStart = Math.floor(viewStart);
-      const chatEnd = Math.ceil(viewEnd);
-      const slice = chatDensity.slice(chatStart, chatEnd + 1);
-      const maxDensity = Math.max(1, ...slice);
+      const barWidth = 2;
+      const numBars = Math.max(1, Math.floor(w / barWidth));
+      const secPerBar = viewSpan / numBars;
+      const maxDensity = Math.max(1, ...chatDensity.slice(
+        Math.max(0, Math.floor(viewStart)),
+        Math.min(chatDensity.length, Math.ceil(viewEnd) + 1),
+      ));
       ctx.fillStyle = 'rgba(46, 46, 58, 0.8)';
       ctx.beginPath();
       ctx.moveTo(0, h);
-      slice.forEach((d, i) => {
-        const x = (i / Math.max(1, slice.length - 1)) * w;
-        const barH = (d / maxDensity) * (h * 0.3);
+      for (let b = 0; b <= numBars; b++) {
+        const tStart = viewStart + b * secPerBar;
+        const tEnd = tStart + secPerBar;
+        // Sum messages in this time window.
+        const sIdx = Math.max(0, Math.floor(tStart));
+        const eIdx = Math.min(chatDensity.length - 1, Math.floor(tEnd));
+        let sum = 0;
+        for (let i = sIdx; i <= eIdx; i++) sum += chatDensity[i] ?? 0;
+        const x = b * barWidth;
+        const barH = (sum / maxDensity) * (h * 0.3);
         ctx.lineTo(x, h - barH);
-      });
+      }
       ctx.lineTo(w, h);
       ctx.closePath();
       ctx.fill();
     }
 
     if (waveform.some((v) => v >= 0)) {
-      const totalPeaks = waveformTotalPeaks || 2000;
+      const totalPeaks = waveformTotalPeaks || waveform.length;
+      // Map view window to peak indices.
       const peakStart = Math.floor((viewStart / duration) * totalPeaks);
       const peakEnd = Math.ceil((viewEnd / duration) * totalPeaks);
       const slice = waveform.slice(Math.max(0, peakStart), Math.min(waveform.length, peakEnd + 1));
 
-      // Always fill the full container width. When zoomed out, multiple peaks
-      // aggregate per bar (max). When zoomed in, each peak spans multiple pixels.
-      const numBars = Math.max(1, Math.floor(w / 2));
-      const peaksPerBar = slice.length / numBars;
+      // Constant bar width. Aggregate peaks per bar when zoomed out (max amplitude),
+      // render at full resolution when zoomed in. The slice always fills the view width.
       const barWidth = 2;
+      const numBars = Math.max(1, Math.floor(w / barWidth));
+      const peaksPerBar = slice.length / numBars;
 
       ctx.fillStyle = 'rgba(113, 113, 122, 0.55)';
       const ampH = h * 0.35;
       for (let b = 0; b < numBars; b++) {
         const s = Math.floor(b * peaksPerBar);
-        const e = Math.floor((b + 1) * peaksPerBar);
+        const e = Math.max(s + 1, Math.floor((b + 1) * peaksPerBar));
         let peak = 0;
         for (let i = s; i < e; i++) {
           const v = slice[i] ?? -1;

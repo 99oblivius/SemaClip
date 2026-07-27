@@ -17,13 +17,19 @@
   let loaded = $state(false);
 
   // ── View state ──
-  // viewTime is derived: follows playback when follow=true, or uses
-  // manualViewTime when the user is browsing manually.
+  // scrollIndex: index of the bottom-most visible message.
+  // The view shows the last VISIBLE_COUNT messages up to scrollIndex,
+  // rendered bottom-aligned via flex justify-end (no scrollbar, no DOM scroll).
+  //
+  // When following, an effect syncs scrollIndex to player.currentTime.
+  // When the user scrolls, scrollIndex moves by 1 message and seeks to
+  // that message's time. This works even while playing — the seek jumps
+  // playback and the follow effect picks up the new position.
   let follow = $state(true);
-  let manualViewTime = $state(0);
-
-  // How many messages to show in the viewport.
+  let scrollIndex = $state(0);
+  const player = $derived($playerStore);
   const VISIBLE_COUNT = 40;
+
   $effect(() => {
     if (streamId && !loaded) {
       loaded = true;
@@ -34,7 +40,6 @@
   async function loadAll() {
     loading = true;
     try {
-      // Load in chunks of 500 until we have everything.
       let offset = 0;
       let msgs: ChatMessage[] = [];
       while (true) {
@@ -45,70 +50,66 @@
       }
       allMessages = msgs.sort((a, b) => a.t - b.t);
       hasChat = true;
+      scrollIndex = Math.min(VISIBLE_COUNT, allMessages.length);
     } catch {
       hasChat = false;
     }
     loading = false;
   }
 
-  // ── Follow: sync viewTime to playback ──
-  // When following, viewTime is derived from the player store.
-  // When not following, viewTime is controlled by the user (wheel/drag).
-  const player = $derived($playerStore);
-  const viewTime = $derived(follow ? player.currentTime : manualViewTime);
-
-  // ── Visible messages: the last VISIBLE_COUNT messages with t <= viewTime ──
-  // Binary search for the insertion point, then slice backward.
-  const visibleMessages = $derived.by(() => {
-    if (allMessages.length === 0) return [];
-    // Binary search: find the last index where t <= viewTime.
+  // ── Follow: sync scrollIndex to playback ──
+  $effect(() => {
+    if (!follow || allMessages.length === 0) return;
+    const time = player.currentTime;
+    // Binary search: last index where t <= time.
     let lo = 0, hi = allMessages.length;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
-      if (allMessages[mid]!.t <= viewTime) lo = mid + 1;
+      if (allMessages[mid]!.t <= time) lo = mid + 1;
       else hi = mid;
     }
-    const end = lo;
-    const start = Math.max(0, end - VISIBLE_COUNT);
-    return allMessages.slice(start, end);
+    scrollIndex = lo;
   });
 
-  // ── Scroll/drag: adjusts viewTime. When follow is on, this seeks the
-  // video so playback follows the chat position. When follow is off, the
-  // user browses independently without affecting playback. ──
+  // ── Visible messages: last VISIBLE_COUNT up to scrollIndex ──
+  const visibleMessages = $derived(
+    allMessages.slice(Math.max(0, scrollIndex - VISIBLE_COUNT), scrollIndex)
+  );
+
+  // ── Scroll: move one message, seek to bottom message's time ──
   function handleWheel(e: WheelEvent) {
     e.preventDefault();
-    const base = follow ? viewTime : manualViewTime;
-    const delta = e.deltaY * 0.05;
-    const newTime = Math.max(0, Math.min(duration ?? Infinity, base + delta));
-    if (follow) {
-      seek(newTime);
-    } else {
-      manualViewTime = newTime;
-    }
+    if (allMessages.length === 0) return;
+    const dir = e.deltaY > 0 ? 1 : -1;
+    const newIndex = Math.max(VISIBLE_COUNT, Math.min(allMessages.length, scrollIndex + dir));
+    if (newIndex === scrollIndex) return;
+    scrollIndex = newIndex;
+    const msg = allMessages[newIndex - 1];
+    if (msg) seek(msg.t);
   }
 
-  // ── Drag to scrub: click and drag to move through chat ──
+  // ── Drag to scrub: move by message proportional to drag distance ──
   let isDragging = false;
   let dragStartY = 0;
-  let dragStartTime = 0;
+  let dragStartIndex = 0;
 
   function handleMouseDown(e: MouseEvent) {
     isDragging = true;
     dragStartY = e.clientY;
-    dragStartTime = follow ? viewTime : manualViewTime;
+    dragStartIndex = scrollIndex;
     e.preventDefault();
   }
 
   function handleMouseMove(e: MouseEvent) {
-    if (!isDragging) return;
+    if (!isDragging || allMessages.length === 0) return;
     const dy = e.clientY - dragStartY;
-    const newTime = Math.max(0, Math.min(duration ?? Infinity, dragStartTime - dy * 0.2));
-    if (follow) {
-      seek(newTime);
-    } else {
-      manualViewTime = newTime;
-    }
+    // Dragging up = forward through messages. ~3px per message.
+    const delta = -Math.round(dy / 3);
+    const newIndex = Math.max(VISIBLE_COUNT, Math.min(allMessages.length, dragStartIndex + delta));
+    if (newIndex === scrollIndex) return;
+    scrollIndex = newIndex;
+    const msg = allMessages[newIndex - 1];
+    if (msg) seek(msg.t);
   }
 
   function handleMouseUp() {
@@ -118,8 +119,9 @@
   // ── Toggle follow ──
   function toggleFollow() {
     if (!follow) {
-      // Re-enabling: seek to current viewTime so playback catches up.
-      seek(viewTime);
+      // Re-enabling: seek to current bottom message.
+      const msg = allMessages[scrollIndex - 1];
+      if (msg) seek(msg.t);
     }
     follow = !follow;
   }
@@ -147,7 +149,10 @@
   }
 
   function jumpToMessage(msg: ChatMessage) {
-    manualViewTime = msg.t;
+    const idx = allMessages.findIndex((m) => m.t === msg.t && m.user === msg.user);
+    if (idx >= 0) {
+      scrollIndex = Math.min(allMessages.length, idx + 1);
+    }
     seek(msg.t);
     showSearch = false;
     searchQuery = '';
@@ -162,8 +167,6 @@
     const s = Math.floor(sec % 60);
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   }
-
-  // player derived above provides currentTime for highlighting.
 </script>
 
 <svelte:window onmousemove={handleMouseMove} onmouseup={handleMouseUp} />
@@ -263,11 +266,6 @@
             </span>
           </div>
         {/each}
-        {#if visibleMessages.length === 0}
-          <div class="flex items-center justify-center py-4">
-            <span class="text-xs text-ash-dim">No messages at this time. Scroll to browse.</span>
-          </div>
-        {/if}
       </div>
     </div>
   {/if}

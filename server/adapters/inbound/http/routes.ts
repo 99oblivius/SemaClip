@@ -258,9 +258,11 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   // knows WHERE on the timeline to place the data (regardless of arrival order).
   // Accepts ?around=<seconds> to prioritize decoding near the seek point.
 
-  const TARGET_PEAKS = 2000;
+  // One peak per second of audio — full resolution, no quantization at any zoom.
+  // A 10h stream = 36000 peaks ≈ 352KB JSON, negligible. ~141KB as Float32 binary.
+  const TARGET_PEAKS_PER_SEC = 1;
   const SAMPLE_RATE = 8000;
-  const BATCH_SIZE = 10; // small first-batch latency (~1s), 200 total SSE events
+  const BATCH_SIZE = 50; // ~50s per batch, fewer SSE events
 
   /** Run ffmpeg for a time range, compute peaks, yield batches. */
   async function* streamPeaks(
@@ -285,7 +287,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     let peakBuf: number[] = [];
     let acc = new Float32Array(0);
     let peakIdx = firstIndex;
-    const peakTime = totalSamples / TARGET_PEAKS; // seconds per peak
+    const peakTime = totalSamples / SAMPLE_RATE; // seconds per peak = samples ÷ samples/sec
 
     try {
       while (true) {
@@ -364,24 +366,29 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
           }
 
           // ── Cache check: if waveform was already computed, serve instantly. ──
+          // Staleness: old caches had a fixed 2000 peaks. Per-second resolution
+          // needs totalPeaks >= duration. If stale, fall through to recompute.
           const cached = await deps.metadata.get(streamId, "waveform");
           if (cached) {
             const cachePath = JSON.parse(cached).path;
             try {
               const raw = await Deno.readTextFile(cachePath);
-              const cached = JSON.parse(raw) as { duration: number; totalPeaks: number; peaks: number[] };
-              send({ duration: cached.duration, totalPeaks: cached.totalPeaks });
-              // Send in batches of 100 for progressive rendering.
-              for (let i = 0; i < cached.peaks.length; i += 100) {
+              const cachedData = JSON.parse(raw) as { duration: number; totalPeaks: number; peaks: number[] };
+              if (cachedData.totalPeaks < cachedData.duration) {
+                // Stale low-res cache — recompute at per-second resolution.
+                throw new Error("stale cache");
+              }
+              send({ duration: cachedData.duration, totalPeaks: cachedData.totalPeaks });
+              for (let i = 0; i < cachedData.peaks.length; i += BATCH_SIZE) {
                 if (closed) break;
-                const slice = cached.peaks.slice(i, i + 100);
-                send({ firstIndex: i, startTime: (i / cached.peaks.length) * cached.duration, peaks: slice });
+                const slice = cachedData.peaks.slice(i, i + BATCH_SIZE);
+                send({ firstIndex: i, startTime: (i / cachedData.peaks.length) * cachedData.duration, peaks: slice });
               }
               send({ done: true });
               close();
               return;
             } catch {
-              // Cache file missing/corrupt — fall through to recompute.
+              // Cache file missing/corrupt/stale — fall through to recompute.
             }
           }
 
@@ -399,15 +406,16 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
             close();
             return;
           }
-          send({ duration, totalPeaks: TARGET_PEAKS });
+          const totalPeaks = Math.max(1, Math.ceil(duration * TARGET_PEAKS_PER_SEC));
+          send({ duration, totalPeaks });
 
           // 2. Compute peaks per bucket and priority region.
-          const samplesPerPeak = Math.max(1, Math.floor((duration * SAMPLE_RATE) / TARGET_PEAKS));
-          const peakTime = duration / TARGET_PEAKS;
-          const aroundIndex = Math.max(0, Math.min(TARGET_PEAKS - 1, Math.floor((around / duration) * TARGET_PEAKS)));
+          const samplesPerPeak = Math.max(1, Math.floor(SAMPLE_RATE / TARGET_PEAKS_PER_SEC));
+          const peakTime = 1 / TARGET_PEAKS_PER_SEC; // seconds per peak
+          const aroundIndex = Math.max(0, Math.min(totalPeaks - 1, Math.floor(around * TARGET_PEAKS_PER_SEC)));
 
           // Accumulate all peaks for caching.
-          const allPeaks = new Array<number>(TARGET_PEAKS).fill(-1);
+          const allPeaks = new Array<number>(totalPeaks).fill(-1);
 
           // 3. Stream priority region (from aroundIndex to end) first.
           for await (const batch of streamPeaks(
@@ -443,13 +451,12 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
 
           if (!closed) send({ done: true });
 
-          // 5. Persist to disk + metadata table for future instant loads.
           // Only cache if we received all peaks (client didn't disconnect early).
           if (!closed && allPeaks.every((v) => v >= 0)) {
             await deps.storage.ensureStreamDirs(streamId);
             const cachePath = deps.storage.artifactPath(streamId, "waveform.json");
-            await Deno.writeTextFile(cachePath, JSON.stringify({ duration, totalPeaks: TARGET_PEAKS, peaks: allPeaks }));
-            await deps.metadata.set(streamId, "waveform", JSON.stringify({ path: cachePath, duration, totalPeaks: TARGET_PEAKS }));
+            await Deno.writeTextFile(cachePath, JSON.stringify({ duration, totalPeaks, peaks: allPeaks }));
+            await deps.metadata.set(streamId, "waveform", JSON.stringify({ path: cachePath, duration, totalPeaks }));
           }
         } catch (e) {
           send({ error: `Waveform streaming failed: ${e}` });
