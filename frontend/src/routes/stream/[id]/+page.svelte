@@ -2,7 +2,7 @@
   import { createQuery, createMutation, useQueryClient } from '@tanstack/svelte-query';
   import { apiClient } from '$lib/api/client';
   import { wsStore } from '$lib/stores/ws';
-  import { playerStore, seek, selectClip, setZoom, pan, frameClip, setView } from '$lib/stores/player';
+  import { playerStore, selectClip, setZoom, pan, frameClip, setView } from '$lib/stores/player';
   import Icon from '$lib/components/Icon.svelte';
   import VideoPlayer from '$lib/components/VideoPlayer.svelte';
   import Timeline from '$lib/components/Timeline.svelte';
@@ -89,10 +89,6 @@
   function handleClipEnd() {
     // Auto-advance to next clip's peak.
     nextClip();
-  }
-
-  function handleTimeUpdate(time: number) {
-    seek(time);
   }
 
   function discardClip() {
@@ -292,10 +288,8 @@
         duration={stream?.duration ?? null}
         clips={visibleClips}
         currentClip={currentClip}
-        onTimeUpdate={handleTimeUpdate}
         onClipEnd={handleClipEnd}
       />
-
       <!-- Signal terrain timeline -->
       <div class="relative rounded-md border border-border bg-surface h-20">
         {#if stream?.duration}

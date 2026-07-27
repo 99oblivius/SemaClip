@@ -1,6 +1,6 @@
 <script lang="ts">
   import { apiClient } from '$lib/api/client';
-  import { playerStore } from '$lib/stores/player';
+  import { playerStore, seek } from '$lib/stores/player';
   import Icon from '$lib/components/Icon.svelte';
   import VolumeControl from '$lib/components/VolumeControl.svelte';
   import SpeedControl from '$lib/components/SpeedControl.svelte';
@@ -13,7 +13,7 @@
     duration: number | null;
     clips: Clip[];
     currentClip: Clip | undefined;
-    onTimeUpdate: (time: number) => void;
+
     onClipEnd: () => void;
   }
 
@@ -22,7 +22,7 @@
     duration,
     clips,
     currentClip,
-    onTimeUpdate,
+
     onClipEnd,
   }: Props = $props();
 
@@ -45,7 +45,8 @@
   function handleTimeUpdate(e: Event) {
     const v = e.currentTarget as HTMLVideoElement;
     currentTime = v.currentTime;
-    onTimeUpdate(v.currentTime);
+    // Update store — externalSeek stays false so the seek effect skips
+    // (the video is already at this position, no need to seek back).
     playerStore.update((s) => ({ ...s, currentTime: v.currentTime }));
 
     if (autoAdvanceClip && v.currentTime >= autoAdvanceClip.endTime) {
@@ -54,46 +55,48 @@
       onClipEnd();
     }
   }
+  // ── Single seek path: all seeks update the store, this effect applies
+  // them to the video element. ontimeupdate also updates the store, but
+  // since the video is already at that position, the delta is ~0 and the
+  // effect skips — no feedback loop. ──
+  // A guard distinguishes "the video reported its own position" (via
+  // ontimeupdate) from "an external seek changed the store" (ChatView,
+  // keyboard, etc.). Only external seeks apply to the video element.
+  let externalSeek = false;
 
-  // ── External seek: when the store's currentTime changes from outside
-  // (ChatView scroll, Timeline scrub), apply it to the video element. ──
-  // The isScrubbing flag distinguishes external seeks from the video's
-  // own ontimeupdate (which we must NOT feed back, or it fights playback).
   $effect(() => {
     if (!videoEl) return;
     const p = $playerStore;
-    if (p.isScrubbing) return;
-    // Apply if the delta is meaningful (>0.3s) to avoid fighting ontimeupdate.
-    if (Math.abs(videoEl.currentTime - p.currentTime) > 0.3) {
-      videoEl.currentTime = p.currentTime;
-      currentTime = p.currentTime;
-    }
+    if (!externalSeek) return;
+    externalSeek = false;
+    videoEl.currentTime = p.currentTime;
+    currentTime = p.currentTime;
+    autoAdvanceClip = null;
   });
+
+  function seekTo(time: number) {
+    if (!videoEl) return;
+    externalSeek = true;
+    seek(time);
+  }
+
+  function seekRelative(delta: number) {
+    if (!videoEl) return;
+    externalSeek = true;
+    seek(Math.max(0, Math.min(videoDuration, videoEl.currentTime + delta)));
+  }
+
+  function frameStep(delta: number) {
+    if (!videoEl) return;
+    externalSeek = true;
+    seek(Math.max(0, Math.min(videoDuration, videoEl.currentTime + delta)));
+  }
+
   function togglePlay() {
     if (!videoEl) return;
     if (videoEl.paused) void videoEl.play();
     else videoEl.pause();
   }
-
-  function seekTo(time: number) {
-    if (!videoEl) return;
-    autoAdvanceClip = null;
-    videoEl.currentTime = time;
-    currentTime = time;
-  }
-
-  function seekRelative(delta: number) {
-    if (!videoEl) return;
-    autoAdvanceClip = null;
-    videoEl.currentTime = Math.max(0, Math.min(videoDuration, videoEl.currentTime + delta));
-  }
-
-  function frameStep(delta: number) {
-    if (!videoEl) return;
-    autoAdvanceClip = null;
-    videoEl.currentTime = Math.max(0, Math.min(videoDuration, videoEl.currentTime + delta));
-  }
-
   function toggleMute() {
     if (!videoEl) return;
     if (videoEl.muted) {
@@ -154,16 +157,16 @@
   export function playClip(clip: Clip) {
     if (!videoEl) return;
     autoAdvanceClip = clip;
-    videoEl.currentTime = clip.startTime;
-    currentTime = clip.startTime;
+    externalSeek = true;
+    seek(clip.startTime);
     void videoEl.play();
   }
 
   export function jumpToClipPeak(clip: Clip) {
     if (!videoEl) return;
     autoAdvanceClip = null;
-    videoEl.currentTime = clip.peakTime;
-    currentTime = clip.peakTime;
+    externalSeek = true;
+    seek(clip.peakTime);
   }
 
   export function togglePlayExported() { togglePlay(); }
@@ -218,13 +221,15 @@
       <!-- Skip prev/next clip -->
       <button onclick={() => {
         const idx = clips.findIndex((c) => c.id === currentClip?.id);
-        if (idx > 0) playClip(clips[idx - 1]);
+        const target = idx < 0 ? clips[clips.length - 1] : clips[idx - 1];
+        if (target) playClip(target);
       }} class="text-white/70 transition-colors hover:text-white" aria-label="Previous clip">
         <Icon name="skip-back" size={18} />
       </button>
       <button onclick={() => {
         const idx = clips.findIndex((c) => c.id === currentClip?.id);
-        if (idx >= 0 && idx < clips.length - 1) playClip(clips[idx + 1]);
+        const target = idx < 0 ? clips[0] : clips[idx + 1];
+        if (target) playClip(target);
       }} class="text-white/70 transition-colors hover:text-white" aria-label="Next clip">
         <Icon name="skip-forward" size={18} />
       </button>
