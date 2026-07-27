@@ -199,18 +199,21 @@
       const peakStart = Math.floor((viewStart / duration) * totalPeaks);
       const peakEnd = Math.ceil((viewEnd / duration) * totalPeaks);
       const slice = waveform.slice(Math.max(0, peakStart), Math.min(waveform.length, peakEnd + 1));
-      const samplesPerPixel = Math.max(1, Math.floor(slice.length / w));
+      // Render 2px bars: number of bars = floor(w / 2), each 2px wide.
+      const numBars = Math.max(1, Math.floor(w / 2));
+      const samplesPerBar = Math.max(1, Math.floor(slice.length / numBars));
       ctx.fillStyle = 'rgba(113, 113, 122, 0.55)';
       const ampH = h * 0.35;
-      for (let x = 0; x < w; x++) {
-        const idx = Math.floor((x / w) * slice.length);
+      for (let b = 0; b < numBars; b++) {
+        const idx = Math.floor((b / numBars) * slice.length);
         let peak = 0;
-        for (let j = 0; j < samplesPerPixel; j++) {
+        for (let j = 0; j < samplesPerBar; j++) {
           const v = slice[idx + j] ?? -1;
           if (v >= 0 && v > peak) peak = v;
         }
         const barH = peak * ampH;
-        ctx.fillRect(x, midY - barH, 1, barH * 2);
+        const barX = b * 2;
+        ctx.fillRect(barX, midY - barH, 2, barH * 2);
       }
     }
 

@@ -63,17 +63,26 @@ export function frameClip(clipStart: number, clipEnd: number, duration: number):
   }
   playerStore.update((s) => ({ ...s, viewStart: start, viewEnd: end, zoomLevel: duration / Math.max(1, end - start) }));
 }
-export function setZoom(level: number, duration: number, centerTime: number) {
+/** Zoom anchored at a specific time (the cursor position). After zooming,
+ *  the same time stays at the same screen position — the cursor doesn't move. */
+export function setZoom(level: number, duration: number, anchorTime: number) {
   const clamped = Math.max(1, Math.min(200, level));
   const windowSec = duration / clamped;
-  let start = centerTime - windowSec / 2;
-  if (start < 0) start = 0;
-  let end = start + windowSec;
-  if (end > duration) {
-    end = duration;
-    start = Math.max(0, end - windowSec);
-  }
-  playerStore.update((s) => ({ ...s, zoomLevel: clamped, viewStart: start, viewEnd: end }));
+  playerStore.update((s) => {
+    const curStart = s.viewStart || 0;
+    const curEnd = s.viewEnd || duration;
+    const curSpan = curEnd - curStart;
+    // Fraction of the current view to the left of the anchor — preserve it.
+    const leftFrac = curSpan > 0 ? (anchorTime - curStart) / curSpan : 0.5;
+    let start = anchorTime - leftFrac * windowSec;
+    if (start < 0) start = 0;
+    let end = start + windowSec;
+    if (end > duration) {
+      end = duration;
+      start = Math.max(0, end - windowSec);
+    }
+    return { ...s, zoomLevel: clamped, viewStart: start, viewEnd: end };
+  });
 }
 
 export function pan(deltaSec: number, duration: number) {
