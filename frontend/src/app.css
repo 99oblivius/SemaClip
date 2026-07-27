@@ -55,6 +55,22 @@
     background: var(--color-accent);
     color: var(--color-ink);
   }
+
+  /* Interactive elements show the correct cursor without per-component classes. */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  [role="tab"],
+  [role="slider"],
+  a,
+  label[for],
+  summary {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [aria-disabled="true"] {
+    cursor: not-allowed;
+  }
 }
 
 @layer components {
