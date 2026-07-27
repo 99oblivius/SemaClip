@@ -160,3 +160,14 @@ export class CancelJobUseCase {
     return cancelled;
   }
 }
+
+/** List all jobs: running first, then queued (by position), then terminal. */
+export class ListJobsUseCase {
+  constructor(private readonly jobs: JobRepository) {}
+
+  async execute(): Promise<Job[]> {
+    const running = await this.jobs.listRunning();
+    const queued = await this.jobs.listQueued();
+    return [...running, ...queued.sort((a, b) => a.position - b.position)];
+  }
+}

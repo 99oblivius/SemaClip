@@ -6,9 +6,11 @@ import type {
   ListStreamsUseCase,
   GetStreamUseCase,
   DeleteStreamUseCase,
+  UpdateStreamUseCase,
   AttachChatUseCase,
   StartJobUseCase,
   CancelJobUseCase,
+  ListJobsUseCase,
   ListClipsUseCase,
   GetClipUseCase,
   RejectClipUseCase,
@@ -25,9 +27,11 @@ export interface HttpDeps {
   listStreams: ListStreamsUseCase;
   getStream: GetStreamUseCase;
   deleteStream: DeleteStreamUseCase;
+  updateStream: UpdateStreamUseCase;
   attachChat: AttachChatUseCase;
   startJob: StartJobUseCase;
   cancelJob: CancelJobUseCase;
+  listJobs: ListJobsUseCase;
   listClips: ListClipsUseCase;
   getClip: GetClipUseCase;
   rejectClip: RejectClipUseCase;
@@ -129,7 +133,18 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     return c.json({ ok: true });
   });
 
+  // Update stream metadata (title, streamer, game, vodPath, chatPath).
+  app.patch("/api/streams/:id", async (c) => {
+    const body = await c.req.json();
+    const stream = await deps.updateStream.execute(c.req.param("id"), body);
+    return c.json(stream);
+  });
+
   // ── Jobs ──
+  app.get("/api/jobs", async (c) => {
+    return c.json(await deps.listJobs.execute());
+  });
+
   app.post("/api/streams/:id/jobs", async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const job = await deps.startJob.execute(c.req.param("id"), body.config);

@@ -15,9 +15,11 @@ import {
   ListStreamsUseCase,
   GetStreamUseCase,
   DeleteStreamUseCase,
+  UpdateStreamUseCase,
   AttachChatUseCase,
   StartJobUseCase,
   CancelJobUseCase,
+  ListJobsUseCase,
   ListClipsUseCase,
   GetClipUseCase,
   RejectClipUseCase,
@@ -79,12 +81,14 @@ export function buildContainer(config: AppConfig): AppContainer {
   // Use cases
   const importByFile = new ImportStreamByFileUseCase(streamRepo, fs, ffmpeg);
   const importByUrl = new ImportStreamByUrlUseCase(streamRepo, vodDownloader, fs, bus, config.cacheDir);
-  const listStreams = new ListStreamsUseCase(streamRepo);
-  const getStream = new GetStreamUseCase(streamRepo);
   const deleteStream = new DeleteStreamUseCase(streamRepo, jobRepo);
+  const updateStream = new UpdateStreamUseCase(streamRepo);
   const attachChat = new AttachChatUseCase(streamRepo, fs);
   const startJob = new StartJobUseCase(streamRepo, jobRepo, clipRepo, engine, bus, fs);
   const cancelJob = new CancelJobUseCase(jobRepo, engine, bus);
+  const listJobs = new ListJobsUseCase(jobRepo);
+  const getStream = new GetStreamUseCase(streamRepo);
+  const listStreams = new ListStreamsUseCase(streamRepo);
   const listClips = new ListClipsUseCase(clipRepo);
   const getClip = new GetClipUseCase(clipRepo);
   const rejectClip = new RejectClipUseCase(clipRepo);
@@ -100,9 +104,11 @@ export function buildContainer(config: AppConfig): AppContainer {
       listStreams,
       getStream,
       deleteStream,
+      updateStream,
       attachChat,
       startJob,
       cancelJob,
+      listJobs,
       listClips,
       getClip,
       rejectClip,

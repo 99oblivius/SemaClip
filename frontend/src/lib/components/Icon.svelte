@@ -12,9 +12,10 @@
     size?: number;
     fill?: boolean;
     strokeWidth?: number;
+    class?: string;
   }
 
-  let { name, size = 20, fill = false, strokeWidth = 1.5 }: Props = $props();
+  let { name, size = 20, fill = false, strokeWidth = 1.5, class: className = '' }: Props = $props();
 
   // Multi-path icons use arrays joined by space; single-path use a string.
   const paths: Record<IconName, string> = {
@@ -27,7 +28,7 @@
     scissors: 'M6 4a2 2 0 100 4 2 2 0 000-4zm0 12a2 2 0 100 4 2 2 0 000-4zM6 8l14 8M6 16L20 8',
     trash: 'M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13',
     filter: 'M3 5h18l-7 8v6l-4-2v-4z',
-    settings: 'M12 8a4 4 0 100 8 4 4 0 000-8zM12 2v2M12 20v2M4 12H2M22 12h-2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19',
+    settings: 'M18.56 9.55L21.37 10.43L21.37 13.57L18.56 14.45L18.37 14.90L19.73 17.52L17.52 19.73L14.90 18.37L14.45 18.56L13.57 21.37L10.43 21.37L9.55 18.56L9.10 18.37L6.48 19.73L4.27 17.52L5.63 14.90L5.44 14.45L2.63 13.57L2.63 10.43L5.44 9.55L5.63 9.10L4.27 6.48L6.48 4.27L9.10 5.63L9.55 5.44L10.43 2.63L13.57 2.63L14.45 5.44L14.90 5.63L17.52 4.27L19.73 6.48L18.37 9.10Z M12 9a3 3 0 100 6 3 3 0 000-6',
     plus: 'M12 5v14M5 12h14',
     link: 'M10 13a5 5 0 007 0l3-3a5 5 0 00-7-7l-1 1M14 11a5 5 0 00-7 0l-3 3a5 5 0 007 7l1-1',
     download: 'M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2',
@@ -73,6 +74,7 @@
   stroke-linecap="round"
   stroke-linejoin="round"
   aria-hidden="true"
+  class={className}
 >
   <path d={paths[name]} />
 </svg>

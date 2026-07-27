@@ -9,6 +9,7 @@
   import SignalBar from '$lib/components/SignalBar.svelte';
   import ExportSheet from '$lib/components/ExportSheet.svelte';
   import KeyboardHelp from '$lib/components/KeyboardHelp.svelte';
+  import ProjectSettings from '$lib/components/ProjectSettings.svelte';
   import { fadeIn } from '$lib/actions/gsap';
   import type { Clip, EngineEvent } from '$shared/types';
   import { onMount, onDestroy } from 'svelte';
@@ -267,6 +268,9 @@
       >
         <Icon name="keyboard" size={14} />
       </button>
+      {#if stream}
+        <ProjectSettings {stream} />
+      {/if}
       <button
         class="flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent-hover"
         onclick={exportAllClips}

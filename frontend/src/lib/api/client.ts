@@ -67,7 +67,13 @@ export const apiClient = {
   deleteStream: (id: string) =>
     api<{ ok: boolean }>(`/streams/${id}`, { method: 'DELETE' }),
 
+  updateStream: (id: string, patch: Partial<Pick<Stream, 'title' | 'streamer' | 'game' | 'vodPath' | 'chatPath'>>) =>
+    api<Stream>(`/streams/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+
   // ── Jobs ──
+  listJobs: () =>
+    api<Job[]>('/jobs'),
+
   startJob: (streamId: string, config?: object) =>
     api<Job>(`/streams/${streamId}/jobs`, { method: 'POST', body: JSON.stringify({ config }) }),
 

@@ -5,34 +5,44 @@
   import { fadeIn } from '$lib/actions/gsap';
   import { QueryClientProvider } from '@tanstack/svelte-query';
   import { onMount, type Snippet } from 'svelte';
+  import { page } from '$app/stores';
   import type { PageData } from './$types';
 
   let { children, data }: { children: Snippet; data: PageData } = $props();
-  let route = $state('library');
 
   onMount(() => wsStore.connect());
 
+  // Active route derived from the current URL path.
+  const currentPath = $derived($page.url.pathname);
+  const activeNav = $derived(
+    currentPath === '/' || currentPath.startsWith('/stream') ? 'library'
+    : currentPath.startsWith('/queue') ? 'queue'
+    : currentPath.startsWith('/settings') ? 'settings'
+    : 'library'
+  );
+
   const navItems = [
-    { id: 'library', icon: 'grid' as const, label: 'Library' },
-    { id: 'queue', icon: 'queue' as const, label: 'Queue' },
-    { id: 'settings', icon: 'settings' as const, label: 'Settings' },
+    { id: 'library', icon: 'grid' as const, label: 'Library', href: '/' },
+    { id: 'queue', icon: 'queue' as const, label: 'Queue', href: '/queue' },
+    { id: 'settings', icon: 'settings' as const, label: 'Settings', href: '/settings' },
   ];
 </script>
 
 <QueryClientProvider client={data.queryClient}>
   <div class="flex h-screen w-screen overflow-hidden bg-foundation text-ink">
     <nav class="flex w-14 flex-col items-center gap-1 border-r border-border bg-surface pt-3">
-      <div class="mb-4 font-display text-lg font-bold text-accent">S</div>
+      <a href="/" class="mb-4 font-display text-lg font-bold text-accent" aria-label="SemaClip home">S</a>
       {#each navItems as item}
-        <button
+        <a
+          href={item.href}
           class="flex h-10 w-10 items-center justify-center rounded-md transition-colors hover:text-ink
-          {route === item.id ? 'text-accent' : 'text-ash'}"
-          onclick={() => (route = item.id)}
+          {activeNav === item.id ? 'text-accent' : 'text-ash'}"
           title={item.label}
           aria-label={item.label}
+          aria-current={activeNav === item.id ? 'page' : undefined}
         >
           <Icon name={item.icon} size={20} />
-        </button>
+        </a>
       {/each}
     </nav>
 
