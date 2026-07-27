@@ -42,6 +42,27 @@ export interface HttpDeps {
   storage: StreamStorage;
 }
 
+// ── In-memory chat cache ──
+// Parsing a multi-MB chat JSON on every paginated request is the main
+// bottleneck. Cache the parsed + mapped messages by file path + mtime.
+const chatCache = new Map<string, { mtime: number; msgs: { t: number; user: string; body: string }[] }>();
+
+async function loadChat(chatPath: string): Promise<{ t: number; user: string; body: string }[]> {
+  const stat = await Deno.stat(chatPath);
+  const mtime = stat.mtime?.getTime() ?? 0;
+  const cached = chatCache.get(chatPath);
+  if (cached && cached.mtime === mtime) return cached.msgs;
+  const raw = await Deno.readTextFile(chatPath);
+  const data = JSON.parse(raw);
+  const comments: Array<{ content_offset_seconds: number; commenter?: { display_name: string }; message?: { body: string } }> =
+    Array.isArray(data) ? data : data.comments ?? [];
+  const msgs = comments
+    .map((m) => ({ t: m.content_offset_seconds ?? 0, user: m.commenter?.display_name ?? "unknown", body: m.message?.body ?? "" }))
+    .sort((a, b) => a.t - b.t);
+  chatCache.set(chatPath, { mtime, msgs });
+  return msgs;
+}
+
 /** Domain errors → HTTP status codes. */
 function errorStatus(msg: string): 400 | 404 | 500 {
   if (/not found|not available/i.test(msg)) return 404;
@@ -162,18 +183,12 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     const stream = await deps.getStream.execute(c.req.param("id"));
     if (!stream || !stream.chatPath) return c.json({ error: "Chat not available" }, 404);
     try {
-      const raw = await Deno.readTextFile(stream.chatPath);
-      const data = JSON.parse(raw);
-      const comments = Array.isArray(data) ? data : data.comments ?? [];
-      // Bucket messages by content_offset_seconds.
-      const duration = stream.duration ?? Math.max(
-        ...comments.map((m: { content_offset_seconds?: number }) => m.content_offset_seconds ?? 0),
-        0,
-      );
+      const msgs = await loadChat(stream.chatPath);
+      const duration = stream.duration ?? Math.max(0, ...msgs.map((m) => m.t));
       const bucketCount = Math.max(1, Math.ceil(duration));
       const buckets = new Array(bucketCount).fill(0);
-      for (const msg of comments) {
-        const sec = Math.floor(msg.content_offset_seconds ?? 0);
+      for (const msg of msgs) {
+        const sec = Math.floor(msg.t);
         if (sec >= 0 && sec < bucketCount) buckets[sec]++;
       }
       return c.json({ duration, density: buckets });
@@ -190,32 +205,18 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     const stream = await deps.getStream.execute(c.req.param("id"));
     if (!stream || !stream.chatPath) return c.json({ error: "Chat not available" }, 404);
     try {
-      const raw = await Deno.readTextFile(stream.chatPath);
-      const data = JSON.parse(raw);
-      const comments: Array<{ content_offset_seconds: number; commenter?: { display_name: string }; message?: { body: string } }> =
-        Array.isArray(data) ? data : data.comments ?? [];
-
+      const msgs = await loadChat(stream.chatPath);
       const limit = Math.min(500, parseInt(c.req.query("limit") ?? "100", 10));
       const around = c.req.query("around");
 
-      // Map to compact format.
-      const msgs = comments.map((m) => ({
-        t: m.content_offset_seconds ?? 0,
-        user: m.commenter?.display_name ?? "unknown",
-        body: m.message?.body ?? "",
-      }));
-
       if (around !== null && around !== undefined) {
-        // Find messages centered on the timestamp.
         const aroundSec = parseFloat(around) || 0;
-        // Binary search for the closest message.
         let lo = 0, hi = msgs.length - 1;
         while (lo < hi) {
           const mid = (lo + hi) >> 1;
           if (msgs[mid]!.t < aroundSec) lo = mid + 1;
           else hi = mid;
         }
-        // Center the window on this message.
         const start = Math.max(0, lo - Math.floor(limit / 2));
         const end = Math.min(msgs.length, start + limit);
         return c.json({ messages: msgs.slice(start, end), total: msgs.length, offset: start });
@@ -235,18 +236,10 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     const q = c.req.query("q") ?? "";
     if (!q.trim()) return c.json({ results: [] });
     try {
-      const raw = await Deno.readTextFile(stream.chatPath);
-      const data = JSON.parse(raw);
-      const comments: Array<{ content_offset_seconds: number; commenter?: { display_name: string }; message?: { body: string } }> =
-        Array.isArray(data) ? data : data.comments ?? [];
+      const msgs = await loadChat(stream.chatPath);
       const lower = q.toLowerCase();
-      const results = comments
-        .filter((m) => (m.message?.body ?? "").toLowerCase().includes(lower))
-        .map((m) => ({
-          t: m.content_offset_seconds ?? 0,
-          user: m.commenter?.display_name ?? "unknown",
-          body: m.message?.body ?? "",
-        }))
+      const results = msgs
+        .filter((m) => m.body.toLowerCase().includes(lower))
         .slice(0, 200);
       return c.json({ results });
     } catch {

@@ -40,23 +40,17 @@
   let waveformDuration = $state(0);
   let waveformTotalPeaks = $state(0);
 
-  // Reconnect waveform when the user seeks, debounced to avoid reconnect storms.
-  let seekTarget = $state(0);
-  $effect(() => {
-    const t = $playerStore.currentTime || 0;
-    const timer = setTimeout(() => { seekTarget = t; }, 400);
-    return () => clearTimeout(timer);
-  });
-
+  // Fetch waveform once on mount. The server caches the computed peaks,
+  // so there's no need to reconnect on seek — all peaks arrive in one stream.
   let readerRef: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
   $effect(() => {
+    if (!streamId) return;
     const ctrl = new AbortController();
-    const around = seekTarget;
 
     (async () => {
       try {
-        const res = await fetch(`/api/streams/${streamId}/waveform?around=${Math.round(around)}`, {
+        const res = await fetch(`/api/streams/${streamId}/waveform`, {
           signal: ctrl.signal,
         });
         if (!res.ok || !res.body) return;
@@ -69,7 +63,9 @@
         const decoder = new TextDecoder();
         let buffer = '';
         let duration = 0;
-        let totalPeaks = 2000;
+        let totalPeaks = 0;
+        // Non-reactive accumulator — mutated in place, synced to $state per batch.
+        let acc = waveformPeaks;
 
         try {
           while (true) {
@@ -85,16 +81,22 @@
                 const data = JSON.parse(line.slice(6));
                 if (data.totalPeaks) {
                   totalPeaks = data.totalPeaks;
-                  if (waveformPeaks.length < totalPeaks) {
-                    waveformPeaks = new Array(totalPeaks).fill(-1);
+                  if (acc.length < totalPeaks) {
+                    acc = new Array(totalPeaks).fill(-1);
+                    // Push existing waveformPeaks into acc if sizes differ.
+                    for (let i = 0; i < waveformPeaks.length && i < acc.length; i++) {
+                      acc[i] = waveformPeaks[i] ?? -1;
+                    }
                   }
                 }
                 if (data.firstIndex !== undefined && data.peaks) {
-                  const arr = [...waveformPeaks];
+                  // Mutate the non-reactive accumulator directly — no copy.
                   for (let i = 0; i < data.peaks.length; i++) {
-                    arr[data.firstIndex + i] = data.peaks[i];
+                    acc[data.firstIndex + i] = data.peaks[i];
                   }
-                  waveformPeaks = arr;
+                  // Sync to reactive state for rendering. Batching by BATCH_SIZE
+                  // means one re-render per batch, not per peak.
+                  waveformPeaks = [...acc];
                 }
                 if (data.done) continue;
                 waveformDuration = duration;

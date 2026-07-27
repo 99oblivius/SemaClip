@@ -40,17 +40,10 @@
   async function loadAll() {
     loading = true;
     try {
-      let offset = 0;
-      let msgs: ChatMessage[] = [];
-      while (true) {
-        const res = await apiClient.listChat(streamId, { offset, limit: 500 });
-        msgs = [...msgs, ...res.messages];
-        if (res.messages.length < 500) break;
-        offset += 500;
-      }
-      allMessages = msgs.sort((a, b) => a.t - b.t);
+      // Single request — server caches the parsed chat file in memory.
+      const res = await apiClient.listChat(streamId, { offset: 0, limit: 100000 });
+      allMessages = res.messages;
       hasChat = true;
-      scrollIndex = Math.min(VISIBLE_COUNT, allMessages.length);
     } catch {
       hasChat = false;
     }
