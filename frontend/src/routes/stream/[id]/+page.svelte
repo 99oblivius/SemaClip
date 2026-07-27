@@ -10,9 +10,9 @@
   import ExportSheet from '$lib/components/ExportSheet.svelte';
   import KeyboardHelp from '$lib/components/KeyboardHelp.svelte';
   import ProjectSettings from '$lib/components/ProjectSettings.svelte';
-  import ChatView from '$lib/components/ChatView.svelte';
-  import { fadeIn } from '$lib/actions/gsap';
+  import RightPanel from '$lib/components/RightPanel.svelte';
   import type { Clip, EngineEvent } from '$shared/types';
+  import { fadeIn } from '$lib/actions/gsap';
   import { onMount, onDestroy } from 'svelte';
   let { params } = $props();
   const streamId = $derived(params.id);
@@ -414,42 +414,14 @@
       {/if}
     </div>
 
-    <!-- Right: clip queue + chat -->
-    <div class="flex w-72 flex-col gap-3 overflow-hidden">
-      <!-- Clip queue -->
-      <div class="flex flex-col gap-1 overflow-hidden rounded-md border border-border bg-surface" style="flex: 0 0 auto; max-height: 40%;">
-        <div class="flex items-center justify-between border-b border-border px-3 py-2">
-          <span class="font-display text-xs font-medium text-ash uppercase">Clips</span>
-          <span class="font-mono text-xs text-ash-dim">{visibleClips.length}</span>
-        </div>
-
-        <!-- Clip list -->
-        <div class="flex-1 overflow-y-auto">
-          {#each visibleClips as clip, i (clip.id)}
-            <button
-              class="flex w-full items-center gap-3 border-l-2 px-3 py-2 text-left transition-colors hover:bg-surface-2
-              {i === currentClipIndex ? 'border-accent bg-surface-2' : 'border-transparent'}"
-              onclick={() => { currentClipIndex = i; jumpToClip(clip); }}
-            >
-              <span class="w-5 font-mono text-xs text-ash-dim">{i + 1}</span>
-              <span class="flex-1 font-mono text-xs text-ash uppercase">{clip.axis}</span>
-              <span class="font-mono text-xs text-ink">{clip.score.toFixed(2)}</span>
-            </button>
-          {/each}
-          {#if visibleClips.length === 0}
-            <div class="flex h-full flex-col items-center justify-center gap-2 p-4 text-center">
-              <Icon name="waveform" size={32} fill={false} />
-              <p class="text-xs text-ash-dim">No clips found yet.<br />Process the stream to detect moments.</p>
-            </div>
-          {/if}
-        </div>
-      </div>
-
-      <!-- Chat view -->
-      <div class="flex-1 min-h-0">
-        <ChatView {streamId} duration={stream?.duration ?? null} />
-      </div>
-    </div>
+    <!-- Right: tabbed clips + chat -->
+    <RightPanel
+      {streamId}
+      stream={stream}
+      clips={visibleClips}
+      {currentClipIndex}
+      onSelectClip={(i) => { currentClipIndex = i; if (visibleClips[i]) jumpToClip(visibleClips[i]); }}
+    />
   </div>
 </div>
 

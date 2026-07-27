@@ -17,9 +17,17 @@
   let hasChat = $state(true);
   let scrollEl = $state<HTMLDivElement | undefined>(undefined);
   let showSearch = $state(false);
+
+  // Auto-follow: when true, the chat scrolls to match playback.
+  // Disabled when the user manually scrolls. Re-enabled by clicking the
+  // follow button or by the playback time jumping far from the current view.
   let autoFollow = $state(true);
+
+  // Guard: prevents the playback-follow effect from reacting to a scroll
+  // that IT triggered. Set true before programmatic scroll, cleared after.
+  let programmaticScroll = false;
+
   let searchDebounce: ReturnType<typeof setTimeout> | null = null;
-  let scrollDebounce: ReturnType<typeof setTimeout> | null = null;
   let loaded = $state(false);
 
   // ── Load messages centered on a timestamp ──
@@ -49,10 +57,13 @@
         if (newMsgs.length > 0) {
           const prevScrollHeight = scrollEl?.scrollHeight ?? 0;
           messages = [...newMsgs, ...messages];
+          // Maintain scroll position after prepending.
           requestAnimationFrame(() => {
             if (scrollEl) {
               const newScrollHeight = scrollEl.scrollHeight;
+              programmaticScroll = true;
               scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
+              setTimeout(() => { programmaticScroll = false; }, 50);
             }
           });
         }
@@ -77,7 +88,10 @@
   });
 
   // ── Playback follow ──
-  let lastFollowTime = 0;
+  // Scrolls the chat so the message closest to currentTime is at the bottom
+  // of the viewport (like a live chat feed). Uses programmaticScroll guard
+  // to prevent the scroll handler from seeking back.
+  let lastFollowTime = -1;
   $effect(() => {
     const time = $playerStore.currentTime;
     if (!autoFollow || !scrollEl || messages.length === 0) return;
@@ -89,28 +103,46 @@
     const firstT = messages[0]!.t;
     const lastT = messages.at(-1)!.t;
 
+    // If playhead is outside loaded range, reload centered on it.
     if (time < firstT - 5 || time > lastT + 5) {
       loadAround(time);
       return;
     }
 
-    // Scroll to the message closest to the current time (last msg with t <= time).
+    // Find the last message with t <= currentTime.
     let idx = 0;
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i]!.t <= time) { idx = i; break; }
     }
 
+    // Scroll so this message sits at the bottom of the viewport.
     const targetEl = scrollEl.children[idx] as HTMLElement | undefined;
     if (targetEl) {
-      const targetTop = targetEl.offsetTop;
-      const targetHeight = targetEl.offsetHeight;
-      scrollEl.scrollTo({ top: targetTop + targetHeight - scrollEl.clientHeight + 20, behavior: 'smooth' });
+      const targetBottom = targetEl.offsetTop + targetEl.offsetHeight;
+      const scrollTop = targetBottom - scrollEl.clientHeight;
+      if (scrollTop >= 0) {
+        programmaticScroll = true;
+        scrollEl.scrollTop = scrollTop;
+        // Clear guard after the browser processes the scroll event.
+        requestAnimationFrame(() => { programmaticScroll = false; });
+      }
     }
   });
 
   // ── Manual scroll handling ──
+  // When the user scrolls manually (not from programmatic follow):
+  // 1. Disable auto-follow.
+  // 2. Load more messages near edges (infinite scroll).
+  // 3. Do NOT seek — the user is browsing, not controlling playback.
+  // Seeking only happens when autoFollow is re-enabled via the button.
   function handleScroll() {
     if (!scrollEl) return;
+
+    // Ignore scrolls triggered by the follow effect.
+    if (programmaticScroll) return;
+
+    // User scrolled manually — disable follow.
+    if (autoFollow) autoFollow = false;
 
     // Infinite scroll: load more when near top or bottom.
     if (scrollEl.scrollTop < 50) {
@@ -119,25 +151,30 @@
     if (scrollEl.scrollTop + scrollEl.clientHeight > scrollEl.scrollHeight - 50) {
       loadMore('down');
     }
+  }
 
-    // Debounced: seek to the bottom-most visible message's time.
-    if (scrollDebounce) clearTimeout(scrollDebounce);
-    scrollDebounce = setTimeout(() => {
-      if (!scrollEl) return;
-      const viewportBottom = scrollEl.scrollTop + scrollEl.clientHeight;
-      let bottomMsg: ChatMessage | undefined;
-      for (let i = 0; i < scrollEl.children.length; i++) {
-        const child = scrollEl.children[i] as HTMLElement;
-        if (child.offsetTop + child.offsetHeight > viewportBottom - 20) {
-          bottomMsg = messages[i];
-          break;
+  // ── Re-enable follow: seek to the bottom-most visible message ──
+  function toggleFollow() {
+    if (autoFollow) {
+      // Turning off — just disable.
+      autoFollow = false;
+    } else {
+      // Turning on — seek to the bottom-most visible message first,
+      // so playback syncs to where the user is looking.
+      if (scrollEl) {
+        const viewportBottom = scrollEl.scrollTop + scrollEl.clientHeight;
+        let bottomMsg: ChatMessage | undefined;
+        for (let i = 0; i < scrollEl.children.length; i++) {
+          const child = scrollEl.children[i] as HTMLElement;
+          if (child.offsetTop + child.offsetHeight > viewportBottom - 20) {
+            bottomMsg = messages[i];
+            break;
+          }
         }
+        if (bottomMsg) seek(bottomMsg.t);
       }
-      if (bottomMsg) {
-        seek(bottomMsg.t);
-        autoFollow = true;
-      }
-    }, 150);
+      autoFollow = true;
+    }
   }
 
   // ── Search ──
@@ -180,14 +217,11 @@
   const currentTime = $derived($playerStore.currentTime);
 </script>
 
-<div class="flex h-full flex-col overflow-hidden rounded-md border border-border bg-surface">
+<div class="flex h-full flex-col overflow-hidden">
   <!-- Header -->
   <div class="flex items-center justify-between border-b border-border px-3 py-2">
     <div class="flex items-center gap-2">
-      <span class="font-display text-xs font-medium text-ash uppercase">Chat</span>
-      {#if total > 0}
-        <span class="font-mono text-xs text-ash-dim">{total}</span>
-      {/if}
+      <span class="font-mono text-xs text-ash-dim">{total > 0 ? total : ''}</span>
     </div>
     <div class="flex items-center gap-1">
       <button
@@ -200,9 +234,9 @@
       <button
         class="flex h-6 w-6 items-center justify-center rounded transition-colors
         {autoFollow ? 'text-accent' : 'text-ash-dim hover:text-ink'}"
-        onclick={() => (autoFollow = !autoFollow)}
+        onclick={toggleFollow}
         aria-label="Toggle auto-follow"
-        title={autoFollow ? 'Following playback' : 'Manual scroll'}
+        title={autoFollow ? 'Following playback — click to browse manually' : 'Browsing manually — click to follow playback'}
       >
         <Icon name="eye" size={14} fill={autoFollow} />
       </button>
