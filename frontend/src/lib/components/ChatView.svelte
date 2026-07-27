@@ -10,33 +10,43 @@
 
   let { streamId, duration }: Props = $props();
 
-  // ── State ──
-  let messages = $state<ChatMessage[]>([]);
-  let total = $state(0);
+  // ── All messages (loaded once, sorted by time) ──
+  let allMessages = $state<ChatMessage[]>([]);
   let loading = $state(false);
   let hasChat = $state(true);
-  let scrollEl = $state<HTMLDivElement | undefined>(undefined);
-  let showSearch = $state(false);
-
-  // Auto-follow: when true, the chat scrolls to match playback.
-  // Disabled when the user manually scrolls. Re-enabled by clicking the
-  // follow button or by the playback time jumping far from the current view.
-  let autoFollow = $state(true);
-
-  // Guard: prevents the playback-follow effect from reacting to a scroll
-  // that IT triggered. Set true before programmatic scroll, cleared after.
-  let programmaticScroll = false;
-
-  let searchDebounce: ReturnType<typeof setTimeout> | null = null;
   let loaded = $state(false);
 
-  // ── Load messages centered on a timestamp ──
-  async function loadAround(time: number) {
+  // ── View state ──
+  // The chat shows messages in a time window ending at `viewTime`.
+  // When follow is on, viewTime tracks playback. When off, the user
+  // controls it by scrolling (wheel/drag).
+  let viewTime = $state(0);
+  let follow = $state(true);
+
+  // How many messages to show in the viewport.
+  const VISIBLE_COUNT = 40;
+
+  // ── Load all messages once ──
+  $effect(() => {
+    if (streamId && !loaded) {
+      loaded = true;
+      loadAll();
+    }
+  });
+
+  async function loadAll() {
     loading = true;
     try {
-      const res = await apiClient.listChat(streamId, { around: time, limit: 200 });
-      messages = res.messages;
-      total = res.total;
+      // Load in chunks of 500 until we have everything.
+      let offset = 0;
+      let msgs: ChatMessage[] = [];
+      while (true) {
+        const res = await apiClient.listChat(streamId, { offset, limit: 500 });
+        msgs = [...msgs, ...res.messages];
+        if (res.messages.length < 500) break;
+        offset += 500;
+      }
+      allMessages = msgs.sort((a, b) => a.t - b.t);
       hasChat = true;
     } catch {
       hasChat = false;
@@ -44,143 +54,86 @@
     loading = false;
   }
 
-  // ── Load more messages (infinite scroll) ──
-  async function loadMore(direction: 'up' | 'down') {
-    if (loading || messages.length === 0) return;
-
-    loading = true;
-    try {
-      if (direction === 'up') {
-        const firstT = messages[0]!.t;
-        const res = await apiClient.listChat(streamId, { around: firstT, limit: 200 });
-        const newMsgs = res.messages.filter((m) => m.t < firstT);
-        if (newMsgs.length > 0) {
-          const prevScrollHeight = scrollEl?.scrollHeight ?? 0;
-          messages = [...newMsgs, ...messages];
-          // Maintain scroll position after prepending.
-          requestAnimationFrame(() => {
-            if (scrollEl) {
-              const newScrollHeight = scrollEl.scrollHeight;
-              programmaticScroll = true;
-              scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
-              setTimeout(() => { programmaticScroll = false; }, 50);
-            }
-          });
-        }
-      } else {
-        const lastT = messages.at(-1)!.t;
-        const res = await apiClient.listChat(streamId, { around: lastT, limit: 200 });
-        const newMsgs = res.messages.filter((m) => m.t > lastT);
-        if (newMsgs.length > 0) {
-          messages = [...messages, ...newMsgs];
-        }
-      }
-    } catch { /* ignore */ }
-    loading = false;
-  }
-
-  // ── Initial load ──
+  // ── Follow: sync viewTime to playback ──
   $effect(() => {
-    if (streamId && !loaded) {
-      loadAround(0);
-      loaded = true;
+    if (follow) {
+      viewTime = $playerStore.currentTime;
     }
   });
 
-  // ── Playback follow ──
-  // Scrolls the chat so the message closest to currentTime is at the bottom
-  // of the viewport (like a live chat feed). Uses programmaticScroll guard
-  // to prevent the scroll handler from seeking back.
-  let lastFollowTime = -1;
-  $effect(() => {
-    const time = $playerStore.currentTime;
-    if (!autoFollow || !scrollEl || messages.length === 0) return;
-
-    // Throttle: only follow every 0.5s.
-    if (Math.abs(time - lastFollowTime) < 0.5) return;
-    lastFollowTime = time;
-
-    const firstT = messages[0]!.t;
-    const lastT = messages.at(-1)!.t;
-
-    // If playhead is outside loaded range, reload centered on it.
-    if (time < firstT - 5 || time > lastT + 5) {
-      loadAround(time);
-      return;
+  // ── Visible messages: the last VISIBLE_COUNT messages with t <= viewTime ──
+  // Binary search for the insertion point, then slice backward.
+  const visibleMessages = $derived.by(() => {
+    if (allMessages.length === 0) return [];
+    // Binary search: find the last index where t <= viewTime.
+    let lo = 0, hi = allMessages.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (allMessages[mid]!.t <= viewTime) lo = mid + 1;
+      else hi = mid;
     }
-
-    // Find the last message with t <= currentTime.
-    let idx = 0;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]!.t <= time) { idx = i; break; }
-    }
-
-    // Scroll so this message sits at the bottom of the viewport.
-    const targetEl = scrollEl.children[idx] as HTMLElement | undefined;
-    if (targetEl) {
-      const targetBottom = targetEl.offsetTop + targetEl.offsetHeight;
-      const scrollTop = targetBottom - scrollEl.clientHeight;
-      if (scrollTop >= 0) {
-        programmaticScroll = true;
-        scrollEl.scrollTop = scrollTop;
-        // Clear guard after the browser processes the scroll event.
-        requestAnimationFrame(() => { programmaticScroll = false; });
-      }
-    }
+    const end = lo;
+    const start = Math.max(0, end - VISIBLE_COUNT);
+    return allMessages.slice(start, end);
   });
 
-  // ── Manual scroll handling ──
-  // When the user scrolls manually (not from programmatic follow):
-  // 1. Disable auto-follow.
-  // 2. Load more messages near edges (infinite scroll).
-  // 3. Do NOT seek — the user is browsing, not controlling playback.
-  // Seeking only happens when autoFollow is re-enabled via the button.
-  function handleScroll() {
-    if (!scrollEl) return;
-
-    // Ignore scrolls triggered by the follow effect.
-    if (programmaticScroll) return;
-
-    // User scrolled manually — disable follow.
-    if (autoFollow) autoFollow = false;
-
-    // Infinite scroll: load more when near top or bottom.
-    if (scrollEl.scrollTop < 50) {
-      loadMore('up');
-    }
-    if (scrollEl.scrollTop + scrollEl.clientHeight > scrollEl.scrollHeight - 50) {
-      loadMore('down');
+  // ── Scroll handling: wheel adjusts viewTime ──
+  // Each wheel tick moves viewTime by a proportional amount.
+  // This seeks playback when follow is on, or just moves the chat window when off.
+  function handleWheel(e: WheelEvent) {
+    e.preventDefault();
+    // Sensitivity: ~3 seconds per wheel tick, scaled by delta.
+    const delta = e.deltaY * 0.01;
+    const newTime = Math.max(0, Math.min(duration ?? Infinity, viewTime + delta));
+    viewTime = newTime;
+    if (follow) {
+      seek(newTime);
     }
   }
 
-  // ── Re-enable follow: seek to the bottom-most visible message ──
+  // ── Drag to scrub: click and drag to move through chat ──
+  let isDragging = false;
+  let dragStartY = 0;
+  let dragStartTime = 0;
+
+  function handleMouseDown(e: MouseEvent) {
+    isDragging = true;
+    dragStartY = e.clientY;
+    dragStartTime = viewTime;
+    e.preventDefault();
+  }
+
+  function handleMouseMove(e: MouseEvent) {
+    if (!isDragging) return;
+    // 1px = ~0.1 seconds (adjustable).
+    const dy = e.clientY - dragStartY;
+    // Dragging down = earlier messages (time decreases).
+    const newTime = Math.max(0, Math.min(duration ?? Infinity, dragStartTime - dy * 0.1));
+    viewTime = newTime;
+    if (follow) {
+      seek(newTime);
+    }
+  }
+
+  function handleMouseUp() {
+    isDragging = false;
+  }
+
+  // ── Toggle follow ──
   function toggleFollow() {
-    if (autoFollow) {
-      // Turning off — just disable.
-      autoFollow = false;
-    } else {
-      // Turning on — seek to the bottom-most visible message first,
-      // so playback syncs to where the user is looking.
-      if (scrollEl) {
-        const viewportBottom = scrollEl.scrollTop + scrollEl.clientHeight;
-        let bottomMsg: ChatMessage | undefined;
-        for (let i = 0; i < scrollEl.children.length; i++) {
-          const child = scrollEl.children[i] as HTMLElement;
-          if (child.offsetTop + child.offsetHeight > viewportBottom - 20) {
-            bottomMsg = messages[i];
-            break;
-          }
-        }
-        if (bottomMsg) seek(bottomMsg.t);
-      }
-      autoFollow = true;
+    if (!follow) {
+      // Re-enabling: seek to current viewTime so playback catches up.
+      seek(viewTime);
     }
+    follow = !follow;
   }
 
   // ── Search ──
+  let showSearch = $state(false);
   let searchQuery = $state('');
   let searchResults = $state<ChatMessage[]>([]);
   let searching = $state(false);
+  let searchDebounce: ReturnType<typeof setTimeout> | null = null;
 
   async function doSearch() {
     if (!searchQuery.trim()) {
@@ -198,12 +151,12 @@
   }
 
   function jumpToMessage(msg: ChatMessage) {
+    viewTime = msg.t;
     seek(msg.t);
-    loadAround(msg.t);
     showSearch = false;
     searchQuery = '';
     searchResults = [];
-    autoFollow = true;
+    follow = true;
   }
 
   // ── Formatting ──
@@ -217,12 +170,14 @@
   const currentTime = $derived($playerStore.currentTime);
 </script>
 
+<svelte:window onmousemove={handleMouseMove} onmouseup={handleMouseUp} />
+
 <div class="flex h-full flex-col overflow-hidden">
   <!-- Header -->
   <div class="flex items-center justify-between border-b border-border px-3 py-2">
-    <div class="flex items-center gap-2">
-      <span class="font-mono text-xs text-ash-dim">{total > 0 ? total : ''}</span>
-    </div>
+    <span class="font-mono text-xs text-ash-dim">
+      {allMessages.length > 0 ? allMessages.length : ''}
+    </span>
     <div class="flex items-center gap-1">
       <button
         class="flex h-6 w-6 items-center justify-center rounded text-ash-dim transition-colors hover:text-ink"
@@ -233,12 +188,12 @@
       </button>
       <button
         class="flex h-6 w-6 items-center justify-center rounded transition-colors
-        {autoFollow ? 'text-accent' : 'text-ash-dim hover:text-ink'}"
+        {follow ? 'text-accent' : 'text-ash-dim hover:text-ink'}"
         onclick={toggleFollow}
-        aria-label="Toggle auto-follow"
-        title={autoFollow ? 'Following playback — click to browse manually' : 'Browsing manually — click to follow playback'}
+        aria-label="Toggle follow playback"
+        title={follow ? 'Following playback — click to browse manually' : 'Browsing manually — click to follow playback'}
       >
-        <Icon name="eye" size={14} fill={autoFollow} />
+        <Icon name="eye" size={14} fill={follow} />
       </button>
     </div>
   </div>
@@ -281,40 +236,44 @@
     </div>
   {/if}
 
-  <!-- Messages -->
+  <!-- Messages: time-windowed view, no scrollbar -->
   {#if !hasChat}
     <div class="flex flex-1 flex-col items-center justify-center gap-2 p-4 text-center">
       <Icon name="alert" size={24} fill={false} class="text-ash-dim" />
       <p class="text-xs text-ash-dim">No chat file attached to this stream.</p>
     </div>
-  {:else if messages.length === 0 && loading}
+  {:else if loading}
     <div class="flex flex-1 items-center justify-center">
       <span class="text-xs text-ash-dim">Loading chat...</span>
     </div>
-  {:else}
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div
-      bind:this={scrollEl}
-      class="flex-1 overflow-y-auto"
-      onscroll={handleScroll}
+      class="flex-1 overflow-hidden select-none"
+      onwheel={handleWheel}
+      onmousedown={handleMouseDown}
+      role="log"
+      tabindex="-1"
+      aria-label="Chat messages — scroll or drag to browse"
     >
-      {#if loading && messages.length > 0}
-        <div class="py-1 text-center text-xs text-ash-dim">Loading...</div>
-      {/if}
-      {#each messages as msg, i (msg.t + msg.user + i)}
-        <div
-          class="flex items-start gap-2 px-3 py-0.5 transition-colors
-          {Math.abs(msg.t - currentTime) < 1 ? 'bg-accent/10' : ''}"
-        >
-          <span class="font-mono text-xs text-ash-dim shrink-0 w-16">{fmtTime(msg.t)}</span>
-          <span class="text-xs leading-relaxed break-words">
-            <span class="font-medium text-ink">{msg.user}</span>
-            <span class="text-ash">: {msg.body}</span>
-          </span>
-        </div>
-      {/each}
-      {#if loading && messages.length > 0}
-        <div class="py-1 text-center text-xs text-ash-dim">Loading...</div>
-      {/if}
+      <div class="flex h-full flex-col justify-end">
+        {#each visibleMessages as msg, i (msg.t + msg.user + i)}
+          <div
+            class="flex items-start gap-2 px-3 py-0.5 transition-colors
+            {Math.abs(msg.t - currentTime) < 1 ? 'bg-accent/10' : ''}"
+          >
+            <span class="font-mono text-xs text-ash-dim shrink-0 w-16">{fmtTime(msg.t)}</span>
+            <span class="text-xs leading-relaxed break-words">
+              <span class="font-medium text-ink">{msg.user}</span>
+              <span class="text-ash">: {msg.body}</span>
+            </span>
+          </div>
+        {/each}
+        {#if visibleMessages.length === 0}
+          <div class="flex items-center justify-center py-4">
+            <span class="text-xs text-ash-dim">No messages at this time.</span>
+          </div>
+        {/if}
+      </div>
     </div>
   {/if}
 </div>
