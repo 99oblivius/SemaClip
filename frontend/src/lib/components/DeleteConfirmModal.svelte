@@ -56,7 +56,6 @@
       <span class="mb-1 block font-mono text-xs text-ash uppercase">
         Type the project name to confirm
       </span>
-      <span class="mb-1 block font-mono text-sm text-ink">{confirmText}</span>
       <input
         type="text"
         bind:value={typed}
