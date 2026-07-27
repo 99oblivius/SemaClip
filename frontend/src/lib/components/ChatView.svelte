@@ -46,6 +46,8 @@
       hasChat = true;
     } catch {
       hasChat = false;
+    } finally {
+      loading = false;
     }
     scrollIndex = 0;
   }
