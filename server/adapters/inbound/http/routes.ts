@@ -426,6 +426,46 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     return c.json(deps.settings.update(body));
   });
 
+  // ── System info ──
+  // Detect available compute devices: NVIDIA GPUs via nvidia-smi + CPU.
+  // The frontend renders these as a single device selector.
+  // gpuDevice = null means "auto" (first available GPU, or CPU if none).
+  // gpuDevice = -1 means "force CPU".
+  app.get("/api/system/devices", async (c) => {
+    const devices: { id: string; label: string; index: number | null; type: "gpu" | "cpu"; memoryMB: number }[] = [];
+
+    // Detect NVIDIA GPUs.
+    try {
+      const cmd = new Deno.Command("nvidia-smi", {
+        args: ["--query-gpu=index,name,memory.total", "--format=csv,noheader,nounits"],
+        stdout: "piped", stderr: "null",
+      });
+      const out = await cmd.output();
+      const text = new TextDecoder().decode(out.stdout).trim();
+      if (text) {
+        for (const line of text.split("\n")) {
+          const [idx, name, mem] = line.split(",").map((s) => s.trim());
+          const index = parseInt(idx ?? "0", 10);
+          const memoryMB = parseInt(mem ?? "0", 10);
+          devices.push({ id: `gpu-${index}`, label: name ?? "Unknown GPU", index, type: "gpu", memoryMB });
+        }
+      }
+    } catch {
+      // nvidia-smi not found — no NVIDIA driver or not in PATH.
+    }
+
+    // CPU is always available. Index -1 signals "use CPU" to the engine.
+    const cpuCores = navigator.hardwareConcurrency ?? 0;
+    devices.push({
+      id: "cpu",
+      label: `CPU${cpuCores > 0 ? ` (${cpuCores} cores)` : ""}`,
+      index: -1,
+      type: "cpu",
+      memoryMB: 0,
+    });
+
+    return c.json(devices);
+  });
   // ── Video file serving (range requests for <video>) ──
   app.get("/api/video/:streamId", async (c) => {
     const stream = await deps.getStream.execute(c.req.param("streamId"));

@@ -10,6 +10,11 @@
     queryFn: () => apiClient.getSettings(),
   }));
 
+  const devicesQuery = createQuery(() => ({
+    queryKey: ['system', 'devices'],
+    queryFn: () => apiClient.listComputeDevices(),
+  }));
+
   const updateMutation = createMutation(() => ({
     mutationFn: (settings: Partial<AppSettings>) => apiClient.updateSettings(settings),
     onSuccess: () => settingsQuery.refetch(),
@@ -97,15 +102,24 @@
         <h2 class="font-display text-sm font-medium text-ash uppercase tracking-wider">Engine</h2>
         <div class="rounded-md border border-border bg-surface p-4 flex flex-col gap-4">
           <label class="flex flex-col gap-1">
-            <span class="font-mono text-xs text-ash">GPU Device</span>
+            <span class="font-mono text-xs text-ash">Compute Device</span>
             <select bind:value={gpuDevice} class="rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none">
-              <option value="auto">Auto (default)</option>
-              <option value="0">GPU 0</option>
-              <option value="1">GPU 1</option>
-              <option value="2">GPU 2</option>
-              <option value="3">GPU 3</option>
+              <option value="auto">Auto (first available GPU)</option>
+              {#each devicesQuery.data ?? [] as device}
+                <option value={String(device.index)}>
+                  {device.label}{#if device.type === 'gpu' && device.memoryMB > 0} · {Math.round(device.memoryMB / 1024 * 10) / 10} GB{/if}
+                </option>
+              {/each}
             </select>
-            <span class="font-mono text-xs text-ash-dim">CUDA device index for ML inference. Auto uses the first available GPU.</span>
+            <span class="font-mono text-xs text-ash-dim">
+              {#if devicesQuery.isLoading}
+                Detecting devices...
+              {:else if (devicesQuery.data ?? []).filter(d => d.type === 'gpu').length === 0}
+                No NVIDIA GPUs detected. CPU will be used.
+              {:else}
+                Device for ML inference. Auto uses the first available GPU.
+              {/if}
+            </span>
           </label>
 
           <label class="flex flex-col gap-1">

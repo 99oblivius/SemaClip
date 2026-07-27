@@ -108,6 +108,10 @@ export const apiClient = {
   updateSettings: (settings: Partial<AppSettings>) =>
     api<AppSettings>('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
 
+  // ── System ──
+  listComputeDevices: () =>
+    api<{ id: string; label: string; index: number | null; type: 'gpu' | 'cpu'; memoryMB: number }[]>('/system/devices'),
+
   // ── Video ──
   videoUrl: (streamId: string) =>
     `${API_BASE}/video/${streamId}`,
