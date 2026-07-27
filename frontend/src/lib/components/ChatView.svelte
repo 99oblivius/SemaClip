@@ -258,13 +258,13 @@
       <div class="flex h-full flex-col justify-end">
         {#each visibleMessages as msg, i (msg.t + msg.user + i)}
           <div
-            class="flex items-start gap-2 px-3 py-0.5 transition-colors
+            class="px-3 py-0.5 transition-colors
             {Math.abs(msg.t - currentTime) < 1 ? 'bg-accent/10' : ''}"
           >
-            <span class="font-mono text-xs text-ash-dim shrink-0 w-16">{fmtTime(msg.t)}</span>
             <span class="text-xs leading-relaxed break-words">
               <span class="font-medium text-ink">{msg.user}</span>
               <span class="text-ash">: {msg.body}</span>
+              <span class="text-ash-dim text-[10px] ml-1">○ {fmtTime(msg.t)}</span>
             </span>
           </div>
         {/each}
