@@ -73,17 +73,19 @@
     return allMessages.slice(start, end);
   });
 
-  // ── Scroll handling: wheel adjusts viewTime ──
-  // ── Scroll/drag: moves manualViewTime. Disables follow so the user
-  // can browse independently. Re-enable follow via the eye button. ──
+  // ── Scroll/drag: adjusts viewTime. When follow is on, this seeks the
+  // video so playback follows the chat position. When follow is off, the
+  // user browses independently without affecting playback. ──
   function handleWheel(e: WheelEvent) {
     e.preventDefault();
-    // Start from current viewTime (whether following or manual).
     const base = follow ? viewTime : manualViewTime;
-    const delta = e.deltaY * 0.05; // ~0.05s per pixel — tunable
+    const delta = e.deltaY * 0.05;
     const newTime = Math.max(0, Math.min(duration ?? Infinity, base + delta));
-    follow = false;
-    manualViewTime = newTime;
+    if (follow) {
+      seek(newTime);
+    } else {
+      manualViewTime = newTime;
+    }
   }
 
   // ── Drag to scrub: click and drag to move through chat ──
@@ -101,10 +103,12 @@
   function handleMouseMove(e: MouseEvent) {
     if (!isDragging) return;
     const dy = e.clientY - dragStartY;
-    // Dragging down = earlier messages (time decreases). 1px = 0.2s.
     const newTime = Math.max(0, Math.min(duration ?? Infinity, dragStartTime - dy * 0.2));
-    follow = false;
-    manualViewTime = newTime;
+    if (follow) {
+      seek(newTime);
+    } else {
+      manualViewTime = newTime;
+    }
   }
 
   function handleMouseUp() {
