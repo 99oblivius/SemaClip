@@ -31,8 +31,8 @@
 
   // Local UI state — restored from localStorage for persistence across refreshes.
   let isPlaying = $state(false);
-  let isMuted = $state(localStorage.getItem('semaclip-muted') === '1');
-  let currentVolume = $state(Number(localStorage.getItem('semaclip-volume') ?? '1'));
+  let isMuted = $state(browser && localStorage.getItem('semaclip-muted') === '1');
+  let currentVolume = $state(browser ? Number(localStorage.getItem('semaclip-volume') ?? '1') : 1);
   let currentRate = $state(1);
   let isFullscreen = $state(false);
   let currentTime = $state(0);
