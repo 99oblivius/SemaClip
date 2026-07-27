@@ -19,7 +19,7 @@ import type {
   SettingsUseCase,
 } from "@/application/use-cases/mod.ts";
 import type { Axis, StreamStatus } from "shared/types";
-import type { EventBus } from "@/application/ports/outbound.ts";
+import type { EventBus, StreamMetadataRepository, StreamStorage } from "@/application/ports/outbound.ts";
 
 export interface HttpDeps {
   importByFile: ImportStreamByFileUseCase;
@@ -38,6 +38,8 @@ export interface HttpDeps {
   exportClip: ExportClipUseCase;
   manageQueue: ManageQueueUseCase;
   settings: SettingsUseCase;
+  metadata: StreamMetadataRepository;
+  storage: StreamStorage;
   /** Cache dir for uploaded files. */
   uploadDir: string;
 }
@@ -313,6 +315,29 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
             return;
           }
 
+          // ── Cache check: if waveform was already computed, serve instantly. ──
+          const cached = await deps.metadata.get(streamId, "waveform");
+          if (cached) {
+            const cachePath = JSON.parse(cached).path;
+            try {
+              const raw = await Deno.readTextFile(cachePath);
+              const cached = JSON.parse(raw) as { duration: number; totalPeaks: number; peaks: number[] };
+              send({ duration: cached.duration, totalPeaks: cached.totalPeaks });
+              // Send in batches of 100 for progressive rendering.
+              for (let i = 0; i < cached.peaks.length; i += 100) {
+                if (controller.desiredSize === null) break;
+                const slice = cached.peaks.slice(i, i + 100);
+                send({ firstIndex: i, startTime: (i / cached.peaks.length) * cached.duration, peaks: slice });
+              }
+              send({ done: true });
+              controller.close();
+              return;
+            } catch {
+              // Cache file missing/corrupt — fall through to recompute.
+            }
+          }
+
+          // ── Cache miss: compute from ffmpeg. ──
           // 1. Get duration.
           const probe = new Deno.Command("ffprobe", {
             args: ["-v", "quiet", "-print_format", "json", "-show_format", stream.vodPath],
@@ -333,15 +358,21 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
           const peakTime = duration / TARGET_PEAKS;
           const aroundIndex = Math.max(0, Math.min(TARGET_PEAKS - 1, Math.floor((around / duration) * TARGET_PEAKS)));
 
+          // Accumulate all peaks for caching.
+          const allPeaks = new Array<number>(TARGET_PEAKS).fill(-1);
+
           // 3. Stream priority region (from aroundIndex to end) first.
           for await (const batch of streamPeaks(
             stream.vodPath,
-            aroundIndex * peakTime, // start time in seconds
-            null,                    // to end of file
+            aroundIndex * peakTime,
+            null,
             aroundIndex,
             samplesPerPeak,
           )) {
-            if (controller.desiredSize === null) break; // client disconnected
+            if (controller.desiredSize === null) break;
+            for (let i = 0; i < batch.peaks.length; i++) {
+              allPeaks[batch.firstIndex + i] = batch.peaks[i]!;
+            }
             send(batch);
           }
 
@@ -355,11 +386,22 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
               samplesPerPeak,
             )) {
               if (controller.desiredSize === null) break;
+              for (let i = 0; i < batch.peaks.length; i++) {
+                allPeaks[batch.firstIndex + i] = batch.peaks[i]!;
+              }
               send(batch);
             }
           }
 
           send({ done: true });
+
+          // 5. Persist to disk + metadata table for future instant loads.
+          if (allPeaks.every((v) => v >= 0)) {
+            await deps.storage.ensureStreamDirs(streamId);
+            const cachePath = deps.storage.artifactPath(streamId, "waveform.json");
+            await Deno.writeTextFile(cachePath, JSON.stringify({ duration, totalPeaks: TARGET_PEAKS, peaks: allPeaks }));
+            await deps.metadata.set(streamId, "waveform", JSON.stringify({ path: cachePath, duration, totalPeaks: TARGET_PEAKS }));
+          }
         } catch (e) {
           send({ error: `Waveform streaming failed: ${e}` });
         } finally {

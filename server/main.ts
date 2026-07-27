@@ -1,13 +1,15 @@
 import { createApp } from "@/adapters/inbound/http/routes.ts";
 import { buildContainer } from "@/composition/container.ts";
 const PORT = parseInt(Deno.env.get("PORT") ?? "5174", 10);
-const DB_PATH = Deno.env.get("SEMACLIP_DB") ?? `${Deno.env.get("HOME")}/.semaclip/semaclip.db`;
-const CACHE_DIR = Deno.env.get("SEMACLIP_CACHE") ?? `${Deno.env.get("HOME")}/.semaclip/cache`;
-const EXPORT_DIR = Deno.env.get("SEMACLIP_EXPORT") ?? `${Deno.env.get("HOME")}/.semaclip/exports`;
+const DATA_DIR = Deno.env.get("SEMACLIP_DATA") ?? `${Deno.env.get("HOME")}/.semaclip`;
+const DB_PATH = Deno.env.get("SEMACLIP_DB") ?? `${DATA_DIR}/semaclip.db`;
+const CACHE_DIR = Deno.env.get("SEMACLIP_CACHE") ?? `${DATA_DIR}/cache`;
+const EXPORT_DIR = Deno.env.get("SEMACLIP_EXPORT") ?? `${DATA_DIR}/exports`;
 const ENGINE_BINARY = Deno.env.get("SEMACLIP_ENGINE") ?? "semaclip-engine";
 
 const container = buildContainer({
   dbPath: DB_PATH,
+  dataDir: DATA_DIR,
   cacheDir: CACHE_DIR,
   exportDir: EXPORT_DIR,
   engineBinaryPath: ENGINE_BINARY,

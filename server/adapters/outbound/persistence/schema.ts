@@ -48,7 +48,10 @@ export const personas = sqliteTable("personas", {
   stream_count: integer("stream_count").notNull().default(0),
 });
 
-export const settings = sqliteTable("settings", {
-  key: text("key").primaryKey(),
+export const streamMetadata = sqliteTable("stream_metadata", {
+  stream_id: text("stream_id").notNull(),
+  key: text("key").notNull(),
   value: text("value").notNull(),
+  created_at: text("created_at").notNull(),
+  updated_at: text("updated_at").notNull(),
 });

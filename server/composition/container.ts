@@ -4,6 +4,8 @@ import {
   SqliteJobRepository,
   SqliteClipRepository,
   SqlitePersonaRepository,
+  SqliteStreamMetadataRepository,
+  DenoStreamStorage,
 } from "@/adapters/outbound/persistence/mod.ts";
 import { InProcessEventBus } from "@/adapters/outbound/eventbus/mod.ts";
 import { PythonEngineAdapter } from "@/adapters/outbound/engine/mod.ts";
@@ -53,6 +55,7 @@ class DenoFileSystem implements FileSystemPort {
 
 export interface AppConfig {
   dbPath: string;
+  dataDir: string;
   cacheDir: string;
   exportDir: string;
   engineBinaryPath: string;
@@ -74,6 +77,8 @@ export function buildContainer(config: AppConfig): AppContainer {
   const jobRepo = new SqliteJobRepository(db);
   const clipRepo = new SqliteClipRepository(db);
   const personaRepo = new SqlitePersonaRepository(db);
+  const metadataRepo = new SqliteStreamMetadataRepository(db);
+  const streamStorage = new DenoStreamStorage(config.dataDir);
   const vodDownloader = new TwitchDlAdapter();
   const ffmpeg = new FFmpegAdapter();
   const engine = new PythonEngineAdapter(config.engineBinaryPath, bus, config.gpuDevice);
@@ -81,7 +86,7 @@ export function buildContainer(config: AppConfig): AppContainer {
   // Use cases
   const importByFile = new ImportStreamByFileUseCase(streamRepo, fs, ffmpeg);
   const importByUrl = new ImportStreamByUrlUseCase(streamRepo, vodDownloader, fs, bus, config.cacheDir);
-  const deleteStream = new DeleteStreamUseCase(streamRepo, jobRepo);
+  const deleteStream = new DeleteStreamUseCase(streamRepo, jobRepo, metadataRepo, streamStorage);
   const updateStream = new UpdateStreamUseCase(streamRepo);
   const attachChat = new AttachChatUseCase(streamRepo, fs);
   const startJob = new StartJobUseCase(streamRepo, jobRepo, clipRepo, engine, bus, fs);
@@ -115,6 +120,8 @@ export function buildContainer(config: AppConfig): AppContainer {
       exportClip,
       manageQueue,
       settings,
+      metadata: metadataRepo,
+      storage: streamStorage,
       uploadDir: `${config.cacheDir}/uploads`,
     },
   };

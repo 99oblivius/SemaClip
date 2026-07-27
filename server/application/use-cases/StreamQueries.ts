@@ -1,4 +1,10 @@
-import type { StreamRepository, JobRepository, FileSystemPort } from "@/application/ports/outbound.ts";
+import type {
+  StreamRepository,
+  JobRepository,
+  FileSystemPort,
+  StreamMetadataRepository,
+  StreamStorage,
+} from "@/application/ports/outbound.ts";
 import type { Stream, StreamStatus } from "shared/types";
 import { withChat } from "@/domain/mod.ts";
 
@@ -20,6 +26,8 @@ export class DeleteStreamUseCase {
   constructor(
     private readonly streams: StreamRepository,
     private readonly jobs: JobRepository,
+    private readonly metadata: StreamMetadataRepository,
+    private readonly storage: StreamStorage,
   ) {}
 
   async execute(streamId: string): Promise<void> {
@@ -27,6 +35,8 @@ export class DeleteStreamUseCase {
     for (const job of streamJobs) {
       await this.jobs.delete(job.id);
     }
+    await this.metadata.deleteAll(streamId);
+    await this.storage.deleteStream(streamId);
     await this.streams.delete(streamId);
   }
 }
@@ -34,7 +44,6 @@ export class DeleteStreamUseCase {
 /** Update a stream's editable metadata (title, streamer, game, vodPath, chatPath). */
 export class UpdateStreamUseCase {
   constructor(private readonly streams: StreamRepository) {}
-
   async execute(streamId: string, patch: Partial<Pick<Stream, 'title' | 'streamer' | 'game' | 'vodPath' | 'chatPath'>>): Promise<Stream> {
     const stream = await this.streams.findById(streamId);
     if (!stream) throw new Error(`Stream not found: ${streamId}`);

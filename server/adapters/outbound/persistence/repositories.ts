@@ -6,6 +6,7 @@ import type {
   JobRepository,
   ClipRepository,
   PersonaRepository,
+  StreamMetadataRepository,
 } from "@/application/ports/outbound.ts";
 import type { Stream, Job, Clip, Persona, StreamStatus, Axis } from "shared/types";
 
@@ -273,5 +274,47 @@ export class SqlitePersonaRepository implements PersonaRepository {
         stream_count: persona.streamCount,
       },
     }).run();
+  }
+}
+
+// ── Stream metadata repository ─────────────────────────────────
+
+export class SqliteStreamMetadataRepository implements StreamMetadataRepository {
+  constructor(private readonly db: Db) {}
+
+  async get(streamId: string, key: string): Promise<string | null> {
+    const rows = await this.db.select().from(schema.streamMetadata)
+      .where(and(
+        eq(schema.streamMetadata.stream_id, streamId),
+        eq(schema.streamMetadata.key, key),
+      )).limit(1).all();
+    return rows[0]?.value ?? null;
+  }
+
+  async set(streamId: string, key: string, value: string): Promise<void> {
+    const now = new Date().toISOString();
+    await this.db.insert(schema.streamMetadata).values({
+      stream_id: streamId,
+      key,
+      value,
+      created_at: now,
+      updated_at: now,
+    }).onConflictDoUpdate({
+      target: [schema.streamMetadata.stream_id, schema.streamMetadata.key],
+      set: { value, updated_at: now },
+    }).run();
+  }
+
+  async delete(streamId: string, key: string): Promise<void> {
+    await this.db.delete(schema.streamMetadata)
+      .where(and(
+        eq(schema.streamMetadata.stream_id, streamId),
+        eq(schema.streamMetadata.key, key),
+      )).run();
+  }
+
+  async deleteAll(streamId: string): Promise<void> {
+    await this.db.delete(schema.streamMetadata)
+      .where(eq(schema.streamMetadata.stream_id, streamId)).run();
   }
 }

@@ -75,15 +75,22 @@ export const migrations: Migration[] = [
       )`,
     ],
   },
+  {
+    version: "0.2.0",
+    description: "Add stream_metadata table for derived artifacts (waveforms, chat density, thumbnails)",
+    up: [
+      `CREATE TABLE IF NOT EXISTS stream_metadata (
+        stream_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (stream_id, key)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_stream_metadata_stream ON stream_metadata (stream_id)`,
+    ],
+  },
   // ── Future migrations appended here, oldest → newest ──
-  // {
-  //   version: "0.2.0",
-  //   description: "Add clip thumbnail and stream index",
-  //   up: [
-  //     "ALTER TABLE clips ADD COLUMN thumbnail_path TEXT",
-  //     "CREATE INDEX IF NOT EXISTS idx_clips_stream_axis ON clips (stream_id, axis)",
-  //   ],
-  // },
 ];
 
 export const LATEST_VERSION = migrations.at(-1)?.version ?? "0.0.0";

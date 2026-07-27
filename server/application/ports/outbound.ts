@@ -43,6 +43,36 @@ export interface PersonaRepository {
   save(persona: Persona): Promise<void>;
 }
 
+/** Key-value metadata store for derived artifacts (waveforms, chat density, thumbnails).
+ *  Values are JSON strings. Composite key: (streamId, key). */
+export interface StreamMetadataRepository {
+  get(streamId: string, key: string): Promise<string | null>;
+  set(streamId: string, key: string, value: string): Promise<void>;
+  delete(streamId: string, key: string): Promise<void>;
+  deleteAll(streamId: string): Promise<void>;
+}
+
+/** Manages per-stream directory structure for file artifacts.
+ *  Layout: {dataDir}/streams/{streamId}/{vod,chat,waveform,thumbnails,exports}/ */
+export interface StreamStorage {
+  /** Root directory for a stream's artifacts. */
+  streamDir(streamId: string): string;
+  /** Path for the stream's VOD file. */
+  vodPath(streamId: string, filename: string): string;
+  /** Path for the stream's chat file. */
+  chatPath(streamId: string, filename: string): string;
+  /** Path for a derived artifact (e.g. waveform.json, density.json). */
+  artifactPath(streamId: string, name: string): string;
+  /** Path for a thumbnail image. */
+  thumbnailPath(streamId: string, name: string): string;
+  /** Path for an exported clip. */
+  exportPath(streamId: string, filename: string): string;
+  /** Ensure all subdirectories exist for a stream. */
+  ensureStreamDirs(streamId: string): Promise<void>;
+  /** Delete all artifacts for a stream (called on stream deletion). */
+  deleteStream(streamId: string): Promise<void>;
+}
+
 // ── Engine port (Python subprocess) ───────────────────────────
 
 export interface EnginePort {
