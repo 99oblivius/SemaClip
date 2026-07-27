@@ -90,10 +90,10 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   // Upload a VOD file via multipart (for small/medium videos).
   // Large VODs should use import-file with a path instead.
   app.post("/api/streams/upload-vod", async (c) => {
-    const form = await c.req.formData();
-    const file = form.get("vod") as File | null;
-    const title = (form.get("title") as string | null) ?? undefined;
-    const streamer = (form.get("streamer") as string | null) ?? undefined;
+    const body = await c.req.parseBody();
+    const file = body["vod"] as File | undefined;
+    const title = (body["title"] as string | undefined) ?? undefined;
+    const streamer = body["streamer"] as string | undefined;
     if (!file) return c.json({ error: "No 'vod' file in form data" }, 400);
 
     await Deno.mkdir(deps.uploadDir, { recursive: true });
@@ -110,8 +110,8 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
 
   // Upload a chat file and attach it to an existing stream.
   app.post("/api/streams/:id/upload-chat", async (c) => {
-    const form = await c.req.formData();
-    const file = form.get("chat") as File | null;
+    const body = await c.req.parseBody();
+    const file = body["chat"] as File | undefined;
     if (!file) return c.json({ error: "No 'chat' file in form data" }, 400);
 
     await Deno.mkdir(deps.uploadDir, { recursive: true });
