@@ -199,21 +199,21 @@
       const peakStart = Math.floor((viewStart / duration) * totalPeaks);
       const peakEnd = Math.ceil((viewEnd / duration) * totalPeaks);
       const slice = waveform.slice(Math.max(0, peakStart), Math.min(waveform.length, peakEnd + 1));
-      // Render 2px bars: number of bars = floor(w / 2), each 2px wide.
+      // Render 2px bars: each bar covers an exact [start,end) range of peaks.
+      // Max aggregation — standard for waveform display (preserves transients).
       const numBars = Math.max(1, Math.floor(w / 2));
-      const samplesPerBar = Math.max(1, Math.floor(slice.length / numBars));
       ctx.fillStyle = 'rgba(113, 113, 122, 0.55)';
       const ampH = h * 0.35;
       for (let b = 0; b < numBars; b++) {
-        const idx = Math.floor((b / numBars) * slice.length);
+        const s = Math.floor((b / numBars) * slice.length);
+        const e = Math.floor(((b + 1) / numBars) * slice.length);
         let peak = 0;
-        for (let j = 0; j < samplesPerBar; j++) {
-          const v = slice[idx + j] ?? -1;
+        for (let i = s; i < e; i++) {
+          const v = slice[i] ?? -1;
           if (v >= 0 && v > peak) peak = v;
         }
         const barH = peak * ampH;
-        const barX = b * 2;
-        ctx.fillRect(barX, midY - barH, 2, barH * 2);
+        ctx.fillRect(b * 2, midY - barH, 2, barH * 2);
       }
     }
 
