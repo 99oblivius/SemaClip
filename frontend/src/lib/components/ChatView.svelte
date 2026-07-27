@@ -17,16 +17,13 @@
   let loaded = $state(false);
 
   // ── View state ──
-  // The chat shows messages in a time window ending at `viewTime`.
-  // When follow is on, viewTime tracks playback. When off, the user
-  // controls it by scrolling (wheel/drag).
-  let viewTime = $state(0);
+  // viewTime is derived: follows playback when follow=true, or uses
+  // manualViewTime when the user is browsing manually.
   let follow = $state(true);
+  let manualViewTime = $state(0);
 
   // How many messages to show in the viewport.
   const VISIBLE_COUNT = 40;
-
-  // ── Load all messages once ──
   $effect(() => {
     if (streamId && !loaded) {
       loaded = true;
@@ -55,11 +52,10 @@
   }
 
   // ── Follow: sync viewTime to playback ──
-  $effect(() => {
-    if (follow) {
-      viewTime = $playerStore.currentTime;
-    }
-  });
+  // When following, viewTime is derived from the player store.
+  // When not following, viewTime is controlled by the user (wheel/drag).
+  const player = $derived($playerStore);
+  const viewTime = $derived(follow ? player.currentTime : manualViewTime);
 
   // ── Visible messages: the last VISIBLE_COUNT messages with t <= viewTime ──
   // Binary search for the insertion point, then slice backward.
@@ -82,10 +78,9 @@
   // This seeks playback when follow is on, or just moves the chat window when off.
   function handleWheel(e: WheelEvent) {
     e.preventDefault();
-    // Sensitivity: ~3 seconds per wheel tick, scaled by delta.
     const delta = e.deltaY * 0.01;
     const newTime = Math.max(0, Math.min(duration ?? Infinity, viewTime + delta));
-    viewTime = newTime;
+    manualViewTime = newTime;
     if (follow) {
       seek(newTime);
     }
@@ -109,7 +104,7 @@
     const dy = e.clientY - dragStartY;
     // Dragging down = earlier messages (time decreases).
     const newTime = Math.max(0, Math.min(duration ?? Infinity, dragStartTime - dy * 0.1));
-    viewTime = newTime;
+    manualViewTime = newTime;
     if (follow) {
       seek(newTime);
     }
@@ -151,7 +146,7 @@
   }
 
   function jumpToMessage(msg: ChatMessage) {
-    viewTime = msg.t;
+    manualViewTime = msg.t;
     seek(msg.t);
     showSearch = false;
     searchQuery = '';
@@ -167,7 +162,7 @@
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   }
 
-  const currentTime = $derived($playerStore.currentTime);
+  // player derived above provides currentTime for highlighting.
 </script>
 
 <svelte:window onmousemove={handleMouseMove} onmouseup={handleMouseUp} />
@@ -257,9 +252,9 @@
     >
       <div class="flex h-full flex-col justify-end">
         {#each visibleMessages as msg, i (msg.t + msg.user + i)}
+          {@const isLive = Math.abs(msg.t - player.currentTime) < 1}
           <div
-            class="px-3 py-0.5 transition-colors
-            {Math.abs(msg.t - currentTime) < 1 ? 'bg-accent/10' : ''}"
+            class="px-3 py-0.5 transition-colors {isLive ? 'bg-accent/10' : ''}"
           >
             <span class="text-xs leading-relaxed break-words">
               <span class="font-medium text-ink">{msg.user}</span>
