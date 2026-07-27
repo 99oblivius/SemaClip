@@ -255,9 +255,7 @@
             class="px-3 py-0.5 transition-colors {isLive ? 'bg-accent/10' : ''}"
           >
             <span class="text-xs leading-relaxed break-words">
-              <span class="font-medium text-ink">{msg.user}</span>
-              <span class="text-ash">: {msg.body}</span>
-              <span class="text-ash-dim text-[10px] ml-1">○ {fmtTime(msg.t)}</span>
+              <span class="font-medium text-ink">{msg.user}</span><span class="text-ash">: {msg.body}</span><span class="text-ash-dim text-[10px] ml-1.5">· {fmtTime(msg.t)}</span>
             </span>
           </div>
         {/each}
