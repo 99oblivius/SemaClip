@@ -54,12 +54,14 @@
     } catch {
       hasChat = false;
     }
-    loading = false;
+    scrollIndex = 0;
   }
-
   // ── Follow: sync scrollIndex to playback ──
+  // Uses a guard so user-initiated scrolls don't get overridden while
+  // the debounced seek is in flight.
+  let userScrolling = false;
   $effect(() => {
-    if (!follow || allMessages.length === 0) return;
+    if (!follow || allMessages.length === 0 || userScrolling) return;
     const time = player.currentTime;
     // Binary search: last index where t <= time.
     let lo = 0, hi = allMessages.length;
@@ -76,16 +78,27 @@
     allMessages.slice(Math.max(0, scrollIndex - VISIBLE_COUNT), scrollIndex)
   );
 
-  // ── Scroll: move one message, seek to bottom message's time ──
+  // ── Scroll: move one message, debounced seek to bottom message's time ──
+  let seekTimer: ReturnType<typeof setTimeout> | null = null;
+  function scrollToIndex(newIndex: number) {
+    const clamped = Math.max(0, Math.min(allMessages.length, newIndex));
+    if (clamped === scrollIndex) return;
+    scrollIndex = clamped;
+    userScrolling = true;
+    // Debounce seek so rapid scroll doesn't spam the store / fight playback.
+    if (seekTimer) clearTimeout(seekTimer);
+    seekTimer = setTimeout(() => {
+      userScrolling = false;
+      const msg = allMessages[clamped - 1];
+      if (msg) seek(msg.t);
+    }, 120);
+  }
+
   function handleWheel(e: WheelEvent) {
     e.preventDefault();
     if (allMessages.length === 0) return;
     const dir = e.deltaY > 0 ? 1 : -1;
-    const newIndex = Math.max(VISIBLE_COUNT, Math.min(allMessages.length, scrollIndex + dir));
-    if (newIndex === scrollIndex) return;
-    scrollIndex = newIndex;
-    const msg = allMessages[newIndex - 1];
-    if (msg) seek(msg.t);
+    scrollToIndex(scrollIndex + dir);
   }
 
   // ── Drag to scrub: move by message proportional to drag distance ──
@@ -105,17 +118,12 @@
     const dy = e.clientY - dragStartY;
     // Dragging up = forward through messages. ~3px per message.
     const delta = -Math.round(dy / 3);
-    const newIndex = Math.max(VISIBLE_COUNT, Math.min(allMessages.length, dragStartIndex + delta));
-    if (newIndex === scrollIndex) return;
-    scrollIndex = newIndex;
-    const msg = allMessages[newIndex - 1];
-    if (msg) seek(msg.t);
+    scrollToIndex(dragStartIndex + delta);
   }
 
   function handleMouseUp() {
     isDragging = false;
   }
-
   // ── Toggle follow ──
   function toggleFollow() {
     if (!follow) {
@@ -256,6 +264,11 @@
       aria-label="Chat messages — scroll or drag to browse"
     >
       <div class="flex h-full flex-col justify-end">
+        {#if visibleMessages.length === 0}
+          <div class="flex items-center justify-center py-4">
+            <span class="text-xs text-ash-dim">Scroll down to browse messages</span>
+          </div>
+        {/if}
         {#each visibleMessages as msg, i (msg.t + msg.user + i)}
           {@const isLive = Math.abs(msg.t - player.currentTime) < 1}
           <div

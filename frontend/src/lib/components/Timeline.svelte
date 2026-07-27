@@ -213,25 +213,24 @@
 
     if (waveform.some((v) => v >= 0)) {
       const totalPeaks = waveformTotalPeaks || waveform.length;
-      // Map view window to peak indices.
-      const peakStart = Math.floor((viewStart / duration) * totalPeaks);
-      const peakEnd = Math.ceil((viewEnd / duration) * totalPeaks);
-      const slice = waveform.slice(Math.max(0, peakStart), Math.min(waveform.length, peakEnd + 1));
-
-      // Constant bar width. Aggregate peaks per bar when zoomed out (max amplitude),
-      // render at full resolution when zoomed in. The slice always fills the view width.
+      // Peak i holds max amplitude of second [i, i+1). Drawn at bucket END
+      // (time i+1) so the bar appears after the audio it represents.
+      const peakDur = duration / totalPeaks;
       const barWidth = 2;
       const numBars = Math.max(1, Math.floor(w / barWidth));
-      const peaksPerBar = slice.length / numBars;
+      const secPerBar = viewSpan / numBars;
 
       ctx.fillStyle = 'rgba(113, 113, 122, 0.55)';
       const ampH = h * 0.35;
       for (let b = 0; b < numBars; b++) {
-        const s = Math.floor(b * peaksPerBar);
-        const e = Math.max(s + 1, Math.floor((b + 1) * peaksPerBar));
+        const barTime = viewStart + b * secPerBar;
+        // Peak whose bucket ENDS at barTime: index = barTime/peakDur - 1.
+        // Range of peaks whose end-time falls in [barTime, barTime+secPerBar).
+        const s = Math.max(0, Math.floor(barTime / peakDur) - 1);
+        const e = Math.min(waveform.length - 1, Math.ceil((barTime + secPerBar) / peakDur) - 1);
         let peak = 0;
-        for (let i = s; i < e; i++) {
-          const v = slice[i] ?? -1;
+        for (let i = s; i <= e; i++) {
+          const v = waveform[i] ?? -1;
           if (v >= 0 && v > peak) peak = v;
         }
         const barH = peak * ampH;
