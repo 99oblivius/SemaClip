@@ -218,19 +218,11 @@
         <Icon name={isPlaying ? 'pause' : 'play'} size={22} fill />
       </button>
 
-      <!-- Skip prev/next clip -->
-      <button onclick={() => {
-        const idx = clips.findIndex((c) => c.id === currentClip?.id);
-        const target = idx < 0 ? clips[clips.length - 1] : clips[idx - 1];
-        if (target) playClip(target);
-      }} class="text-white/70 transition-colors hover:text-white" aria-label="Previous clip">
+      <!-- Seek to start / end of video -->
+      <button onclick={() => seekTo(0)} class="text-white/70 transition-colors hover:text-white" aria-label="Go to start">
         <Icon name="skip-back" size={18} />
       </button>
-      <button onclick={() => {
-        const idx = clips.findIndex((c) => c.id === currentClip?.id);
-        const target = idx < 0 ? clips[0] : clips[idx + 1];
-        if (target) playClip(target);
-      }} class="text-white/70 transition-colors hover:text-white" aria-label="Next clip">
+      <button onclick={() => seekTo(videoDuration)} class="text-white/70 transition-colors hover:text-white" aria-label="Go to end">
         <Icon name="skip-forward" size={18} />
       </button>
 
