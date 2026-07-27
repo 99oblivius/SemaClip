@@ -13,6 +13,11 @@ import type {
   StreamStatus,
 } from '$shared/types';
 
+export interface ChatMessage {
+  t: number;       // content_offset_seconds
+  user: string;    // commenter display_name
+  body: string;    // message body
+}
 const API_BASE = '/api';
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -106,6 +111,15 @@ export const apiClient = {
   chatDensity: (streamId: string) =>
     api<{ duration: number; density: number[] }>(`/streams/${streamId}/chat-density`),
 
-  waveform: (streamId: string) =>
-    api<{ duration: number; peaks: number[]; resolution?: string }>(`/streams/${streamId}/waveform`),
+  listChat: (streamId: string, opts?: { offset?: number; limit?: number; around?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.offset !== undefined) params.set('offset', String(opts.offset));
+    if (opts?.limit !== undefined) params.set('limit', String(opts.limit));
+    if (opts?.around !== undefined) params.set('around', String(opts.around));
+    const qs = params.toString();
+    return api<{ messages: ChatMessage[]; total: number; offset: number }>(`/streams/${streamId}/chat${qs ? `?${qs}` : ''}`);
+  },
+
+  searchChat: (streamId: string, query: string) =>
+    api<{ results: ChatMessage[] }>(`/streams/${streamId}/chat/search?q=${encodeURIComponent(query)}`),
 };

@@ -182,6 +182,77 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     }
   });
 
+  // ── Chat messages (paginated, seek-aware) ──
+  // Returns messages sorted by content_offset_seconds. Pagination via
+  // ?offset=&limit= (default 100). ?around=<seconds> returns messages
+  // centered on that timestamp (for initial load on seek).
+  app.get("/api/streams/:id/chat", async (c) => {
+    const stream = await deps.getStream.execute(c.req.param("id"));
+    if (!stream || !stream.chatPath) return c.json({ error: "Chat not available" }, 404);
+    try {
+      const raw = await Deno.readTextFile(stream.chatPath);
+      const data = JSON.parse(raw);
+      const comments: Array<{ content_offset_seconds: number; commenter?: { display_name: string }; message?: { body: string } }> =
+        Array.isArray(data) ? data : data.comments ?? [];
+
+      const limit = Math.min(500, parseInt(c.req.query("limit") ?? "100", 10));
+      const around = c.req.query("around");
+
+      // Map to compact format.
+      const msgs = comments.map((m) => ({
+        t: m.content_offset_seconds ?? 0,
+        user: m.commenter?.display_name ?? "unknown",
+        body: m.message?.body ?? "",
+      }));
+
+      if (around !== null && around !== undefined) {
+        // Find messages centered on the timestamp.
+        const aroundSec = parseFloat(around) || 0;
+        // Binary search for the closest message.
+        let lo = 0, hi = msgs.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (msgs[mid]!.t < aroundSec) lo = mid + 1;
+          else hi = mid;
+        }
+        // Center the window on this message.
+        const start = Math.max(0, lo - Math.floor(limit / 2));
+        const end = Math.min(msgs.length, start + limit);
+        return c.json({ messages: msgs.slice(start, end), total: msgs.length, offset: start });
+      }
+
+      const offset = Math.max(0, parseInt(c.req.query("offset") ?? "0", 10));
+      return c.json({ messages: msgs.slice(offset, offset + limit), total: msgs.length, offset });
+    } catch {
+      return c.json({ error: "Cannot read chat file" }, 500);
+    }
+  });
+
+  // ── Chat search ──
+  app.get("/api/streams/:id/chat/search", async (c) => {
+    const stream = await deps.getStream.execute(c.req.param("id"));
+    if (!stream || !stream.chatPath) return c.json({ error: "Chat not available" }, 404);
+    const q = c.req.query("q") ?? "";
+    if (!q.trim()) return c.json({ results: [] });
+    try {
+      const raw = await Deno.readTextFile(stream.chatPath);
+      const data = JSON.parse(raw);
+      const comments: Array<{ content_offset_seconds: number; commenter?: { display_name: string }; message?: { body: string } }> =
+        Array.isArray(data) ? data : data.comments ?? [];
+      const lower = q.toLowerCase();
+      const results = comments
+        .filter((m) => (m.message?.body ?? "").toLowerCase().includes(lower))
+        .map((m) => ({
+          t: m.content_offset_seconds ?? 0,
+          user: m.commenter?.display_name ?? "unknown",
+          body: m.message?.body ?? "",
+        }))
+        .slice(0, 200);
+      return c.json({ results });
+    } catch {
+      return c.json({ error: "Cannot read chat file" }, 500);
+    }
+  });
   // ── Seek-aware streaming waveform (SSE) ──
   // Each peak batch carries {firstIndex, startTime, peaks} so the frontend
   // knows WHERE on the timeline to place the data (regardless of arrival order).
