@@ -55,6 +55,20 @@
     }
   }
 
+  // ── External seek: when the store's currentTime changes from outside
+  // (ChatView scroll, Timeline scrub), apply it to the video element. ──
+  // The isScrubbing flag distinguishes external seeks from the video's
+  // own ontimeupdate (which we must NOT feed back, or it fights playback).
+  $effect(() => {
+    if (!videoEl) return;
+    const p = $playerStore;
+    if (p.isScrubbing) return;
+    // Apply if the delta is meaningful (>0.3s) to avoid fighting ontimeupdate.
+    if (Math.abs(videoEl.currentTime - p.currentTime) > 0.3) {
+      videoEl.currentTime = p.currentTime;
+      currentTime = p.currentTime;
+    }
+  });
   function togglePlay() {
     if (!videoEl) return;
     if (videoEl.paused) void videoEl.play();
