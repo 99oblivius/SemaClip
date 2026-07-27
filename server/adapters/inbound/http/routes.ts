@@ -87,8 +87,8 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     return c.json(result, 201);
   });
 
-  // Upload a VOD file via multipart (for small/medium videos).
-  // Large VODs should use import-file with a path instead.
+  // Upload a VOD file via multipart. Streams to disk in chunks — never
+  // buffers the entire file in memory (supports multi-GB VODs).
   app.post("/api/streams/upload-vod", async (c) => {
     const body = await c.req.parseBody();
     const file = body["vod"] as File | undefined;
@@ -98,7 +98,20 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
 
     await Deno.mkdir(deps.uploadDir, { recursive: true });
     const vodPath = `${deps.uploadDir}/${file.name}`;
-    await Deno.writeFile(vodPath, new Uint8Array(await file.arrayBuffer()));
+
+    // Stream the file body to disk in 1MB chunks instead of loading
+    // the entire file into memory via arrayBuffer().
+    const out = await Deno.open(vodPath, { write: true, create: true, truncate: true });
+    try {
+      const reader = file.stream().getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        await out.write(value);
+      }
+    } finally {
+      out.close();
+    }
 
     const result = await deps.importByFile.execute({
       vodPath,
