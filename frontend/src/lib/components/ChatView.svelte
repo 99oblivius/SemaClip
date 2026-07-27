@@ -241,6 +241,7 @@
     <div class="flex flex-1 items-center justify-center">
       <span class="text-xs text-ash-dim">Loading chat...</span>
     </div>
+  {:else}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div
       class="flex-1 overflow-hidden select-none"
@@ -265,7 +266,7 @@
         {/each}
         {#if visibleMessages.length === 0}
           <div class="flex items-center justify-center py-4">
-            <span class="text-xs text-ash-dim">No messages at this time.</span>
+            <span class="text-xs text-ash-dim">No messages at this time. Scroll to browse.</span>
           </div>
         {/if}
       </div>
