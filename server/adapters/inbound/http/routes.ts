@@ -268,15 +268,27 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     const body = new ReadableStream({
       async start(controller) {
         const encoder = new TextEncoder();
+        let closed = false;
         const send = (data: unknown) => {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+          if (closed) return;
+          try {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+          } catch {
+            // Controller already closed (client disconnected).
+            closed = true;
+          }
+        };
+        const close = () => {
+          if (closed) return;
+          closed = true;
+          try { controller.close(); } catch { /* already closed */ }
         };
 
         try {
           const stream = await deps.getStream.execute(streamId);
           if (!stream || !stream.vodPath) {
             send({ error: "Video not available" });
-            controller.close();
+            close();
             return;
           }
 
@@ -290,12 +302,12 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
               send({ duration: cached.duration, totalPeaks: cached.totalPeaks });
               // Send in batches of 100 for progressive rendering.
               for (let i = 0; i < cached.peaks.length; i += 100) {
-                if (controller.desiredSize === null) break;
+                if (closed) break;
                 const slice = cached.peaks.slice(i, i + 100);
                 send({ firstIndex: i, startTime: (i / cached.peaks.length) * cached.duration, peaks: slice });
               }
               send({ done: true });
-              controller.close();
+              close();
               return;
             } catch {
               // Cache file missing/corrupt — fall through to recompute.
@@ -313,7 +325,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
           const duration = parseFloat(info.format?.duration ?? "0");
           if (!duration) {
             send({ error: "Cannot determine duration" });
-            controller.close();
+            close();
             return;
           }
           send({ duration, totalPeaks: TARGET_PEAKS });
@@ -334,7 +346,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
             aroundIndex,
             samplesPerPeak,
           )) {
-            if (controller.desiredSize === null) break;
+            if (closed) break;
             for (let i = 0; i < batch.peaks.length; i++) {
               allPeaks[batch.firstIndex + i] = batch.peaks[i]!;
             }
@@ -342,7 +354,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
           }
 
           // 4. Then stream the beginning (0 to aroundIndex), filling the gap.
-          if (aroundIndex > 0) {
+          if (!closed && aroundIndex > 0) {
             for await (const batch of streamPeaks(
               stream.vodPath,
               0,
@@ -350,7 +362,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
               0,
               samplesPerPeak,
             )) {
-              if (controller.desiredSize === null) break;
+              if (closed) break;
               for (let i = 0; i < batch.peaks.length; i++) {
                 allPeaks[batch.firstIndex + i] = batch.peaks[i]!;
               }
@@ -358,10 +370,11 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
             }
           }
 
-          send({ done: true });
+          if (!closed) send({ done: true });
 
           // 5. Persist to disk + metadata table for future instant loads.
-          if (allPeaks.every((v) => v >= 0)) {
+          // Only cache if we received all peaks (client didn't disconnect early).
+          if (!closed && allPeaks.every((v) => v >= 0)) {
             await deps.storage.ensureStreamDirs(streamId);
             const cachePath = deps.storage.artifactPath(streamId, "waveform.json");
             await Deno.writeTextFile(cachePath, JSON.stringify({ duration, totalPeaks: TARGET_PEAKS, peaks: allPeaks }));
@@ -370,7 +383,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
         } catch (e) {
           send({ error: `Waveform streaming failed: ${e}` });
         } finally {
-          controller.close();
+          close();
         }
       },
     });
