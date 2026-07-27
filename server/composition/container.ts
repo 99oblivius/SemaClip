@@ -122,7 +122,6 @@ export function buildContainer(config: AppConfig): AppContainer {
       settings,
       metadata: metadataRepo,
       storage: streamStorage,
-      uploadDir: `${config.cacheDir}/uploads`,
     },
   };
 }

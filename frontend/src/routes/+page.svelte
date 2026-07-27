@@ -23,16 +23,8 @@
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['streams'] }),
   }));
 
-  const uploadVodMutation = createMutation(() => ({
-    mutationFn: (file: File) => apiClient.uploadVod(file),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['streams'] }),
-  }));
-
-  const uploadChatMutation = createMutation(() => ({
-    mutationFn: ({ streamId, file }: { streamId: string; file: File }) =>
-      apiClient.uploadChat(streamId, file),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['streams'] }),
-  }));
+  // No upload mutations — drag-and-drop extracts the file path and uses
+  // importByFile (path-based). No file contents are transferred over HTTP.
 
   let urlInput = $state('');
   let pathInput = $state('');
@@ -69,7 +61,8 @@
     pathInput = '';
   }
 
-
+  // Dev mode hint: when File.path is not available, show a message.
+  let dropHint = $state<string | null>(null);
 
   function handleVodDrop(e: DragEvent) {
     e.preventDefault();
@@ -78,23 +71,31 @@
     const files = e.dataTransfer?.files;
     if (!files || files.length === 0) return;
 
-    // Find the video file (by extension) and chat file (JSON) among dropped files.
     const videoExt = ['.mp4', '.mkv', '.webm', '.mov', '.avi', '.ts'];
     const videoFile = Array.from(files).find((f) =>
       videoExt.some((ext) => f.name.toLowerCase().endsWith(ext)),
     );
     const chatFile = Array.from(files).find((f) => f.name.toLowerCase().endsWith('.json'));
 
-    if (videoFile) {
-      uploadVodMutation.mutate(videoFile, {
-        onSuccess: (result) => {
-          if (chatFile) {
-            uploadChatMutation.mutate({ streamId: result.stream.id, file: chatFile });
-          }
+    if (!videoFile) return;
+
+    // Extract the absolute path. Deno Desktop/CEF exposes File.path.
+    const vodPath = (videoFile as File & { path?: string }).path;
+
+    if (vodPath) {
+      // Path available — import directly without transferring file contents.
+      importFileMutation.mutate(
+        {
+          vodPath,
+          title: videoFile.name.replace(/\.[^.]+$/, ''),
+          ...(chatFile && { chatPath: (chatFile as File & { path?: string }).path ?? undefined }),
         },
-      });
-    } else if (chatFile) {
-      // Only chat dropped — can't attach without a stream yet.
+      );
+    } else {
+      // Dev mode: File.path not available. Pre-fill the path input with the
+      // filename so the user can complete the full path and press Enter.
+      pathInput = videoFile.name;
+      dropHint = `Path not available in browser dev mode. Enter the full path to "${videoFile.name}" and press Enter.`;
     }
   }
 
@@ -120,24 +121,29 @@
     return videoExt.some((ext) => path.toLowerCase().endsWith(ext));
   }
 
-  // Pending chat files that need a stream to attach to
-  let pendingChatFile = $state<File | null>(null);
+  // Pending chat file path that needs a stream to attach to
+  let pendingChatPath = $state<string | null>(null);
 
   function handleChatDrop(e: DragEvent) {
     e.preventDefault();
     const files = e.dataTransfer?.files;
     if (!files || files.length === 0) return;
     const chatFile = Array.from(files).find((f) => f.name.toLowerCase().endsWith('.json'));
-    if (chatFile) pendingChatFile = chatFile;
+    if (chatFile) {
+      const path = (chatFile as File & { path?: string }).path;
+      if (path) {
+        pendingChatPath = path;
+      }
+    }
   }
 
   // Attach pending chat to a stream on click
   function attachChatToStream(streamId: string) {
-    if (!pendingChatFile) return;
-    uploadChatMutation.mutate(
-      { streamId, file: pendingChatFile },
-      { onSuccess: () => (pendingChatFile = null) },
-    );
+    if (!pendingChatPath) return;
+    apiClient.attachChat(streamId, pendingChatPath).then(() => {
+      pendingChatPath = null;
+      queryClient.invalidateQueries({ queryKey: ['streams'] });
+    });
   }
 </script>
 
@@ -223,15 +229,26 @@
     {/if}
   </section>
 
+  <!-- Drop hint (dev mode: File.path not available) -->
+  {#if dropHint}
+    <div class="mb-4 flex items-center gap-2 rounded-md border border-warning bg-surface px-3 py-2 text-xs text-warning">
+      <Icon name="alert" size={16} fill={false} />
+      <span class="flex-1">{dropHint}</span>
+      <button class="text-ash-dim hover:text-ink" onclick={() => (dropHint = null)} aria-label="Dismiss">
+        <Icon name="close" size={14} />
+      </button>
+    </div>
+  {/if}
+
   <!-- Pending chat file indicator -->
-  {#if pendingChatFile}
+  {#if pendingChatPath}
     <section class="mb-4">
       <div class="flex items-center gap-2 rounded-md border border-warning bg-surface px-3 py-2">
         <Icon name="alert" size={16} fill={false} />
         <span class="text-xs text-ash">
-          Chat file ready: {pendingChatFile.name} — click a stream below to attach it
+          Chat file ready: {pendingChatPath.split('/').pop()} — click a stream below to attach it
         </span>
-        <button class="ml-auto text-xs text-ash-dim hover:text-ink" onclick={() => (pendingChatFile = null)}>
+        <button class="ml-auto text-xs text-ash-dim hover:text-ink" onclick={() => (pendingChatPath = null)}>
           Cancel
         </button>
       </div>
@@ -247,11 +264,6 @@
   {#if importFileMutation.isError}
     <div class="mb-4 rounded-md border border-error bg-surface px-3 py-2 text-xs text-error">
       {importFileMutation.error?.message ?? 'Import failed'}
-    </div>
-  {/if}
-  {#if uploadVodMutation.isError}
-    <div class="mb-4 rounded-md border border-error bg-surface px-3 py-2 text-xs text-error">
-      {uploadVodMutation.error?.message ?? 'Upload failed'}
     </div>
   {/if}
 
@@ -288,7 +300,7 @@
                 {/if}
               </div>
             </a>
-            {#if pendingChatFile}
+            {#if pendingChatPath}
               <button
                 class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent"
                 onclick={() => attachChatToStream(stream.id)}
