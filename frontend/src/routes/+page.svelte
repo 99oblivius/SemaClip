@@ -69,10 +69,7 @@
     pathInput = '';
   }
 
-  // Files larger than this should use path-based import, not HTTP upload.
-  const MAX_UPLOAD_SIZE = 500 * 1024 * 1024; // 500 MB
 
-  let uploadError = $state<string | null>(null);
 
   function handleVodDrop(e: DragEvent) {
     e.preventDefault();
@@ -89,35 +86,6 @@
     const chatFile = Array.from(files).find((f) => f.name.toLowerCase().endsWith('.json'));
 
     if (videoFile) {
-      // Large files: try file.path (Deno Desktop/CEF exposes it), fall back to error.
-      if (videoFile.size > MAX_UPLOAD_SIZE) {
-        // @ts-expect-error — File.path is non-standard, available in Deno Desktop/CEF.
-        const filePath: string | undefined = videoFile.path;
-        if (filePath) {
-          importFileMutation.mutate(
-            { vodPath: filePath, title: videoFile.name.replace(/\.[^.]+$/, '') },
-            {
-              onSuccess: (result) => {
-                if (chatFile) {
-                  // @ts-expect-error — File.path is non-standard.
-                  const chatPath: string | undefined = chatFile.path;
-                  if (chatPath) {
-                    apiClient.attachChat(result.stream.id, chatPath).catch(() => {});
-                  } else {
-                    uploadChatMutation.mutate({ streamId: result.stream.id, file: chatFile });
-                  }
-                }
-              },
-            },
-          );
-          return;
-        }
-        // No path available — can't upload a multi-GB file over HTTP.
-        const sizeGB = (videoFile.size / (1024 ** 3)).toFixed(1);
-        uploadError = `${videoFile.name} is ${sizeGB} GB — too large for drag-and-drop upload. Use the file path input below to import it directly.`;
-        return;
-      }
-
       uploadVodMutation.mutate(videoFile, {
         onSuccess: (result) => {
           if (chatFile) {
@@ -271,15 +239,6 @@
   {/if}
 
   <!-- Error display -->
-  {#if uploadError}
-    <div class="mb-4 flex items-center gap-2 rounded-md border border-warning bg-surface px-3 py-2 text-xs text-warning">
-      <Icon name="alert" size={16} fill={false} />
-      <span class="flex-1">{uploadError}</span>
-      <button class="text-ash-dim hover:text-ink" onclick={() => (uploadError = null)} aria-label="Dismiss">
-        <Icon name="close" size={14} />
-      </button>
-    </div>
-  {/if}
   {#if importUrlMutation.isError}
     <div class="mb-4 rounded-md border border-error bg-surface px-3 py-2 text-xs text-error">
       {importUrlMutation.error?.message ?? 'Import failed'}

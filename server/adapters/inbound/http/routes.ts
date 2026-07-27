@@ -87,39 +87,150 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     return c.json(result, 201);
   });
 
-  // Upload a VOD file via multipart. Streams to disk in chunks — never
-  // buffers the entire file in memory (supports multi-GB VODs).
+  // Upload a VOD file via multipart. Parses the multipart stream directly
+  // to disk — never buffers the entire body in memory (supports multi-GB VODs).
   app.post("/api/streams/upload-vod", async (c) => {
-    const body = await c.req.parseBody();
-    const file = body["vod"] as File | undefined;
-    const title = (body["title"] as string | undefined) ?? undefined;
-    const streamer = body["streamer"] as string | undefined;
-    if (!file) return c.json({ error: "No 'vod' file in form data" }, 400);
+    const contentType = c.req.header("content-type") ?? "";
+    if (!contentType.includes("multipart/form-data")) {
+      return c.json({ error: "Expected multipart/form-data" }, 400);
+    }
+
+    // Extract the boundary from the content-type header.
+    const boundaryMatch = contentType.match(/boundary=(.+)/);
+    if (!boundaryMatch?.[1]) return c.json({ error: "No multipart boundary" }, 400);
+    const boundary = boundaryMatch[1].trim().replace(/^"|"$/g, "");
+    const boundaryBytes = new TextEncoder().encode(`--${boundary}`);
 
     await Deno.mkdir(deps.uploadDir, { recursive: true });
-    const vodPath = `${deps.uploadDir}/${file.name}`;
 
-    // Stream the file body to disk in 1MB chunks instead of loading
-    // the entire file into memory via arrayBuffer().
-    const out = await Deno.open(vodPath, { write: true, create: true, truncate: true });
+    // Parse the multipart body stream: extract fields and stream file to disk.
+    let title: string | undefined;
+    let streamer: string | undefined;
+    let vodPath: string | undefined;
+    let fileName: string | undefined;
+
+    const reader = c.req.raw.body?.getReader();
+    if (!reader) return c.json({ error: "No request body" }, 400);
+
+    // Accumulate into a buffer, scan for boundaries, extract headers + content.
+    let buf = new Uint8Array(0);
+    const findBoundary = (data: Uint8Array, start: number): number => {
+      for (let i = start; i <= data.length - boundaryBytes.length; i++) {
+        let match = true;
+        for (let j = 0; j < boundaryBytes.length; j++) {
+          if (data[i + j] !== boundaryBytes[j]) { match = false; break; }
+        }
+        if (match) return i;
+      }
+      return -1;
+    };
+
+    const decoder = new TextDecoder();
+    let outFile: Deno.FsFile | undefined;
+    let inFileContent = false;
+    let pos = 0;
+
     try {
-      const reader = file.stream().getReader();
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        await out.write(value);
+
+        // Append to buffer
+        const merged = new Uint8Array(buf.length + value.length);
+        merged.set(buf);
+        merged.set(value, buf.length);
+        buf = merged;
+
+        // Process buffer: find boundaries and extract content
+        while (true) {
+          if (inFileContent && outFile) {
+            // Look for the next boundary in the buffer
+            const bndIdx = findBoundary(buf, 0);
+            if (bndIdx === -1) {
+              // No boundary found — write everything except a safety margin at the end
+              const safetyMargin = boundaryBytes.length + 4; // \r\n + boundary
+              const writeLen = Math.max(0, buf.length - safetyMargin);
+              if (writeLen > 0) {
+                await outFile.write(buf.subarray(0, writeLen));
+                buf = buf.subarray(writeLen);
+              }
+              break; // need more data
+            } else {
+              // Boundary found — write up to it (minus trailing \r\n)
+              const writeLen = Math.max(0, bndIdx - 2); // -2 for \r\n before boundary
+              if (writeLen > 0) await outFile.write(buf.subarray(0, writeLen));
+              outFile.close();
+              outFile = undefined;
+              inFileContent = false;
+              buf = buf.subarray(bndIdx);
+              // Fall through to parse the next part headers
+            }
+          }
+
+          // Look for a boundary
+          const bndIdx = findBoundary(buf, 0);
+          if (bndIdx === -1) break; // need more data
+          buf = buf.subarray(bndIdx + boundaryBytes.length);
+
+          // Skip boundary line ending
+          if (buf.length >= 2 && buf[0] === 0x0d && buf[1] === 0x0a) {
+            buf = buf.subarray(2);
+          } else if (buf.length >= 2 && buf[0] === 0x2d && buf[1] === 0x2d) {
+            // "--" = end of multipart
+            break;
+          }
+
+          // Parse part headers (until \r\n\r\n)
+          const headerEnd = findHeaderEnd(buf);
+          if (headerEnd === -1) break; // need more data
+
+          const headerText = decoder.decode(buf.subarray(0, headerEnd));
+          buf = buf.subarray(headerEnd + 4); // skip \r\n\r\n
+
+          // Extract field name and filename from Content-Disposition
+          const nameMatch = headerText.match(/name="([^"]+)"/);
+          const fileMatch = headerText.match(/filename="([^"]+)"/);
+          const fieldName = nameMatch?.[1];
+
+          if (fileMatch && fieldName === "vod") {
+            fileName = fileMatch[1];
+            vodPath = `${deps.uploadDir}/${fileName}`;
+            outFile = await Deno.open(vodPath, { write: true, create: true, truncate: true });
+            inFileContent = true;
+          } else if (fieldName === "title" || fieldName === "streamer") {
+            // Small text field — read until next boundary
+            const nextBnd = findBoundary(buf, 0);
+            if (nextBnd === -1) break; // need more data
+            const val = decoder.decode(buf.subarray(0, Math.max(0, nextBnd - 2))).trim();
+            if (fieldName === "title") title = val;
+            else streamer = val;
+            buf = buf.subarray(nextBnd);
+          }
+        }
       }
     } finally {
-      out.close();
+      if (outFile) outFile.close();
     }
+
+    if (!vodPath || !fileName) return c.json({ error: "No 'vod' file in form data" }, 400);
 
     const result = await deps.importByFile.execute({
       vodPath,
-      title: title ?? file.name.replace(/\.[^.]+$/, ""),
+      title: title ?? fileName.replace(/\.[^.]+$/, ""),
       ...(streamer !== undefined && { streamer }),
     });
     return c.json(result, 201);
   });
+
+  /** Find the end of HTTP headers (\r\n\r\n) in a byte array. */
+  function findHeaderEnd(data: Uint8Array): number {
+    for (let i = 0; i < data.length - 3; i++) {
+      if (data[i] === 0x0d && data[i + 1] === 0x0a && data[i + 2] === 0x0d && data[i + 3] === 0x0a) {
+        return i;
+      }
+    }
+    return -1;
+  }
 
   // Upload a chat file and attach it to an existing stream.
   app.post("/api/streams/:id/upload-chat", async (c) => {
