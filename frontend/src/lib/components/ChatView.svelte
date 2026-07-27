@@ -12,7 +12,6 @@
 
   // ── All messages (loaded once, sorted by time) ──
   let allMessages = $state<ChatMessage[]>([]);
-  let loading = $state(false);
   let hasChat = $state(true);
   let loaded = $state(false);
 
@@ -38,16 +37,12 @@
   });
 
   async function loadAll() {
-    loading = true;
     try {
-      // Single request — server caches the parsed chat file in memory.
       const res = await apiClient.listChat(streamId, { offset: 0, limit: 100000 });
       allMessages = res.messages;
       hasChat = true;
     } catch {
       hasChat = false;
-    } finally {
-      loading = false;
     }
     scrollIndex = 0;
   }
@@ -243,10 +238,6 @@
     <div class="flex flex-1 flex-col items-center justify-center gap-2 p-4 text-center">
       <Icon name="alert" size={24} fill={false} class="text-ash-dim" />
       <p class="text-xs text-ash-dim">No chat file attached to this stream.</p>
-    </div>
-  {:else if loading}
-    <div class="flex flex-1 items-center justify-center">
-      <span class="text-xs text-ash-dim">Loading chat...</span>
     </div>
   {:else}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
