@@ -55,40 +55,34 @@
       onClipEnd();
     }
   }
-  // ── Single seek path: all seeks update the store, this effect applies
-  // them to the video element. ontimeupdate also updates the store, but
-  // since the video is already at that position, the delta is ~0 and the
-  // effect skips — no feedback loop. ──
-  // A guard distinguishes "the video reported its own position" (via
-  // ontimeupdate) from "an external seek changed the store" (ChatView,
-  // keyboard, etc.). Only external seeks apply to the video element.
-  let externalSeek = false;
-
+  // ── Seek bridge: apply store.currentTime to the video element. ──
+  // ontimeupdate writes the video's position to the store. When the
+  // store changes from elsewhere (ChatView scroll, keyboard, Timeline),
+  // the video's actual position won't match — that's a real seek.
+  // Tolerance of 0.5s avoids fighting ontimeupdate during playback
+  // (which reports ~4x/sec with sub-second deltas).
   $effect(() => {
     if (!videoEl) return;
-    const p = $playerStore;
-    if (!externalSeek) return;
-    externalSeek = false;
-    videoEl.currentTime = p.currentTime;
-    currentTime = p.currentTime;
-    autoAdvanceClip = null;
+    const storeTime = $playerStore.currentTime;
+    if (Math.abs(videoEl.currentTime - storeTime) > 0.5) {
+      videoEl.currentTime = storeTime;
+      currentTime = storeTime;
+      autoAdvanceClip = null;
+    }
   });
 
   function seekTo(time: number) {
     if (!videoEl) return;
-    externalSeek = true;
     seek(time);
   }
 
   function seekRelative(delta: number) {
     if (!videoEl) return;
-    externalSeek = true;
     seek(Math.max(0, Math.min(videoDuration, videoEl.currentTime + delta)));
   }
 
   function frameStep(delta: number) {
     if (!videoEl) return;
-    externalSeek = true;
     seek(Math.max(0, Math.min(videoDuration, videoEl.currentTime + delta)));
   }
 
@@ -157,7 +151,6 @@
   export function playClip(clip: Clip) {
     if (!videoEl) return;
     autoAdvanceClip = clip;
-    externalSeek = true;
     seek(clip.startTime);
     void videoEl.play();
   }
@@ -165,7 +158,6 @@
   export function jumpToClipPeak(clip: Clip) {
     if (!videoEl) return;
     autoAdvanceClip = null;
-    externalSeek = true;
     seek(clip.peakTime);
   }
 
