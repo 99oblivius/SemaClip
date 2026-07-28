@@ -47,10 +47,11 @@
     scrollIndex = 0;
   }
   // ── Follow: sync scrollIndex to playback ──
-  // When the user scrolls, they seek immediately — the seek updates
-  // playerStore.currentTime, which feeds back into this effect,
+  // Suppressed while the user is scrolling (userScrolling guard) so the
+  // follow effect doesn't fight the scroll position before the seek fires.
+  let userScrolling = false;
   $effect(() => {
-    if (!follow || allMessages.length === 0) return;
+    if (!follow || allMessages.length === 0 || userScrolling) return;
     const time = player.currentTime;
     let lo = 0, hi = allMessages.length;
     while (lo < hi) {
@@ -66,13 +67,22 @@
     allMessages.slice(Math.max(0, scrollIndex - VISIBLE_COUNT), scrollIndex)
   );
 
-  // ── Scroll: move one message, seek immediately ──
+  // ── Scroll: move one message, debounced seek ──
+  // The seek is debounced so rapid scrolling doesn't spam the store.
+  // userScrolling suppresses the follow effect until the seek fires,
+  // keeping the chat position stable during the scroll gesture.
+  let seekTimer: ReturnType<typeof setTimeout> | null = null;
   function scrollToIndex(newIndex: number) {
     const clamped = Math.max(0, Math.min(allMessages.length, newIndex));
     if (clamped === scrollIndex) return;
     scrollIndex = clamped;
-    const msg = allMessages[clamped - 1];
-    if (msg) seek(msg.t);
+    userScrolling = true;
+    if (seekTimer) clearTimeout(seekTimer);
+    seekTimer = setTimeout(() => {
+      userScrolling = false;
+      const msg = allMessages[clamped - 1];
+      if (msg) seek(msg.t);
+    }, 150);
   }
 
   function handleWheel(e: WheelEvent) {
