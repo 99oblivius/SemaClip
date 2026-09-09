@@ -27,3 +27,24 @@ export class RejectClipUseCase {
     return rejected;
   }
 }
+
+/** Persist user review edits (trim endpoints). Rejects inverted ranges. */
+export class UpdateClipUseCase {
+  constructor(private readonly clips: ClipRepository) {}
+  async execute(
+    clipId: string,
+    patch: { startTime?: number; endTime?: number },
+  ): Promise<Clip> {
+    const clip = await this.clips.findById(clipId);
+    if (!clip) throw new Error(`Clip not found: ${clipId}`);
+    const startTime = patch.startTime ?? clip.startTime;
+    const endTime = patch.endTime ?? clip.endTime;
+    if (!Number.isFinite(startTime) || !Number.isFinite(endTime)) {
+      throw new Error("Endpoints must be finite numbers");
+    }
+    if (endTime - startTime < 0.5) {
+      throw new Error("Clip too short: out must be at least 0.5s after in");
+    }
+    return this.clips.update({ ...clip, startTime, endTime });
+  }
+}

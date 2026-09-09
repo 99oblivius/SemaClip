@@ -34,7 +34,7 @@ export interface ClipRepository {
   save(clip: Clip): Promise<void>;
   findById(id: string): Promise<Clip | null>;
   listByStream(streamId: string, filter?: { axis?: Axis; rejected?: boolean }): Promise<Clip[]>;
-  update(clip: Clip): Promise<void>;
+  update(clip: Clip): Promise<Clip>;
 }
 
 export interface PersonaRepository {

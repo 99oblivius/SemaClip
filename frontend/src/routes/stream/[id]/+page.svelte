@@ -36,19 +36,59 @@
   let exportAll = $state(false);
   let discarded = $state<Set<string>>(new Set());
   let pendingUndo = $state<{ id: string; timer: ReturnType<typeof setTimeout> } | null>(null);
+  // Q toggles: show only clips without a review decision (default view) or everything.
+  let unreviewedOnly = $state(true);
 
   const allClips = $derived(clipsQuery.data ?? []);
-  // Axis filters (keys 1–6): toggled sets, AND-composed across enabled axes;
+  // Axis filters (keys 1–7): toggled sets, AND-composed across enabled axes;
   // empty active set = no filtering. Non-matching clips dim in the queue.
   let activeAxes = $state<Set<Axis>>(new Set());
   const visibleClips = $derived(
     allClips
       .filter((c) => !c.rejected && !discarded.has(c.id))
       .filter((c) => activeAxes.size === 0 || activeAxes.has(c.axis))
-      .sort((a, b) => b.score - a.score)
+      .filter((c) => !unreviewedOnly || !reviewedLocal.has(c.id))
+      .sort((a, b) => {
+        // Snoozed clips sort last, stable within their group.
+        const aSnoozed = snoozedIds.has(a.id) ? 1 : 0;
+        const bSnoozed = snoozedIds.has(b.id) ? 1 : 0;
+        if (aSnoozed !== bSnoozed) return aSnoozed - bSnoozed;
+        return b.score - a.score;
+      })
   );
+  // Locally-reviewed = accepted (kept in view history) or snoozed this session.
+  // Backend persistence of accept-state is B3; until then accepted clips simply
+  // leave the unreviewed set when acted on.
+  let reviewedLocal = $state<Set<string>>(new Set());
   const currentClip = $derived(visibleClips[currentClipIndex]);
   const stream = $derived(streamQuery.data);
+
+  /** Persist an endpoint change locally + to the backend (fire-and-forget with
+   *  rollback on failure — a silently dropped edit desyncs UI and DB). */
+  function setEndpoint(which: 'start' | 'end', time: number) {
+    if (!currentClip) return;
+    const next = which === 'start'
+      ? { startTime: Math.min(time, currentClip.endTime - 1) }
+      : { endTime: Math.max(time, currentClip.startTime + 1) };
+    const before = { startTime: currentClip.startTime, endTime: currentClip.endTime };
+    queryClient.setQueryData<Clip[]>(['clips', streamId], (old) =>
+      old?.map((c) => (c.id === currentClip.id ? { ...c, ...next } : c)),
+    );
+    apiClient.updateClip(currentClip.id, next).catch((err) => {
+      console.error('updateClip failed:', err);
+      queryClient.setQueryData<Clip[]>(['clips', streamId], (old) =>
+        old?.map((c) => (c.id === currentClip.id ? { ...c, ...before } : c)),
+      );
+    });
+  }
+
+  /** S: move the current candidate to the end of the audit queue. */
+  function snoozeClip() {
+    if (!currentClip) return;
+    snoozedIds = new Set([...snoozedIds, currentClip.id]);
+    currentClipIndex = 0;
+  }
+  let snoozedIds = $state<Set<string>>(new Set());
 
   function toggleAxisFilter(axis: Axis) {
     const next = new Set(activeAxes);
@@ -204,9 +244,9 @@
         e.preventDefault();
         playerComp?.frameStepExported(e.shiftKey ? 1 : 1 / 30);
         break;
-      case '1': case '2': case '3': case '4': case '5': case '6': {
-        // Axis filters (design §7.4) — toggles the corresponding axis chip.
-        const axes = ['hype', 'humor', 'skill', 'awkward', 'emotional', 'tension'] as const;
+      case '1': case '2': case '3': case '4': case '5': case '6': case '7': {
+        // Axis filters — toggles the corresponding axis chip.
+        const axes = ['hype', 'humor', 'skill', 'awkward', 'emotional', 'tension', 'reaction'] as const;
         const axis = axes[parseInt(e.key, 10) - 1]!;
         toggleAxisFilter(axis);
         e.preventDefault();
@@ -228,6 +268,23 @@
       case 'd': case 'D':
         e.preventDefault();
         discardClip();
+        break;
+      case 'i': case 'I':
+        e.preventDefault();
+        if (currentClip) setEndpoint('start', $playerStore.currentTime);
+        break;
+      case 'o': case 'O':
+        e.preventDefault();
+        if (currentClip) setEndpoint('end', $playerStore.currentTime);
+        break;
+      case 's': case 'S':
+        e.preventDefault();
+        snoozeClip();
+        break;
+      case 'q': case 'Q':
+        e.preventDefault();
+        unreviewedOnly = !unreviewedOnly;
+        currentClipIndex = 0;
         break;
       case 'u': case 'U':
         e.preventDefault();

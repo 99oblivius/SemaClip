@@ -29,6 +29,7 @@ import {
   ListClipsUseCase,
   GetClipUseCase,
   RejectClipUseCase,
+  UpdateClipUseCase,
   ExportClipUseCase,
   ManageQueueUseCase,
   SettingsUseCase,
@@ -121,6 +122,7 @@ export function buildContainer(config: AppConfig): AppContainer {
   const listClips = new ListClipsUseCase(clipRepo);
   const getClip = new GetClipUseCase(clipRepo);
   const rejectClip = new RejectClipUseCase(clipRepo);
+  const updateClip = new UpdateClipUseCase(clipRepo);
   const exportClip = new ExportClipUseCase(clipRepo, streamRepo, ffmpeg, fs, config.exportDir, metadataRepo);
   const manageQueue = new ManageQueueUseCase(jobRepo);
   const settings = new SettingsUseCase(new SqliteSettingsRepository(db), bus);
@@ -141,6 +143,7 @@ export function buildContainer(config: AppConfig): AppContainer {
       listClips,
       getClip,
       rejectClip,
+      updateClip,
       exportClip,
       manageQueue,
       settings,

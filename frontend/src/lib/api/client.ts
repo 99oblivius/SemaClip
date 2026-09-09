@@ -89,6 +89,10 @@ export const apiClient = {
   rejectClip: (id: string) =>
     api<Clip>(`/clips/${id}/reject`, { method: 'POST' }),
 
+  /** Persist endpoint/trim adjustments (review state, P0-11). */
+  updateClip: (id: string, patch: { startTime?: number; endTime?: number }) =>
+    api<Clip>(`/clips/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+
   exportClip: (input: ExportClipInput) =>
     api<ExportResult>(`/clips/${input.clipId}/export`, { method: 'POST', body: JSON.stringify(input) }),
 

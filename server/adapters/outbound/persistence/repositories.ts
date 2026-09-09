@@ -219,7 +219,7 @@ export class SqliteClipRepository implements ClipRepository {
     return rows.map(rowToClip);
   }
 
-  async update(clip: Clip): Promise<void> {
+  async update(clip: Clip): Promise<Clip> {
     await this.db.update(schema.clips).set({
       score: clip.score,
       start_time: clip.startTime,
@@ -232,6 +232,7 @@ export class SqliteClipRepository implements ClipRepository {
       rejected: clip.rejected ? 1 : 0,
       signals_json: clip.signals ? JSON.stringify(clip.signals) : null,
     }).where(eq(schema.clips.id, clip.id)).run();
+    return clip;
   }
 }
 

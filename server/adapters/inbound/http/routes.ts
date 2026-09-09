@@ -14,6 +14,7 @@ import type {
   ListClipsUseCase,
   GetClipUseCase,
   RejectClipUseCase,
+  UpdateClipUseCase,
   ExportClipUseCase,
   ManageQueueUseCase,
   SettingsUseCase,
@@ -35,6 +36,7 @@ export interface HttpDeps {
   listClips: ListClipsUseCase;
   getClip: GetClipUseCase;
   rejectClip: RejectClipUseCase;
+  updateClip: UpdateClipUseCase;
   exportClip: ExportClipUseCase;
   manageQueue: ManageQueueUseCase;
   settings: SettingsUseCase;
@@ -169,6 +171,16 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
 
   app.post("/api/clips/:id/reject", async (c) => {
     const clip = await deps.rejectClip.execute(c.req.param("id"));
+    return c.json(clip);
+  });
+
+  // Persist review edits (trim endpoints).
+  app.patch("/api/clips/:id", async (c) => {
+    const body = await c.req.json();
+    const patch: { startTime?: number; endTime?: number } = {};
+    if (body.startTime !== undefined) patch.startTime = Number(body.startTime);
+    if (body.endTime !== undefined) patch.endTime = Number(body.endTime);
+    const clip = await deps.updateClip.execute(c.req.param("id"), patch);
     return c.json(clip);
   });
 
