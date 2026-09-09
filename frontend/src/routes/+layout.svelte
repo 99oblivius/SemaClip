@@ -27,7 +27,7 @@
   ]);
 
   function reviewHref(): string {
-    const last = localStorage.getItem('semaclass-last-stream');
+    const last = localStorage.getItem('semaclip-last-stream');
     return last ? `/stream/${last}` : '/';
   }
 </script>

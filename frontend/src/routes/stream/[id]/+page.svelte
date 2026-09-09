@@ -7,7 +7,6 @@
   import VideoPlayer from '$lib/components/VideoPlayer.svelte';
   import Timeline from '$lib/components/Timeline.svelte';
   import SignalBar from '$lib/components/SignalBar.svelte';
-  import ExportSheet from '$lib/components/ExportSheet.svelte';
   import KeyboardHelp from '$lib/components/KeyboardHelp.svelte';
   import ProjectSettings from '$lib/components/ProjectSettings.svelte';
   import RightPanel from '$lib/components/RightPanel.svelte';
@@ -32,8 +31,6 @@
   let currentClipIndex = $state(0);
   let followClip = $state(false);
   let showKeyboardHelp = $state(false);
-  let showExportSheet = $state(false);
-  let exportAll = $state(false);
   let discarded = $state<Set<string>>(new Set());
   let pendingUndo = $state<{ id: string; timer: ReturnType<typeof setTimeout> } | null>(null);
   // Q toggles: show only clips without a review decision (default view) or everything.
@@ -166,13 +163,19 @@
   }
 
   function exportClip() {
-    showExportSheet = true;
-    exportAll = false;
+    // Export is a first-class screen (P0-7); deep-link with the clip id.
+    window.location.href = `/export?clip=${currentClip?.id ?? ''}`;
   }
 
   function exportAllClips() {
-    showExportSheet = true;
-    exportAll = true;
+    window.location.href = '/export';
+  }
+
+  /** A: accept = mark reviewed and advance (persistence of accept-state is B3). */
+  function acceptClip() {
+    if (!currentClip) return;
+    reviewedLocal = new Set([...reviewedLocal, currentClip.id]);
+    nextClip();
   }
 
   function adjustEndpoints(clip: Clip, start: number, end: number) {
@@ -205,11 +208,8 @@
   function handleKey(e: KeyboardEvent) {
     const target = e.target as HTMLElement;
     if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
-    if (showExportSheet || showKeyboardHelp) {
-      if (e.key === 'Escape') {
-        showExportSheet = false;
-        showKeyboardHelp = false;
-      }
+    if (showKeyboardHelp) {
+      if (e.key === 'Escape') showKeyboardHelp = false;
       return;
     }
 
@@ -264,6 +264,10 @@
         e.preventDefault();
         if (e.shiftKey) exportAllClips();
         else exportClip();
+        break;
+      case 'a': case 'A':
+        e.preventDefault();
+        acceptClip();
         break;
       case 'd': case 'D':
         e.preventDefault();
@@ -412,6 +416,14 @@
             </div>
             <div class="flex items-center gap-2">
               <button
+                class="flex items-center gap-1 rounded-md border border-success/50 px-2 py-1 text-xs text-success transition-colors hover:bg-success/10"
+                onclick={acceptClip}
+                aria-label="Accept clip"
+                title="Accept (A) — marks reviewed and advances"
+              >
+                <Icon name="check" size={12} /> Accept
+              </button>
+              <button
                 class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-border-strong hover:text-ink"
                 onclick={exportClip}
                 aria-label="Export this clip"
@@ -503,10 +515,6 @@
     />
   </div>
 </div>
-
-{#if showExportSheet && currentClip}
-  <ExportSheet clip={currentClip} onClose={() => (showExportSheet = false)} />
-{/if}
 
 {#if showKeyboardHelp}
   <KeyboardHelp onClose={() => (showKeyboardHelp = false)} />
