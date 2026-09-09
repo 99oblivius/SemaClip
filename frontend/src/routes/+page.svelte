@@ -2,8 +2,10 @@
   import { createQuery, createMutation, useQueryClient } from '@tanstack/svelte-query';
   import { apiClient } from '$lib/api/client';
   import Icon from '$lib/components/Icon.svelte';
+  import DownloadProgress from '$lib/components/DownloadProgress.svelte';
   import { fadeIn, staggerIn, hoverLift } from '$lib/actions/gsap';
   import type { Stream, Job, ImportByUrlInput, ImportByFileInput } from '$shared/types';
+  import type { QualityInfo } from '$lib/api/download';
 
   const queryClient = useQueryClient();
 
@@ -32,6 +34,49 @@
     mutationFn: (jobId: string) => apiClient.cancelJob(jobId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['jobs'] }),
   }));
+
+  // ── Advanced import options (scrub-first progressive, opt-in) ──
+  let showAdvanced = $state(false);
+  let progressive = $state(false);
+  let maxQualityHeight = $state<number | null>(null); // null = no cap
+  let includeScrub = $state(true);
+  // Qualities resolved from the pasted URL (fetched lazily, debounced by URL change).
+  let qualities = $state<QualityInfo[]>([]);
+  let qualitiesError = $state<string | null>(null);
+  let qualitiesLoading = $state(false);
+  let lastQueriedUrl = '';
+
+  $effect(() => {
+    const url = urlInput.trim();
+    if (!progressive || !url || url === lastQueriedUrl) return;
+    lastQueriedUrl = url;
+    qualitiesLoading = true;
+    qualitiesError = null;
+    apiClient.listQualities(url)
+      .then((d) => {
+        qualities = d.qualities;
+        // Default the max-quality select to the highest available.
+        if (d.qualities.length > 0 && maxQualityHeight === null) {
+          maxQualityHeight = Math.max(...d.qualities.map((q) => q.height));
+        }
+      })
+      .catch((err: Error) => (qualitiesError = err.message))
+      .finally(() => (qualitiesLoading = false));
+  });
+
+  function handleUrlImport() {
+    if (!urlInput.trim()) return;
+    importUrlMutation.mutate({
+      url: urlInput.trim(),
+      ...(progressive && {
+        progressive: true,
+        scrubHeightCap: 540,
+        maxQualityHeight,
+        includeScrub,
+      }),
+    });
+    urlInput = '';
+  }
 
   const queueMutation = createMutation(() => ({
     mutationFn: (action: Parameters<typeof apiClient.manageQueue>[0]) => apiClient.manageQueue(action),
@@ -69,12 +114,6 @@
 
   function fmtDate(iso: string): string {
     return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  }
-
-  function handleUrlImport() {
-    if (!urlInput.trim()) return;
-    importUrlMutation.mutate({ url: urlInput.trim() });
-    urlInput = '';
   }
 
   function handlePathImport() {
@@ -197,6 +236,15 @@
           aria-label="Twitch VOD URL"
         />
         <button
+          class="rounded p-1 transition-colors {showAdvanced ? 'text-accent' : 'text-ash-dim hover:text-ash'}"
+          onclick={() => (showAdvanced = !showAdvanced)}
+          aria-label="Advanced download options"
+          aria-expanded={showAdvanced}
+          title="Advanced download options"
+        >
+          <Icon name="settings" size={15} />
+        </button>
+        <button
           class="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
           onclick={handleUrlImport}
           disabled={importUrlMutation.isPending || !urlInput.trim()}
@@ -204,6 +252,46 @@
           Download
         </button>
       </div>
+
+      <!-- Advanced (opt-in scrub-first) options -->
+      {#if showAdvanced}
+        <div class="mt-2 flex flex-col gap-2 rounded-md border border-border bg-surface px-3 py-2.5">
+          <label class="flex items-center gap-2 text-xs text-ash">
+            <input type="checkbox" bind:checked={progressive} class="accent-accent" />
+            <span class="font-medium">Scrub-first download</span>
+            <span class="text-ash-dim">— 540p scrub appears while downloading; full quality downloads after, in the background</span>
+          </label>
+          {#if progressive}
+            <div class="ml-6 flex flex-wrap items-center gap-3 text-xs">
+              <span class="font-mono text-ash-dim">Max quality:</span>
+              {#if qualitiesLoading}
+                <span class="font-mono text-xs text-ash-dim">resolving…</span>
+              {:else if qualitiesError}
+                <span class="font-mono text-xs text-error">{qualitiesError}</span>
+              {:else if qualities.length > 0}
+                <select
+                  bind:value={maxQualityHeight}
+                  class="rounded border border-border bg-surface-2 px-2 py-1 text-xs text-ink focus:border-accent focus:outline-none"
+                  aria-label="Maximum download quality"
+                >
+                  {#each qualities as q (q.name)}
+                    <option value={q.height}>
+                      {q.name} ({q.width}×{q.height})
+                    </option>
+                  {/each}
+                  <option value={null}>No cap</option>
+                </select>
+                <label class="flex items-center gap-1.5 text-xs text-ash">
+                  <input type="checkbox" bind:checked={includeScrub} class="accent-accent" />
+                  separate 540p scrub file
+                </label>
+              {:else}
+                <span class="font-mono text-xs text-ash-dim">paste a URL to list qualities</span>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      {/if}
       <div class="mt-2 flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 transition-colors focus-within:border-accent">
         <Icon name="folder" size={15} fill={false} />
         <input
@@ -260,6 +348,15 @@
           >
             {channel}
           </button>
+        {/each}
+      </section>
+    {/if}
+
+    <!-- Progressive download progress (unified bar + itemized popover) -->
+    {#if streams.length > 0}
+      <section class="flex flex-col gap-2" aria-label="Download progress">
+        {#each streams.filter((s) => s.sourceUrl) as stream (stream.id)}
+          <DownloadProgress streamId={stream.id} />
         {/each}
       </section>
     {/if}

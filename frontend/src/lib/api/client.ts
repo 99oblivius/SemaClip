@@ -13,6 +13,7 @@ import type {
   Axis,
   StreamStatus,
 } from '$shared/types';
+import type { DownloadState, QualityInfo } from '$lib/api/download';
 
 export interface ChatMessage {
   t: number;       // content_offset_seconds
@@ -55,6 +56,18 @@ export const apiClient = {
 
   importByUrl: (input: ImportByUrlInput) =>
     api<ImportResult>('/streams/import-url', { method: 'POST', body: JSON.stringify(input) }),
+
+  // ── Download pipeline (docs/DOWNLOAD-PIPELINE.md) ──
+  listQualities: (url: string) =>
+    api<{ qualities: { name: string; width: number; height: number; fps: number; bandwidth: number }[] }>(
+      `/vod/qualities?url=${encodeURIComponent(url)}`,
+    ),
+
+  getDownloadState: (streamId: string) =>
+    api<DownloadState>(`/streams/${streamId}/download`),
+
+  cancelDownload: (streamId: string) =>
+    api<{ ok: boolean }>(`/streams/${streamId}/download`, { method: 'DELETE' }),
 
 
 
