@@ -1,0 +1,37 @@
+# Phase 1 gate: detection package tests + native-tree smoke (engine E2E).
+# CI fetches the pinned native binaries via scripts/fetch-native.sh — the same
+# step release pipelines (Phase 4) reuse, so a broken pin fails here first.
+name: check-engine
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  detection:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.x
+      - name: Detection unit tests
+        run: deno test --allow-all
+        working-directory: detection
+
+  engine-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.x
+      - name: Fetch native binaries + models
+        run: ./scripts/fetch-native.sh
+      - name: Engine E2E (real whisper on bundled jfk.wav)
+        run: deno test --allow-all tests/engine-e2e.test.ts
+        working-directory: server
+        env:
+          # whisper CPU binaries need their bundled libs (LD_LIBRARY_PATH=.)
+          LD_LIBRARY_PATH: ${{ github.workspace }}/native/whisper/linux-x64
