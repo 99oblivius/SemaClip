@@ -35,11 +35,10 @@
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['jobs'] }),
   }));
 
-  // ── Advanced import options (scrub-first progressive, opt-in) ──
-  let showAdvanced = $state(false);
-  let progressive = $state(false);
+  // ── Download options (always visible). URL downloads are chunk-live by
+  // default; scrubFirst opts into the two-file 540p-first system. ──
+  let scrubFirst = $state(false);
   let maxQualityHeight = $state<number | null>(null); // null = no cap
-  let includeScrub = $state(true);
   const settingsForDefaults = createQuery(() => ({
     queryKey: ['settings'],
     queryFn: () => apiClient.getSettings(),
@@ -53,7 +52,7 @@
 
   $effect(() => {
     const url = urlInput.trim();
-    if (!progressive || !url || url === lastQueriedUrl) return;
+    if (!url || url === lastQueriedUrl) return;
     lastQueriedUrl = url;
     qualitiesLoading = true;
     qualitiesError = null;
@@ -80,12 +79,10 @@
     if (!urlInput.trim()) return;
     importUrlMutation.mutate({
       url: urlInput.trim(),
-      ...(progressive && {
-        progressive: true,
-        scrubHeightCap: 540,
-        maxQualityHeight,
-        includeScrub,
-      }),
+      progressive: true,
+      scrubHeightCap: 540,
+      maxQualityHeight,
+      includeScrub: scrubFirst,
     });
     urlInput = '';
   }
@@ -248,15 +245,6 @@
           aria-label="Twitch VOD URL"
         />
         <button
-          class="rounded p-1 transition-colors {showAdvanced ? 'text-accent' : 'text-ash-dim hover:text-ash'}"
-          onclick={() => (showAdvanced = !showAdvanced)}
-          aria-label="Advanced download options"
-          aria-expanded={showAdvanced}
-          title="Advanced download options"
-        >
-          <Icon name="settings" size={15} />
-        </button>
-        <button
           class="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
           onclick={handleUrlImport}
           disabled={importUrlMutation.isPending || !urlInput.trim()}
@@ -265,45 +253,37 @@
         </button>
       </div>
 
-      <!-- Advanced (opt-in scrub-first) options -->
-      {#if showAdvanced}
-        <div class="mt-2 flex flex-col gap-2 rounded-md border border-border bg-surface px-3 py-2.5">
-          <label class="flex items-center gap-2 text-xs text-ash">
-            <input type="checkbox" bind:checked={progressive} class="accent-accent" />
-            <span class="font-medium">Scrub-first download</span>
-            <span class="text-ash-dim">— 540p scrub appears while downloading; full quality downloads after, in the background</span>
-          </label>
-          {#if progressive}
-            <div class="ml-6 flex flex-wrap items-center gap-3 text-xs">
-              <span class="font-mono text-ash-dim">Max quality:</span>
-              {#if qualitiesLoading}
-                <span class="font-mono text-xs text-ash-dim">resolving…</span>
-              {:else if qualitiesError}
-                <span class="font-mono text-xs text-error">{qualitiesError}</span>
-              {:else if qualities.length > 0}
-                <select
-                  bind:value={maxQualityHeight}
-                  class="rounded border border-border bg-surface-2 px-2 py-1 text-xs text-ink focus:border-accent focus:outline-none"
-                  aria-label="Maximum download quality"
-                >
-                  {#each qualities as q (q.name)}
-                    <option value={q.height}>
-                      {q.name} ({q.width}×{q.height})
-                    </option>
-                  {/each}
-                  <option value={null}>No cap</option>
-                </select>
-                <label class="flex items-center gap-1.5 text-xs text-ash">
-                  <input type="checkbox" bind:checked={includeScrub} class="accent-accent" />
-                  separate 540p scrub file
-                </label>
-              {:else}
-                <span class="font-mono text-xs text-ash-dim">paste a URL to list qualities</span>
-              {/if}
-            </div>
-          {/if}
-        </div>
-      {/if}
+      <!-- Download options (always visible; live-chunked download is the
+           only URL path — chunks scrub as they land). The toggle chooses
+           the two-file scrub-first system (opt-in) vs a single download. -->
+      <div class="mt-2 flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface px-3 py-2.5">
+        <span class="font-mono text-xs text-ash-dim">Max quality:</span>
+        {#if qualitiesLoading}
+          <span class="font-mono text-xs text-ash-dim">resolving…</span>
+        {:else if qualitiesError}
+          <span class="font-mono text-xs text-error">{qualitiesError}</span>
+        {:else if qualities.length > 0}
+          <select
+            bind:value={maxQualityHeight}
+            class="rounded border border-border bg-surface-2 px-2 py-1 text-xs text-ink focus:border-accent focus:outline-none"
+            aria-label="Maximum download quality"
+          >
+            {#each qualities as q (q.name)}
+              <option value={q.height}>
+                {q.name} ({q.width}×{q.height})
+              </option>
+            {/each}
+            <option value={null}>No cap</option>
+          </select>
+        {:else}
+          <span class="font-mono text-xs text-ash-dim">paste a URL to list qualities</span>
+        {/if}
+        <label class="flex items-center gap-2 text-xs text-ash">
+          <input type="checkbox" bind:checked={scrubFirst} class="accent-accent" />
+          <span class="font-medium">540p scrub-first</span>
+          <span class="text-ash-dim">— separate 540p file scrubs immediately; full quality follows in the background. Off = one download at max quality (still scrubbable while it lands).</span>
+        </label>
+      </div>
       <div class="mt-2 flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 transition-colors focus-within:border-accent">
         <Icon name="folder" size={15} fill={false} />
         <input
