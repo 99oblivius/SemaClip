@@ -1,11 +1,34 @@
 import { createApp } from "@/adapters/inbound/http/routes.ts";
 import { buildContainer } from "@/composition/container.ts";
+import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
 const PORT = parseInt(Deno.env.get("PORT") ?? "5174", 10);
 const DATA_DIR = Deno.env.get("SEMACLIP_DATA") ?? `${Deno.env.get("HOME")}/.semaclip`;
 const DB_PATH = Deno.env.get("SEMACLIP_DB") ?? `${DATA_DIR}/semaclip.db`;
 const CACHE_DIR = Deno.env.get("SEMACLIP_CACHE") ?? `${DATA_DIR}/cache`;
 const EXPORT_DIR = Deno.env.get("SEMACLIP_EXPORT") ?? `${DATA_DIR}/exports`;
 const ENGINE_BINARY = Deno.env.get("SEMACLIP_ENGINE") ?? "semaclip-engine";
+
+/**
+ * v2 engine selection: if the bundled whisper.cpp tree exists under native/,
+ * the in-process TS detection engine is used. Falls back to the external
+ * engine binary (Python mock) when bundling hasn't happened — but logs it.
+ */
+const nativeRoot = new URL("../native/whisper/", import.meta.url);
+let detectionWhisper: WhisperPaths | undefined;
+try {
+  await Deno.stat(new URL("linux-x64/whisper-cli", nativeRoot));
+  await Deno.stat(new URL("models/ggml-base.en-q5_1.bin", nativeRoot));
+  const binDir = new URL("linux-x64/", nativeRoot).pathname;
+  detectionWhisper = {
+    binDir,
+    modelsDir: new URL("models/", nativeRoot).pathname,
+    modelFile: "ggml-base.en-q5_1.bin",
+    vadModelFile: "ggml-silero-v5.1.2.bin",
+  };
+  console.log("Engine: in-process detection (whisper.cpp bundled)");
+} catch {
+  console.log("Engine: external binary mode (SEMACLIP_ENGINE) — native whisper.cpp tree not found");
+}
 
 const container = buildContainer({
   dbPath: DB_PATH,
@@ -14,6 +37,7 @@ const container = buildContainer({
   exportDir: EXPORT_DIR,
   engineBinaryPath: ENGINE_BINARY,
   gpuDevice: null,
+  detectionWhisper,
 });
 
 const app = createApp(container.httpDeps, container.bus);

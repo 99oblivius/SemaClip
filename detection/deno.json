@@ -1,0 +1,12 @@
+{
+  "name": "semaclip-detection",
+  "version": "0.1.0",
+  "exports": "./pipeline.ts",
+  "imports": {
+    "@std/assert": "jsr:@std/assert@^1.0.10",
+    "shared/types": "../shared/types.ts"
+  },
+  "tasks": {
+    "test": "deno test --allow-all"
+  }
+}

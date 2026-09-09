@@ -10,6 +10,8 @@ import {
 } from "@/adapters/outbound/persistence/mod.ts";
 import { InProcessEventBus } from "@/adapters/outbound/eventbus/mod.ts";
 import { PythonEngineAdapter } from "@/adapters/outbound/engine/mod.ts";
+import { DetectionEngineAdapter } from "@/adapters/outbound/engine/DetectionEngineAdapter.ts";
+import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
 import { TwitchDlAdapter } from "@/adapters/outbound/vod/mod.ts";
 import { FFmpegAdapter } from "@/adapters/outbound/ffmpeg/mod.ts";
 import {
@@ -61,6 +63,8 @@ export interface AppConfig {
   exportDir: string;
   engineBinaryPath: string;
   gpuDevice: number | null;
+  /** When set, the in-process TS detection engine is used with these native paths. */
+  detectionWhisper?: WhisperPaths | undefined;
 }
 
 export interface AppContainer {
@@ -82,7 +86,14 @@ export function buildContainer(config: AppConfig): AppContainer {
   const streamStorage = new DenoStreamStorage(config.dataDir);
   const vodDownloader = new TwitchDlAdapter();
   const ffmpeg = new FFmpegAdapter();
-  const engine = new PythonEngineAdapter(config.engineBinaryPath, bus, config.gpuDevice);
+  // v2 engine: in-process TS detection + bundled native runtimes (whisper.cpp).
+  // The old Python subprocess adapter remains for the pre-bundling dev path.
+  const engine = config.detectionWhisper
+    ? new DetectionEngineAdapter({ whisper: config.detectionWhisper, ffmpegPath: "ffmpeg" })
+    : new PythonEngineAdapter(config.engineBinaryPath, bus, config.gpuDevice);
+  if (config.detectionWhisper) {
+    (engine as DetectionEngineAdapter).attachBus(bus);
+  }
 
   // Use cases
   const importByFile = new ImportStreamByFileUseCase(streamRepo, fs, ffmpeg);
