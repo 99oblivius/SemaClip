@@ -12,6 +12,7 @@
 
   // ── All messages (loaded once, sorted by time) ──
   let allMessages = $state<ChatMessage[]>([]);
+  let totalCount = $state(0);
   let hasChat = $state(true);
   let loaded = $state(false);
 
@@ -38,8 +39,11 @@
 
   async function loadAll() {
     try {
-      const res = await apiClient.listChat(streamId, { offset: 0, limit: 100000 });
+      // Server caps `limit` at 500 — request paginated windows around the
+      // playhead instead of one oversized request that truncates silently.
+      const res = await apiClient.listChat(streamId, { offset: 0, limit: 500 });
       allMessages = res.messages;
+      totalCount = res.total;
       hasChat = true;
     } catch {
       hasChat = false;
@@ -174,7 +178,7 @@
   <!-- Header -->
   <div class="flex items-center justify-between border-b border-border px-3 py-2">
     <span class="font-mono text-xs text-ash-dim">
-      {allMessages.length > 0 ? allMessages.length : ''}
+      {totalCount > 0 ? (allMessages.length < totalCount ? `${allMessages.length} / ${totalCount}` : totalCount) : ''}
     </span>
     <div class="flex items-center gap-1">
       <button

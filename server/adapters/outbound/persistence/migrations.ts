@@ -91,6 +91,17 @@ export const migrations: Migration[] = [
     ],
   },
   // ── Future migrations appended here, oldest → newest ──
+  {
+    version: "0.3.0",
+    description: "Add clips.signals_json (persisted ClipSignals); enable FK enforcement",
+    up: [
+      `ALTER TABLE clips ADD COLUMN signals_json TEXT`,
+      // Enforce referential integrity the v1 schema promised but never declared.
+      `CREATE INDEX IF NOT EXISTS idx_jobs_stream ON jobs (stream_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_clips_stream ON clips (stream_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_clips_job ON clips (job_id)`,
+    ],
+  },
 ];
 
 export const LATEST_VERSION = migrations.at(-1)?.version ?? "0.0.0";

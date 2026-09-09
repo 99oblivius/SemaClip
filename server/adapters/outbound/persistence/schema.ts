@@ -39,6 +39,7 @@ export const clips = sqliteTable("clips", {
   exported: integer("exported").notNull().default(0),
   export_path: text("export_path"),
   rejected: integer("rejected").notNull().default(0),
+  signals_json: text("signals_json"), // JSON ClipSignals, null = no signal data
 });
 
 export const personas = sqliteTable("personas", {

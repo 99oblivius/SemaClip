@@ -62,6 +62,9 @@ export interface Clip {
   exported: boolean;
   exportPath: string | null;
   rejected: boolean; // user discarded → implicit feedback
+  /** Per-signal evidence from the engine. null = engine emitted no signals —
+   *  the UI must show "no signal data", never fabricated bars. */
+  signals: ClipSignals | null;
 }
 
 export interface Persona {

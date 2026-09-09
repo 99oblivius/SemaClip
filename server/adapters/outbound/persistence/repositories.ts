@@ -56,6 +56,7 @@ function rowToClip(r: typeof schema.clips.$inferSelect): Clip {
     exported: r.exported === 1,
     exportPath: r.export_path,
     rejected: r.rejected === 1,
+    signals: r.signals_json ? (JSON.parse(r.signals_json) as Clip["signals"]) : null,
   };
 }
 
@@ -207,6 +208,7 @@ export class SqliteClipRepository implements ClipRepository {
       exported: clip.exported ? 1 : 0,
       export_path: clip.exportPath,
       rejected: clip.rejected ? 1 : 0,
+      signals_json: clip.signals ? JSON.stringify(clip.signals) : null,
     }).run();
   }
 
@@ -245,6 +247,7 @@ export class SqliteClipRepository implements ClipRepository {
       exported: clip.exported ? 1 : 0,
       export_path: clip.exportPath,
       rejected: clip.rejected ? 1 : 0,
+      signals_json: clip.signals ? JSON.stringify(clip.signals) : null,
     }).where(eq(schema.clips.id, clip.id)).run();
   }
 }

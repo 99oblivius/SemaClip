@@ -20,6 +20,7 @@ export interface NewClipInput {
   endTime: number;
   peakTime: number;
   justification: string | null;
+  signals?: ClipSignals | null;
 }
 
 export function createClip(input: NewClipInput, rank: number | null): Clip {
@@ -37,6 +38,7 @@ export function createClip(input: NewClipInput, rank: number | null): Clip {
     exported: false,
     exportPath: null,
     rejected: false,
+    signals: input.signals ?? null,
   };
 }
 

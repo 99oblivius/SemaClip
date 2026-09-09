@@ -59,12 +59,15 @@
   // ontimeupdate writes the video's position to the store. When the
   // store changes from elsewhere (ChatView scroll, keyboard, Timeline),
   // the video's actual position won't match — that's a real seek.
-  // Tolerance of 0.5s avoids fighting ontimeupdate during playback
-  // (which reports ~4x/sec with sub-second deltas).
+  // The tolerance only guards against ontimeupdate's own sub-frame echo:
+  // frameStep (1/30s) MUST pass, so the tolerance is one frame, not 0.5s.
+  // During playback the deltas from timeupdate are ~0.1-0.25s, which is why
+  // seeking is applied only while paused or when the delta exceeds it.
   $effect(() => {
     if (!videoEl) return;
     const storeTime = $playerStore.currentTime;
-    if (Math.abs(videoEl.currentTime - storeTime) > 0.5) {
+    const delta = Math.abs(videoEl.currentTime - storeTime);
+    if (delta > 1 / 30 && (videoEl.paused || delta > 0.5)) {
       videoEl.currentTime = storeTime;
       currentTime = storeTime;
       autoAdvanceClip = null;

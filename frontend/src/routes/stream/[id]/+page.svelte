@@ -11,7 +11,7 @@
   import KeyboardHelp from '$lib/components/KeyboardHelp.svelte';
   import ProjectSettings from '$lib/components/ProjectSettings.svelte';
   import RightPanel from '$lib/components/RightPanel.svelte';
-  import type { Clip, EngineEvent } from '$shared/types';
+  import type { Clip, EngineEvent, Axis } from '$shared/types';
   import { fadeIn } from '$lib/actions/gsap';
   import { onMount, onDestroy } from 'svelte';
   let { params } = $props();
@@ -38,13 +38,25 @@
   let pendingUndo = $state<{ id: string; timer: ReturnType<typeof setTimeout> } | null>(null);
 
   const allClips = $derived(clipsQuery.data ?? []);
+  // Axis filters (keys 1–6): toggled sets, AND-composed across enabled axes;
+  // empty active set = no filtering. Non-matching clips dim in the queue.
+  let activeAxes = $state<Set<Axis>>(new Set());
   const visibleClips = $derived(
     allClips
       .filter((c) => !c.rejected && !discarded.has(c.id))
+      .filter((c) => activeAxes.size === 0 || activeAxes.has(c.axis))
       .sort((a, b) => b.score - a.score)
   );
   const currentClip = $derived(visibleClips[currentClipIndex]);
   const stream = $derived(streamQuery.data);
+
+  function toggleAxisFilter(axis: Axis) {
+    const next = new Set(activeAxes);
+    if (next.has(axis)) next.delete(axis);
+    else next.add(axis);
+    activeAxes = next;
+    currentClipIndex = 0;
+  }
 
   let unsub: (() => void) | null = null;
 
@@ -95,8 +107,11 @@
     if (!currentClip) return;
     const id = currentClip.id;
     discarded = new Set(discarded).add(id);
-    // API call to mark rejected
-    apiClient.rejectClip(id).catch(() => {});
+    // Surface failure — a silently-failed reject would desync UI and DB.
+    apiClient.rejectClip(id).catch((err) => {
+      console.error('rejectClip failed:', err);
+      discarded = new Set([...discarded].filter((d) => d !== id));
+    });
     // Undo window (5s)
     if (pendingUndo) clearTimeout(pendingUndo.timer);
     const timer = setTimeout(() => (pendingUndo = null), 5000);
@@ -189,6 +204,14 @@
         e.preventDefault();
         playerComp?.frameStepExported(e.shiftKey ? 1 : 1 / 30);
         break;
+      case '1': case '2': case '3': case '4': case '5': case '6': {
+        // Axis filters (design §7.4) — toggles the corresponding axis chip.
+        const axes = ['hype', 'humor', 'skill', 'awkward', 'emotional', 'tension'] as const;
+        const axis = axes[parseInt(e.key, 10) - 1]!;
+        toggleAxisFilter(axis);
+        e.preventDefault();
+        break;
+      }
       case '+': case '=':
         e.preventDefault();
         if (stream?.duration) setZoom(($playerStore.zoomLevel || 1) * 1.5, stream.duration, $playerStore.currentTime);
@@ -223,7 +246,8 @@
         showKeyboardHelp = true;
         break;
       case 'Escape':
-        window.location.href = '/';
+        // SPA navigation — full reload (v1) dropped all client state.
+        window.location.href = `/stream/${streamId}/processing`;
         break;
     }
   }
@@ -354,15 +378,19 @@
           {/if}
 
           <div class="grid grid-cols-3 gap-4">
-            <!-- Signals (simulated — real signals come from clip data when available) -->
+            <!-- Signals: real engine evidence, or an honest absence. -->
             <div class="col-span-1">
               <div class="mb-2 font-mono text-xs text-ash-dim uppercase">Signals</div>
-              <div class="flex flex-col gap-1.5">
-                <SignalBar label="chat" value={currentClip.score * 0.9} />
-                <SignalBar label="voice" value={currentClip.score * 0.6} />
-                <SignalBar label="emote" value={currentClip.score * 0.75} />
-                <SignalBar label="lurker" value={currentClip.score * 0.4} />
-              </div>
+              {#if currentClip.signals}
+                <div class="flex flex-col gap-1.5">
+                  <SignalBar label="chat" value={currentClip.signals.chatExcitement} />
+                  <SignalBar label="voice" value={currentClip.signals.voicePitch} />
+                  <SignalBar label="emote" value={currentClip.signals.emoteVelocity} />
+                  <SignalBar label="lurker" value={currentClip.signals.lurkerActivation} />
+                </div>
+              {:else}
+                <div class="text-xs text-ash-dim italic">No signal data from engine.</div>
+              {/if}
             </div>
 
             <!-- Endpoints -->

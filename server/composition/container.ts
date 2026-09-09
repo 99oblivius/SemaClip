@@ -90,7 +90,7 @@ export function buildContainer(config: AppConfig): AppContainer {
   const updateStream = new UpdateStreamUseCase(streamRepo);
   const attachChat = new AttachChatUseCase(streamRepo, fs);
   const startJob = new StartJobUseCase(streamRepo, jobRepo, clipRepo, engine, bus, fs);
-  const cancelJob = new CancelJobUseCase(jobRepo, engine, bus);
+  const cancelJob = new CancelJobUseCase(jobRepo, streamRepo, engine, bus, startJob);
   const listJobs = new ListJobsUseCase(jobRepo);
   const getStream = new GetStreamUseCase(streamRepo);
   const listStreams = new ListStreamsUseCase(streamRepo);

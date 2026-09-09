@@ -23,6 +23,28 @@
   );
 
   let candidates = $state<{ axis: string; score: number; time: number; summary: string }[]>([]);
+  let cancelling = $state(false);
+  let cancelError = $state<string | null>(null);
+
+  /** Cancel the running job — NOT the stream. v1 deleted the whole project here. */
+  async function cancelJob() {
+    if (cancelling) return;
+    const jobs = await apiClient.listJobs().catch(() => []);
+    const running = jobs.find((j) => j.streamId === streamId && j.status === 'running');
+    if (!running) {
+      window.location.href = `/stream/${streamId}`;
+      return;
+    }
+    cancelling = true;
+    cancelError = null;
+    try {
+      await apiClient.cancelJob(running.id);
+      window.location.href = `/stream/${streamId}`;
+    } catch (err) {
+      cancelError = err instanceof Error ? err.message : String(err);
+      cancelling = false;
+    }
+  }
 
   let unsub: (() => void) | null = null;
 
@@ -58,13 +80,19 @@
         {stream?.streamer ?? 'unknown'} · started processing
       </span>
     </div>
-    <button
-      class="flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-sm text-ash transition-colors hover:text-ink"
-      onclick={() => apiClient.deleteStream(streamId).then(() => window.location.href = '/')}
-    >
-      <Icon name="close" size={16} />
-      Cancel
-    </button>
+    <div class="flex items-center gap-3">
+      {#if cancelError}
+        <span class="text-xs text-error">{cancelError}</span>
+      {/if}
+      <button
+        class="flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-sm text-ash transition-colors hover:text-ink disabled:opacity-50"
+        onclick={cancelJob}
+        disabled={cancelling}
+      >
+        <Icon name="close" size={16} />
+        {cancelling ? 'Cancelling…' : 'Cancel'}
+      </button>
+    </div>
   </div>
 
   <div class="grid grid-cols-2 gap-4">
