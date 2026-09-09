@@ -20,8 +20,8 @@
     onSuccess: () => settingsQuery.refetch(),
   }));
 
-  // Local editable copies — synced when data loads.
   let gpuDevice = $state<string>('auto');
+  let cpuUsage = $state<AppSettings['cpuUsage']>('medium');
   let exportDir = $state('');
   let defaultAspectRatio = $state<AspectRatio>('16:9');
   let captionsEnabled = $state(false);
@@ -36,6 +36,7 @@
     const s = settingsQuery.data;
     if (s && !loaded) {
       gpuDevice = s.gpuDevice === null ? 'auto' : String(s.gpuDevice);
+      cpuUsage = s.cpuUsage ?? 'medium';
       exportDir = s.exportDir;
       defaultAspectRatio = s.defaultAspectRatio;
       captionsEnabled = s.defaultCaptions.enabled;
@@ -51,6 +52,7 @@
   function save() {
     updateMutation.mutate({
       gpuDevice: gpuDevice === 'auto' ? null : parseInt(gpuDevice, 10),
+      cpuUsage,
       exportDir,
       defaultAspectRatio,
       defaultCaptions: {
@@ -68,6 +70,7 @@
     loaded && (
       updateMutation.isPending ||
       (gpuDevice === 'auto' ? null : parseInt(gpuDevice, 10)) !== settingsQuery.data?.gpuDevice ||
+      cpuUsage !== (settingsQuery.data?.cpuUsage ?? 'medium') ||
       exportDir !== settingsQuery.data?.exportDir ||
       defaultAspectRatio !== settingsQuery.data?.defaultAspectRatio ||
       captionsEnabled !== settingsQuery.data?.defaultCaptions.enabled ||
@@ -84,11 +87,27 @@
     { value: '9:16', label: '9:16' },
     { value: '1:1', label: '1:1' },
   ];
+
+  const cpuTiers: { value: AppSettings['cpuUsage']; label: string; hint: string }[] = [
+    { value: 'slow', label: 'Slow', hint: '25% of cores — machine stays fully usable' },
+    { value: 'medium', label: 'Medium', hint: '50% of cores — balanced' },
+    { value: 'fast', label: 'Fast', hint: '100% of cores — fastest, machine busy' },
+  ];
 </script>
 
 <div class="flex h-full flex-col overflow-y-auto p-6" use:fadeIn role="region" aria-label="Settings">
   <div class="mx-auto flex w-full max-w-2xl flex-col gap-6">
-    <h1 class="font-display text-xl font-medium">Settings</h1>
+    <div class="flex items-center justify-between">
+      <h1 class="font-display text-xl font-medium">Settings</h1>
+      <button
+        class="flex items-center gap-1.5 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
+        onclick={save}
+        disabled={!dirty}
+      >
+        <Icon name="check" size={15} />
+        {updateMutation.isPending ? 'Saving...' : 'Save'}
+      </button>
+    </div>
 
     {#if settingsQuery.isLoading}
       <div class="text-sm text-ash">Loading...</div>
@@ -97,10 +116,10 @@
         {settingsQuery.error?.message ?? 'Failed to load settings'}
       </div>
     {:else}
-      <!-- Engine -->
+      <!-- Processing -->
       <section class="flex flex-col gap-3">
-        <h2 class="font-display text-sm font-medium text-ash uppercase tracking-wider">Engine</h2>
-        <div class="rounded-md border border-border bg-surface p-4 flex flex-col gap-4">
+        <h2 class="font-display text-sm font-medium text-ash uppercase tracking-wider">Processing</h2>
+        <div class="flex flex-col gap-4 rounded-md border border-border bg-surface p-4">
           <label class="flex flex-col gap-1">
             <span class="font-mono text-xs text-ash">Compute Device</span>
             <select bind:value={gpuDevice} class="rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none">
@@ -122,6 +141,25 @@
             </span>
           </label>
 
+          <div>
+            <span class="mb-1 block font-mono text-xs text-ash">CPU Usage Tier</span>
+            <div class="flex gap-2">
+              {#each cpuTiers as tier}
+                <button
+                  class="rounded-md border px-3 py-1.5 text-sm transition-colors
+                  {cpuUsage === tier.value ? 'border-accent text-accent' : 'border-border text-ash hover:text-ink'}"
+                  onclick={() => cpuUsage = tier.value}
+                  title={tier.hint}
+                >
+                  {tier.label}
+                </button>
+              {/each}
+            </div>
+            <span class="mt-1 block font-mono text-xs text-ash-dim">
+              {cpuTiers.find((t) => t.value === cpuUsage)?.hint} — applies to transcription workers.
+            </span>
+          </div>
+
           <label class="flex flex-col gap-1">
             <span class="font-mono text-xs text-ash">Engine Binary Path</span>
             <input
@@ -138,7 +176,7 @@
       <!-- Export defaults -->
       <section class="flex flex-col gap-3">
         <h2 class="font-display text-sm font-medium text-ash uppercase tracking-wider">Export Defaults</h2>
-        <div class="rounded-md border border-border bg-surface p-4 flex flex-col gap-4">
+        <div class="flex flex-col gap-4 rounded-md border border-border bg-surface p-4">
           <label class="flex flex-col gap-1">
             <span class="font-mono text-xs text-ash">Export Directory</span>
             <input
@@ -165,68 +203,105 @@
             </div>
           </div>
 
-          <div>
-            <span class="mb-1 flex items-center gap-2 font-mono text-xs text-ash uppercase">
-              <input type="checkbox" bind:checked={captionsEnabled} class="accent-accent" />
-              Burn in captions by default
-            </span>
-            {#if captionsEnabled}
-              <div class="ml-6 flex flex-col gap-2">
-                <div class="flex items-center gap-3">
-                  <span class="font-mono text-xs text-ash-dim">Style:</span>
-                  {#each ['bold-white', 'yellow', 'custom'] as style}
-                    <button
-                      class="rounded px-2 py-1 font-mono text-xs transition-colors
-                      {captionPreset === style ? 'text-accent' : 'text-ash-dim hover:text-ash'}"
-                      onclick={() => captionPreset = style as CaptionStyle['preset']}
-                    >
-                      {style}
-                    </button>
-                  {/each}
-                </div>
-                <div class="flex items-center gap-3">
-                  <span class="font-mono text-xs text-ash-dim">Position:</span>
-                  {#each ['bottom', 'top'] as pos}
-                    <button
-                      class="rounded px-2 py-1 font-mono text-xs transition-colors
-                      {captionPosition === pos ? 'text-accent' : 'text-ash-dim hover:text-ash'}"
-                      onclick={() => captionPosition = pos as CaptionStyle['position']}
-                    >
-                      {pos}
-                    </button>
-                  {/each}
-                </div>
-                <div class="flex items-center gap-3">
-                  <span class="font-mono text-xs text-ash-dim">Font size:</span>
-                  <input type="range" min="24" max="96" bind:value={captionFontSize} class="accent-accent" />
-                  <span class="font-mono text-xs text-ash">{captionFontSize}px</span>
-                </div>
-                <div class="flex items-center gap-3">
-                  <span class="font-mono text-xs text-ash-dim">BG opacity:</span>
-                  <input type="range" min="0" max="1" step="0.1" bind:value={captionBgOpacity} class="accent-accent" />
-                  <span class="font-mono text-xs text-ash">{Math.round(captionBgOpacity * 100)}%</span>
-                </div>
+          <p class="font-mono text-xs text-ash-dim">
+            Platform presets (TikTok / Shorts / Archive) are managed on the Export screen — they live where they're used.
+          </p>
+        </div>
+      </section>
+
+      <!-- Captions -->
+      <section class="flex flex-col gap-3">
+        <h2 class="font-display text-sm font-medium text-ash uppercase tracking-wider">Captions</h2>
+        <div class="flex flex-col gap-4 rounded-md border border-border bg-surface p-4">
+          <span class="flex items-center gap-2 font-mono text-xs text-ash uppercase">
+            <input type="checkbox" bind:checked={captionsEnabled} class="accent-accent" />
+            Burn in captions by default
+          </span>
+          {#if captionsEnabled}
+            <div class="ml-6 flex flex-col gap-2">
+              <div class="flex items-center gap-3">
+                <span class="font-mono text-xs text-ash-dim">Style:</span>
+                {#each ['bold-white', 'yellow', 'custom'] as style}
+                  <button
+                    class="rounded px-2 py-1 font-mono text-xs transition-colors
+                    {captionPreset === style ? 'text-accent' : 'text-ash-dim hover:text-ash'}"
+                    onclick={() => captionPreset = style as CaptionStyle['preset']}
+                  >
+                    {style}
+                  </button>
+                {/each}
               </div>
-            {/if}
+              <div class="flex items-center gap-3">
+                <span class="font-mono text-xs text-ash-dim">Position:</span>
+                {#each ['bottom', 'top'] as pos}
+                  <button
+                    class="rounded px-2 py-1 font-mono text-xs transition-colors
+                    {captionPosition === pos ? 'text-accent' : 'text-ash-dim hover:text-ash'}"
+                    onclick={() => captionPosition = pos as CaptionStyle['position']}
+                  >
+                    {pos}
+                  </button>
+                {/each}
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="font-mono text-xs text-ash-dim">Font size:</span>
+                <input type="range" min="24" max="96" bind:value={captionFontSize} class="accent-accent" />
+                <span class="font-mono text-xs text-ash">{captionFontSize}px</span>
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="font-mono text-xs text-ash-dim">BG opacity:</span>
+                <input type="range" min="0" max="1" step="0.1" bind:value={captionBgOpacity} class="accent-accent" />
+                <span class="font-mono text-xs text-ash">{Math.round(captionBgOpacity * 100)}%</span>
+              </div>
+            </div>
+          {/if}
+        </div>
+      </section>
+
+      <!-- Keyboard -->
+      <section class="flex flex-col gap-3">
+        <h2 class="font-display text-sm font-medium text-ash uppercase tracking-wider">Keyboard</h2>
+        <div class="rounded-md border border-border bg-surface p-4">
+          <p class="mb-2 text-sm text-ash">
+            The full map is available on any screen via <kbd class="rounded border border-border bg-surface-2 px-1.5 py-0.5 font-mono text-xs">?</kbd>.
+          </p>
+          <div class="grid grid-cols-2 gap-x-8 gap-y-1.5 font-mono text-xs">
+            <div class="flex justify-between"><span class="text-ash-dim">Play / pause</span><span class="text-ink">Space</span></div>
+            <div class="flex justify-between"><span class="text-ash-dim">Prev / next clip</span><span class="text-ink">J / K</span></div>
+            <div class="flex justify-between"><span class="text-ash-dim">Seek ±5s</span><span class="text-ink">← / →</span></div>
+            <div class="flex justify-between"><span class="text-ash-dim">Frame step</span><span class="text-ink">, / .</span></div>
+            <div class="flex justify-between"><span class="text-ash-dim">Set in / out</span><span class="text-ink">I / O</span></div>
+            <div class="flex justify-between"><span class="text-ash-dim">Timeline zoom</span><span class="text-ink">+ / −</span></div>
+            <div class="flex justify-between"><span class="text-ash-dim">Accept / discard</span><span class="text-ink">A / D</span></div>
+            <div class="flex justify-between"><span class="text-ash-dim">Snooze / undo</span><span class="text-ink">S / U</span></div>
+            <div class="flex justify-between"><span class="text-ash-dim">Axis filters</span><span class="text-ink">1–7</span></div>
+            <div class="flex justify-between"><span class="text-ash-dim">Export clip / batch</span><span class="text-ink">E / Shift+E</span></div>
+          </div>
+          <p class="mt-2 font-mono text-xs text-ash-dim">Remapping is not implemented yet — the defaults above are fixed.</p>
+        </div>
+      </section>
+
+      <!-- Updates (Phase 4 placeholder — visible, honest about its state) -->
+      <section class="flex flex-col gap-3">
+        <h2 class="font-display text-sm font-medium text-ash uppercase tracking-wider">Updates</h2>
+        <div class="flex flex-col gap-2 rounded-md border border-border bg-surface p-4">
+          <div class="flex items-center justify-between">
+            <div class="flex flex-col">
+              <span class="text-sm text-ink">SemaClip v2 (dev)</span>
+              <span class="font-mono text-xs text-ash-dim">Auto-update ships in Phase 4. Windows gets a documented workaround installer.</span>
+            </div>
+            <span class="rounded border border-border px-2 py-1 font-mono text-xs text-ash-dim">dev build</span>
           </div>
         </div>
       </section>
 
-      <!-- Save bar -->
-      <div class="flex items-center justify-between gap-3">
+      <!-- Save status -->
+      <div class="flex items-center justify-end gap-3 pb-4">
         {#if updateMutation.isError}
           <span class="font-mono text-xs text-error">{updateMutation.error?.message ?? 'Save failed'}</span>
         {:else if updateMutation.isSuccess && !dirty}
           <span class="font-mono text-xs text-success">✓ Saved</span>
         {/if}
-        <button
-          class="ml-auto flex items-center gap-1 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
-          onclick={save}
-          disabled={!dirty}
-        >
-          <Icon name="check" size={16} />
-          {updateMutation.isPending ? 'Saving...' : 'Save'}
-        </button>
       </div>
     {/if}
   </div>
