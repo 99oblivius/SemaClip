@@ -10,6 +10,7 @@
   import KeyboardHelp from '$lib/components/KeyboardHelp.svelte';
   import ProjectSettings from '$lib/components/ProjectSettings.svelte';
   import RightPanel from '$lib/components/RightPanel.svelte';
+  import CaptionEditor from '$lib/components/CaptionEditor.svelte';
   import type { Clip, EngineEvent, Axis } from '$shared/types';
   import { fadeIn } from '$lib/actions/gsap';
   import { onMount, onDestroy } from 'svelte';
@@ -96,8 +97,18 @@
   }
 
   let unsub: (() => void) | null = null;
+  let seekUnsub: (() => void) | null = null;
 
   onMount(() => {
+    // Caption-editor cue clicks seek the player (component bridge event —
+    // CustomEvent can't be typed on svelte:window, so addEventListener here).
+    const onSeek = (e: Event) => {
+      const t = (e as CustomEvent<number>).detail;
+      if (typeof t === 'number') playerComp?.seekToExported(t);
+    };
+    window.addEventListener('semaclip:seek', onSeek);
+    seekUnsub = () => window.removeEventListener('semaclip:seek', onSeek);
+
     unsub = wsStore.onEvent<EngineEvent>((event) => {
       if (event.type === 'clip') clipsQuery.refetch();
       else if (event.type === 'complete') {
@@ -108,8 +119,15 @@
 
   onDestroy(() => {
     unsub?.();
+    seekUnsub?.();
     if (pendingUndo) clearTimeout(pendingUndo.timer);
   });
+
+  // Caption-editor cue clicks seek the player (component bridge event).
+  function handleSeekEvent(e: Event) {
+    const t = (e as CustomEvent<number>).detail;
+    if (typeof t === 'number') playerComp?.seekToExported(t);
+  }
 
   function playClip(clip: Clip) {
     playerComp?.playClip(clip);
@@ -489,6 +507,11 @@
                 <Icon name="scissors" size={12} /> Export clip
               </button>
             </div>
+          </div>
+
+          <!-- Captions (P0-8): line-level transcript editing for this clip's window -->
+          <div class="mt-4 border-t border-border pt-3">
+            <CaptionEditor {streamId} clipStart={currentClip.startTime} clipEnd={currentClip.endTime} />
           </div>
         {:else}
           <div class="flex items-center justify-center py-8">

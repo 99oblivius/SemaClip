@@ -2,7 +2,6 @@
   import { createQuery, createMutation, useQueryClient } from '@tanstack/svelte-query';
   import { apiClient } from '$lib/api/client';
   import Icon from '$lib/components/Icon.svelte';
-  import { playerStore } from '$lib/stores/player';
   import type { TranscriptCue } from '$lib/api/client';
 
   interface Props {
@@ -60,8 +59,8 @@
   }
 
   function seekTo(sec: number) {
-    // Jump the player to just before the cue starts.
-    playerStore.update((s) => ({ ...s, pendingSeek: Math.max(0, sec - 0.2) }));
+    // Jump the player to just before the cue starts via the component bridge.
+    window.dispatchEvent(new CustomEvent('semaclip:seek', { detail: Math.max(0, sec - 0.2) }));
   }
 </script>
 
