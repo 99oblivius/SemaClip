@@ -152,3 +152,16 @@ Deno.test("pipeline: runs detectors, ranks, respects maxClips", () => {
   assertEquals(ranked.length <= 50, true);
   assertEquals(ranked.every((c) => c.score > 0), true);
 });
+Deno.test("baselines: cold-start does not saturate scores on early outliers", () => {
+  // 1.8x jump at t=229 (within warmup influence) must NOT yield a saturated score.
+  const n = 400;
+  const E = new Float32Array(n);
+  for (let t = 0; t < n; t++) E[t] = t === 229 ? 0.18 : 0.1;
+  const b = computeBaselines(E, n);
+  const excess = E[229]! - b.threshold(229);
+  const score = excess / (excess + 0.5);
+  assertEquals(score < 0.5, true, `early outlier score ${score.toFixed(2)} should be well under 0.5`);
+  // Threshold after warmup must equal the plain local threshold (blend is identity).
+  const local = b.local[350]! + 3 * b.spread[350]!;
+  assertEquals(Math.abs(b.threshold(350) - local) < 1e-6, true);
+});

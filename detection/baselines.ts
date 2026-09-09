@@ -41,14 +41,24 @@ export function computeBaselines(
     spread[s] = Math.max(percentile(window, 75) - med, o.minSpread);
   }
 
+  // Cold-start guard: the first ~2 minutes have thin history — a floor built
+  // from <60s of data underestimates spread, so early outliers over-score
+  // (measured: a 1.8× voice delta scored 1.00 at t=229s). Blend the local
+  // threshold toward the full-signal threshold with a linear ramp over
+  // warmupSec; after warmup the local floor rules unchanged.
   const global = median(excitement.subarray(0, n));
+  const warmupSec = Math.min(120, n);
+  const globalThreshold = global + o.outlierK * Math.max(percentile(excitement.subarray(0, n), 75) - global, o.minSpread);
 
   return {
     local: floor,
     spread,
     global,
     threshold(s: number): number {
-      return floor[s]! + o.outlierK * spread[s]!;
+      const local = floor[s]! + o.outlierK * spread[s]!;
+      if (s >= warmupSec) return local;
+      const blend = s / warmupSec; // 0 at start → 1 at warmup end
+      return blend * local + (1 - blend) * Math.max(local, globalThreshold);
     },
   };
 }
