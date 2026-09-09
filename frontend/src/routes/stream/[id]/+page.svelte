@@ -10,7 +10,7 @@
   import KeyboardHelp from '$lib/components/KeyboardHelp.svelte';
   import ProjectSettings from '$lib/components/ProjectSettings.svelte';
   import RightPanel from '$lib/components/RightPanel.svelte';
-  import CaptionEditor from '$lib/components/CaptionEditor.svelte';
+  import ClipDetail from '$lib/components/ClipDetail.svelte';
   import type { Clip, EngineEvent, Axis } from '$shared/types';
   import { fadeIn } from '$lib/actions/gsap';
   import { onMount, onDestroy } from 'svelte';
@@ -426,93 +426,15 @@
       <!-- Active clip detail -->
       <div class="rounded-md border border-border bg-surface p-4">
         {#if currentClip}
-          <div class="mb-3 flex items-center justify-between">
-            <div class="flex items-center gap-3">
-              <span class="font-mono text-xs text-ash-dim">{String(currentClipIndex + 1).padStart(2, '0')}</span>
-              <span class="font-display text-sm font-medium text-accent uppercase">{currentClip.axis}</span>
-              <span class="font-mono text-sm text-ink">{currentClip.score.toFixed(2)}</span>
-            </div>
-            <div class="flex items-center gap-2">
-              <button
-                class="flex items-center gap-1 rounded-md border border-success/50 px-2 py-1 text-xs text-success transition-colors hover:bg-success/10"
-                onclick={acceptClip}
-                aria-label="Accept clip"
-                title="Accept (A) — marks reviewed and advances"
-              >
-                <Icon name="check" size={12} /> Accept
-              </button>
-              <button
-                class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-border-strong hover:text-ink"
-                onclick={exportClip}
-                aria-label="Export this clip"
-              >
-                <Icon name="scissors" size={12} /> Export
-              </button>
-              <button
-                class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-error hover:text-error"
-                onclick={discardClip}
-                aria-label="Discard clip"
-              >
-                <Icon name="trash" size={12} /> Discard
-              </button>
-            </div>
-          </div>
-
-          {#if currentClip.justification}
-            <p class="mb-3 text-sm text-ash leading-relaxed">{currentClip.justification}</p>
-          {:else}
-            <p class="mb-3 text-sm text-ash-dim italic">No justification provided.</p>
-          {/if}
-
-          <div class="grid grid-cols-3 gap-4">
-            <!-- Signals: real engine evidence, or an honest absence. -->
-            <div class="col-span-1">
-              <div class="mb-2 font-mono text-xs text-ash-dim uppercase">Signals</div>
-              {#if currentClip.signals}
-                <div class="flex flex-col gap-1.5">
-                  <SignalBar label="chat" value={currentClip.signals.chatExcitement} />
-                  <SignalBar label="emote" value={currentClip.signals.emoteVelocity} />
-                  <SignalBar label="audio" value={currentClip.signals.audioEnergy} />
-                  <SignalBar label="speech" value={currentClip.signals.speechCoverage} />
-                </div>
-              {:else}
-                <div class="text-xs text-ash-dim italic">No signal data from engine.</div>
-              {/if}
-            </div>
-
-            <!-- Endpoints -->
-            <div class="col-span-1">
-              <div class="mb-2 font-mono text-xs text-ash-dim uppercase">Endpoints</div>
-              <div class="flex flex-col gap-1 font-mono text-xs">
-                <div class="flex justify-between"><span class="text-ash-dim">Start</span><span class="text-ink">{fmtTime(currentClip.startTime)}</span></div>
-                <div class="flex justify-between"><span class="text-ash-dim">Peak</span><span class="text-accent">{fmtTime(currentClip.peakTime)}</span></div>
-                <div class="flex justify-between"><span class="text-ash-dim">End</span><span class="text-ink">{fmtTime(currentClip.endTime)}</span></div>
-                <div class="flex justify-between border-t border-border pt-1"><span class="text-ash-dim">Dur</span><span class="text-ink">{(currentClip.endTime - currentClip.startTime).toFixed(0)}s</span></div>
-              </div>
-            </div>
-
-            <!-- Actions -->
-            <div class="col-span-1 flex flex-col gap-2">
-              <div class="mb-2 font-mono text-xs text-ash-dim uppercase">Actions</div>
-              <button
-                class="flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-xs text-ash transition-colors hover:border-accent hover:text-accent"
-                onclick={() => playClip(currentClip)}
-              >
-                <Icon name="play" size={12} fill /> Play from start
-              </button>
-              <button
-                class="flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-xs text-ash transition-colors hover:border-border-strong hover:text-ink"
-                onclick={exportClip}
-              >
-                <Icon name="scissors" size={12} /> Export clip
-              </button>
-            </div>
-          </div>
-
-          <!-- Captions (P0-8): line-level transcript editing for this clip's window -->
-          <div class="mt-4 border-t border-border pt-3">
-            <CaptionEditor {streamId} clipStart={currentClip.startTime} clipEnd={currentClip.endTime} />
-          </div>
+          <ClipDetail
+            clip={currentClip}
+            clipIndex={currentClipIndex}
+            {streamId}
+            onPlay={() => playClip(currentClip)}
+            onExport={exportClip}
+            onDiscard={discardClip}
+            onAccept={acceptClip}
+          />
         {:else}
           <div class="flex items-center justify-center py-8">
             <p class="text-sm text-ash-dim">No clip selected. Click a clip in the timeline or queue to inspect it.</p>
@@ -534,6 +456,7 @@
       stream={stream}
       clips={visibleClips}
       {currentClipIndex}
+      reviewed={reviewedLocal}
       onSelectClip={(i) => { currentClipIndex = i; if (visibleClips[i]) jumpToClip(visibleClips[i]); }}
     />
   </div>
