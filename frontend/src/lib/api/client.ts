@@ -19,6 +19,15 @@ export interface ChatMessage {
   user: string;    // commenter display_name
   body: string;    // message body
 }
+
+/** One transcript cue (parsed SRT entry, P0-8 caption editing). */
+export interface TranscriptCue {
+  index: number;
+  start: number;   // seconds, VOD-relative
+  end: number;
+  text: string;
+}
+
 const API_BASE = '/api';
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -137,4 +146,11 @@ export const apiClient = {
 
   searchChat: (streamId: string, query: string) =>
     api<{ results: ChatMessage[] }>(`/streams/${streamId}/chat/search?q=${encodeURIComponent(query)}`),
+
+  // ── Transcript (P0-8) ──
+  getTranscript: (streamId: string) =>
+    api<{ cues: TranscriptCue[]; srtPath: string }>(`/streams/${streamId}/transcript`),
+
+  patchTranscript: (streamId: string, edits: { index: number; text: string }[]) =>
+    api<{ ok: boolean }>(`/streams/${streamId}/transcript`, { method: 'PATCH', body: JSON.stringify({ edits }) }),
 };

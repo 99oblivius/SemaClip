@@ -22,6 +22,8 @@ import type {
 import type { Axis, StreamStatus } from "shared/types";
 import type { EventBus, StreamMetadataRepository, StreamStorage } from "@/application/ports/outbound.ts";
 import type { SqliteExportPresetRepository } from "@/adapters/outbound/persistence/repositories.ts";
+import { parseSrt } from "@/adapters/outbound/transcribe/srt-parse.ts";
+import { cuesToSrt } from "@/adapters/outbound/transcribe/srt-write.ts";
 
 export interface HttpDeps {
   importByFile: ImportStreamByFileUseCase;
@@ -211,10 +213,67 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     }
   });
 
+  // ── Transcript (P0-8): parsed SRT cues for the caption editor ──
+  app.get("/api/streams/:id/transcript", async (c) => {
+    const stream = await deps.getStream.execute(c.req.param("id"));
+    if (!stream) return c.json({ error: "Stream not found" }, 404);
+    const stored = await deps.metadata.get(stream.id, "transcript_srt");
+    if (!stored) return c.json({ error: "No transcript — run processing first" }, 404);
+    let srtPath: string;
+    try {
+      srtPath = (JSON.parse(stored) as { path: string }).path;
+    } catch {
+      return c.json({ error: "Corrupt transcript metadata" }, 500);
+    }
+    try {
+      const content = await Deno.readTextFile(srtPath);
+      const cues = parseSrt(content);
+      return c.json({ cues, srtPath });
+    } catch {
+      return c.json({ error: "Transcript file missing on disk" }, 404);
+    }
+  });
+
+  // Persist caption edits (P0-8): apply text replacements by cue index,
+  // rewrite the SRT on disk. Cue index = position in the GET response.
+  app.patch("/api/streams/:id/transcript", async (c) => {
+    const stream = await deps.getStream.execute(c.req.param("id"));
+    if (!stream) return c.json({ error: "Stream not found" }, 404);
+    const body = await c.req.json() as { edits?: { index: number; text: string }[] };
+    if (!Array.isArray(body.edits)) return c.json({ error: "edits[] required" }, 400);
+
+    const stored = await deps.metadata.get(stream.id, "transcript_srt");
+    if (!stored) return c.json({ error: "No transcript to edit" }, 404);
+    let srtPath: string;
+    try {
+      srtPath = (JSON.parse(stored) as { path: string }).path;
+    } catch {
+      return c.json({ error: "Corrupt transcript metadata" }, 500);
+    }
+
+    let content: string;
+    try {
+      content = await Deno.readTextFile(srtPath);
+    } catch {
+      return c.json({ error: "Transcript file missing on disk" }, 404);
+    }
+
+    const cues = parseSrt(content);
+    let applied = 0;
+    for (const edit of body.edits) {
+      const cue = cues[edit.index - 1];
+      if (!cue) continue; // stale index — skip rather than corrupt neighbors
+      if (typeof edit.text !== "string" || edit.text.trim() === "") continue;
+      cue.text = edit.text.trim();
+      applied++;
+    }
+    if (applied > 0) {
+      await Deno.writeTextFile(srtPath, cuesToSrt(cues));
+    }
+    return c.json({ ok: true, applied });
+  });
+
   // ── Chat messages (paginated, seek-aware) ──
-  // Returns messages sorted by content_offset_seconds. Pagination via
-  // ?offset=&limit= (default 100). ?around=<seconds> returns messages
-  // centered on that timestamp (for initial load on seek).
   app.get("/api/streams/:id/chat", async (c) => {
     const stream = await deps.getStream.execute(c.req.param("id"));
     if (!stream || !stream.chatPath) return c.json({ error: "Chat not available" }, 404);
