@@ -18,6 +18,7 @@ import { chatFeatures } from "../../../../detection/signals/chat.ts";
 import { audioFeatures, applyTranscriptCoverage } from "../../../../detection/signals/audio.ts";
 import { computeBaselines } from "../../../../detection/baselines.ts";
 import { HypeDetector } from "../../../../detection/axes/hype.ts";
+import { ReactionDetector } from "../../../../detection/axes/reaction.ts";
 import { runDetection } from "../../../../detection/pipeline.ts";
 import type { FeatureTable, TranscriptSegment } from "../../../../detection/types.ts";
 import { TranscribeAdapter, type WhisperPaths } from "../transcribe/TranscribeAdapter.ts";
@@ -176,7 +177,7 @@ export class DetectionEngineAdapter {
     // ── Axis scoring ──
     beginStage("axis_scoring");
     this.emit({ type: "progress", jobId, phase: "axis_scoring", percent: 0.5 });
-    const candidates = runDetection(features, baselines, [], [new HypeDetector()], {
+    const candidates = runDetection(features, baselines, [], [new HypeDetector(), new ReactionDetector()], {
       maxClips: command.config.maxClips ?? 50,
       minSlotsPerAxis: 1,
     });

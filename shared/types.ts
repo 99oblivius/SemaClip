@@ -6,7 +6,7 @@
 
 // ── Domain enums ──────────────────────────────────────────────
 
-export const AXES = ["hype", "humor", "skill", "awkward", "emotional", "tension"] as const;
+export const AXES = ["hype", "humor", "skill", "awkward", "emotional", "tension", "reaction"] as const;
 export type Axis = (typeof AXES)[number];
 
 export const STREAM_STATUS = ["pending", "processing", "completed", "failed"] as const;

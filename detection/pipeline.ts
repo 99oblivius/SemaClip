@@ -92,7 +92,7 @@ export function candidateToClipEvent(jobId: string, c: Candidate, id: string): E
     type: "clip",
     jobId,
     id,
-    axis: c.axis as "hype" | "humor" | "skill" | "awkward" | "emotional" | "tension",
+    axis: c.axis as "hype" | "humor" | "skill" | "awkward" | "emotional" | "tension" | "reaction",
     start: c.start,
     end: c.end,
     peak: c.peak,
