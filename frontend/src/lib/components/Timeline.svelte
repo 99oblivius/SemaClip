@@ -41,6 +41,22 @@
     playerStore.update((s) => ({ ...s, pendingSeek: m.t }));
   }
 
+  // ── Scrub frontier (P0-10 progressive): time beyond the downloaded extent
+  // renders as void — the video genuinely doesn't exist there yet. Polled at
+  // 1 Hz only while a download is running. ──
+  const downloadQuery = createQuery(() => ({
+    queryKey: ['download', streamId],
+    queryFn: () => apiClient.getDownloadState(streamId),
+    refetchInterval: 1000,
+    staleTime: 900,
+  }));
+  const scrubFrontier = $derived.by(() => {
+    const d = downloadQuery.data;
+    if (!d || d.phase === 'idle') return Infinity; // fully downloaded or legacy import
+    if (d.phase === 'done') return Infinity;
+    return d.scrubFrontierSec;
+  });
+
   let canvasEl = $state<HTMLCanvasElement | undefined>(undefined);
   let containerEl = $state<HTMLDivElement | undefined>(undefined);
   let rafId = 0;
@@ -196,6 +212,25 @@
     ctx.clearRect(0, 0, w, h);
 
     const midY = h / 2;
+
+    // ── Scrub frontier void (progressive download): everything past the
+    // downloaded extent is not-yet-media — black it out under everything
+    // else so the void is unambiguous at any zoom. ──
+    if (Number.isFinite(scrubFrontier) && viewEnd > scrubFrontier) {
+      const fx = timeToX(scrubFrontier);
+      if (fx < w) {
+        ctx.fillStyle = 'rgba(11, 11, 16, 0.85)'; // foundation color, near-opaque
+        ctx.fillRect(Math.max(0, fx), 0, w - Math.max(0, fx), h);
+        // Frontier edge hairline — moving right as chunks land.
+        ctx.strokeStyle = 'rgba(204, 0, 0, 0.5)';
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(fx, 0);
+        ctx.lineTo(fx, h);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
 
     // ── Chat density (area chart) ──
     // Aggregate per-second density to pixel resolution so detail survives

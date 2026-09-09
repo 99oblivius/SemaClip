@@ -16,6 +16,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   engineBinaryPath: null,
   cpuUsage: "medium",
+  defaultMaxQualityHeight: 1080,
 };
 
 /** Worker budget per tier: fraction of total cores usable by workers. */
@@ -56,6 +57,9 @@ function coerce(raw: unknown): AppSettings {
   }
   if (o.cpuUsage === "slow" || o.cpuUsage === "medium" || o.cpuUsage === "fast") {
     base.cpuUsage = o.cpuUsage;
+  }
+  if (o.defaultMaxQualityHeight === null || typeof o.defaultMaxQualityHeight === "number") {
+    base.defaultMaxQualityHeight = o.defaultMaxQualityHeight as number | null;
   }
   return base;
 }

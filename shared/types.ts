@@ -261,4 +261,10 @@ export interface AppSettings {
    * transcription worker pool and whisper thread count; re-probed per job.
    */
   cpuUsage: "slow" | "medium" | "fast";
+  /**
+   * Default max download quality (vertical px, orientation-safe) for the
+   * HQ pass / single downloads; null = no cap (source quality). The import
+   * modal's selector overrides this per download.
+   */
+  defaultMaxQualityHeight: number | null;
 }

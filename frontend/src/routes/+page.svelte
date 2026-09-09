@@ -40,6 +40,11 @@
   let progressive = $state(false);
   let maxQualityHeight = $state<number | null>(null); // null = no cap
   let includeScrub = $state(true);
+  const settingsForDefaults = createQuery(() => ({
+    queryKey: ['settings'],
+    queryFn: () => apiClient.getSettings(),
+    staleTime: 30_000,
+  }));
   // Qualities resolved from the pasted URL (fetched lazily, debounced by URL change).
   let qualities = $state<QualityInfo[]>([]);
   let qualitiesError = $state<string | null>(null);
@@ -55,9 +60,16 @@
     apiClient.listQualities(url)
       .then((d) => {
         qualities = d.qualities;
-        // Default the max-quality select to the highest available.
+        // Default the max-quality select to the settings default (if the
+        // source has it), else the highest available.
         if (d.qualities.length > 0 && maxQualityHeight === null) {
-          maxQualityHeight = Math.max(...d.qualities.map((q) => q.height));
+          const def = settingsForDefaults.data?.defaultMaxQualityHeight ?? null;
+          const available = d.qualities.map((q) => q.height);
+          if (def !== null && available.includes(def)) {
+            maxQualityHeight = def;
+          } else {
+            maxQualityHeight = Math.max(...available);
+          }
         }
       })
       .catch((err: Error) => (qualitiesError = err.message))

@@ -22,6 +22,7 @@
 
   let gpuDevice = $state<string>('auto');
   let cpuUsage = $state<AppSettings['cpuUsage']>('medium');
+  let defaultMaxQualityHeight = $state<number | null>(1080);
   let exportDir = $state('');
   let defaultAspectRatio = $state<AspectRatio>('16:9');
   let captionsEnabled = $state(false);
@@ -37,6 +38,7 @@
     if (s && !loaded) {
       gpuDevice = s.gpuDevice === null ? 'auto' : String(s.gpuDevice);
       cpuUsage = s.cpuUsage ?? 'medium';
+      defaultMaxQualityHeight = s.defaultMaxQualityHeight ?? null;
       exportDir = s.exportDir;
       defaultAspectRatio = s.defaultAspectRatio;
       captionsEnabled = s.defaultCaptions.enabled;
@@ -53,6 +55,7 @@
     updateMutation.mutate({
       gpuDevice: gpuDevice === 'auto' ? null : parseInt(gpuDevice, 10),
       cpuUsage,
+      defaultMaxQualityHeight,
       exportDir,
       defaultAspectRatio,
       defaultCaptions: {
@@ -71,6 +74,7 @@
       updateMutation.isPending ||
       (gpuDevice === 'auto' ? null : parseInt(gpuDevice, 10)) !== settingsQuery.data?.gpuDevice ||
       cpuUsage !== (settingsQuery.data?.cpuUsage ?? 'medium') ||
+      defaultMaxQualityHeight !== (settingsQuery.data?.defaultMaxQualityHeight ?? null) ||
       exportDir !== settingsQuery.data?.exportDir ||
       defaultAspectRatio !== settingsQuery.data?.defaultAspectRatio ||
       captionsEnabled !== settingsQuery.data?.defaultCaptions.enabled ||
@@ -159,6 +163,25 @@
               {cpuTiers.find((t) => t.value === cpuUsage)?.hint} — applies to transcription workers.
             </span>
           </div>
+
+          <label class="flex flex-col gap-1">
+            <span class="font-mono text-xs text-ash">Default Max Download Quality</span>
+            <select
+              bind:value={defaultMaxQualityHeight}
+              class="self-start rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+              aria-label="Default max download quality"
+            >
+              <option value={2160}>2160p (4K, source capped)</option>
+              <option value={1440}>1440p</option>
+              <option value={1080}>1080p</option>
+              <option value={720}>720p</option>
+              <option value={480}>480p</option>
+              <option value={null}>No cap (source quality)</option>
+            </select>
+            <span class="font-mono text-xs text-ash-dim">
+              Highest resolution downloaded for new imports (the import modal can override per download). Applies to the vertical dimension for both horizontal and vertical content.
+            </span>
+          </label>
 
           <label class="flex flex-col gap-1">
             <span class="font-mono text-xs text-ash">Engine Binary Path</span>
