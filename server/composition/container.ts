@@ -5,6 +5,7 @@ import {
   SqliteClipRepository,
   SqlitePersonaRepository,
   SqliteStreamMetadataRepository,
+  SqliteSettingsRepository,
   DenoStreamStorage,
 } from "@/adapters/outbound/persistence/mod.ts";
 import { InProcessEventBus } from "@/adapters/outbound/eventbus/mod.ts";
@@ -99,7 +100,7 @@ export function buildContainer(config: AppConfig): AppContainer {
   const rejectClip = new RejectClipUseCase(clipRepo);
   const exportClip = new ExportClipUseCase(clipRepo, streamRepo, ffmpeg, fs, config.exportDir);
   const manageQueue = new ManageQueueUseCase(jobRepo);
-  const settings = new SettingsUseCase(bus);
+  const settings = new SettingsUseCase(new SqliteSettingsRepository(db), bus);
 
   return {
     bus,

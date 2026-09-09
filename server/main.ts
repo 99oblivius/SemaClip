@@ -75,7 +75,10 @@ async function serveFile(
   }
 }
 
-Deno.serve({ port: PORT }, app.fetch);
+// Bind loopback only: the API accepts arbitrary local paths (import-file,
+// PATCH vodPath) and serves files — binding all interfaces would expose
+// filesystem reads and subprocess triggers to the LAN.
+Deno.serve({ port: PORT, hostname: "127.0.0.1" }, app.fetch);
 
 console.log(`SemaClip server running on http://localhost:${PORT}`);
 console.log(`  DB:       ${DB_PATH}`);

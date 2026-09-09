@@ -469,10 +469,10 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   });
 
   // ── Settings ──
-  app.get("/api/settings", (c) => c.json(deps.settings.get()));
+  app.get("/api/settings", async (c) => c.json(await deps.settings.get()));
   app.put("/api/settings", async (c) => {
     const body = await c.req.json();
-    return c.json(deps.settings.update(body));
+    return c.json(await deps.settings.update(body));
   });
 
   // ── System info ──

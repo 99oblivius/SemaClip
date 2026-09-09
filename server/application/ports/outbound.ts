@@ -131,6 +131,12 @@ export interface FFmpegExportPort {
   }): Promise<{ exportPath: string; durationMs: number }>;
 }
 
+/** Key-value settings store (the `settings` table — v1 created it, nothing used it). */
+export interface SettingsRepository {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string): Promise<void>;
+}
+
 // ── Event bus port ─────────────────────────────────────────────
 
 export type EventHandler<T = unknown> = (event: T) => void;
