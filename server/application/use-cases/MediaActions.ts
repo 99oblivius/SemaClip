@@ -59,12 +59,16 @@ export class MediaActionsUseCase {
     const scrubPath = `${dir}/scrub.ts`;
     if (!(await this.fs.exists(scrubPath))) return { deleted: false };
     await this.fs.remove(scrubPath);
+    // The mp4 twin is the playable form — leaving it would keep dead video
+    // on the video route's twin preference.
+    await this.fs.remove(`${dir}/scrub.mp4`).catch(() => {});
     // State note: scrubPath/scrubFrontierSec in the download state describe
     // what WAS downloaded; clearing them keeps the UI honest (review now
     // scrubs the HQ file or falls back to source).
     const state = await this.orchestrator.getState(streamId);
     if (state.scrubPath === scrubPath) {
       state.scrubPath = null;
+      state.scrubMp4 = null;
       await this.orchestrator.setState(streamId, state);
     }
     return { deleted: true };

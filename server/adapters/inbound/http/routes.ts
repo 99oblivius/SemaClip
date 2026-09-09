@@ -717,26 +717,43 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   // during processing; falls back to the source VOD.
   app.get("/api/video/:streamId", async (c) => {
     const stream = await deps.getStream.execute(c.req.param("streamId"));
-    if (!stream || !stream.vodPath) return c.json({ error: "Video not available" }, 404);
+    if (!stream) return c.json({ error: "Video not available" }, 404);
 
     // Proxy preference: explicit ?src=full override, else proxy if it exists.
     const wantFull = c.req.query("src") === "full";
-    let mediaPath = stream.vodPath;
+    let mediaPath = stream.vodPath ?? "";
     if (!wantFull) {
-      try {
-        const meta = await deps.metadata.get(stream.id, "transcript_srt");
-        if (meta) {
-          const artifactDir = (JSON.parse(meta) as { path: string }).path.replace(/\/[^/]+$/, "");
-          const proxyPath = `${artifactDir}/proxy.mp4`;
-          if (await Deno.stat(proxyPath).then(() => true).catch(() => false)) {
-            mediaPath = proxyPath;
+      // mp4 twins first — Chromium can't demux raw MPEG-TS, so a .ts vodPath
+      // is unplayable; its .mp4 twin (kept in the download state) is the
+      // playable form of the same bytes.
+      const dl = await deps.downloadState(c.req.param("streamId"));
+      const playableTwin = dl.scrubMp4 ?? dl.hqMp4;
+      if (playableTwin && await Deno.stat(playableTwin).then(() => true).catch(() => false)) {
+        mediaPath = playableTwin;
+      } else {
+        try {
+          const meta = await deps.metadata.get(stream.id, "transcript_srt");
+          if (meta) {
+            const artifactDir = (JSON.parse(meta) as { path: string }).path.replace(/\/[^/]+$/, "");
+            const proxyPath = `${artifactDir}/proxy.mp4`;
+            if (await Deno.stat(proxyPath).then(() => true).catch(() => false)) {
+              mediaPath = proxyPath;
+            }
           }
+        } catch {
+          // fall back to source
         }
-      } catch {
-        // fall back to source
       }
     }
 
+    // MIME by extension — browsers refuse extensionless/unknown responses
+    // for <video> (the progressive .ts scrub files played as nothing without
+    // this; raw MPEG-TS is video/mp2t in Chromium).
+    const mime = mediaPath.endsWith(".mp4") ? "video/mp4"
+      : mediaPath.endsWith(".ts") ? "video/mp2t"
+      : mediaPath.endsWith(".webm") ? "video/webm"
+      : "application/octet-stream";
+    c.header("Content-Type", mime);
     try {
       const stat = await Deno.stat(mediaPath);
       const range = c.req.header("range");

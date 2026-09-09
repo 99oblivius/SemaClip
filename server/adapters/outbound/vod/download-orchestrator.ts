@@ -24,6 +24,7 @@ import {
   type HlsQuality,
 } from "./hls.ts";
 import { downloadChat } from "./chat-fetch.ts";
+import { remuxToMp4, mp4Twin } from "./remux.ts";
 
 export type DownloadPartKind = "chat" | "markers" | "scrub" | "hq";
 export type DownloadPartStatus = "pending" | "running" | "done" | "failed" | "skipped";
@@ -47,6 +48,9 @@ export interface DownloadState {
   scrubFrontierSec: number;
   scrubPath: string | null;
   hqPath: string | null;
+  /** Playable mp4 twins of the .ts files (Chromium can't demux raw TS). */
+  scrubMp4: string | null;
+  hqMp4: string | null;
   /** Path of the fetched chat JSON (progressive part 1). */
   chatPath: string | null;
   chatCount: number;
@@ -121,6 +125,8 @@ export class DownloadOrchestrator {
       scrubFrontierSec: 0,
       scrubPath: null,
       hqPath: null,
+      scrubMp4: null,
+      hqMp4: null,
       chatPath: null,
       chatCount: 0,
       qualities: [],
@@ -165,6 +171,8 @@ export class DownloadOrchestrator {
       scrubFrontierSec: 0,
       scrubPath: null,
       hqPath: null,
+      scrubMp4: null,
+      hqMp4: null,
       chatPath: null,
       chatCount: 0,
       qualities: [],
@@ -236,15 +244,22 @@ export class DownloadOrchestrator {
     if (!opts.includeScrub || !scrub || scrub === hq) {
       const target = scrub ?? hq;
       if (target) {
+        const tsPath = `${opts.destDir}/scrub.ts`;
+        const lastMux = { t: 0 };
         try {
-          await downloadProgressive(target.playlistUrl, `${opts.destDir}/scrub.ts`, {
+          await downloadProgressive(target.playlistUrl, tsPath, {
             signal: opts.signal ?? undefined,
             onProgress: (p) => {
               const part = rt.get("scrub")!;
               this.noteVideoProgress(part, p, target);
               state.scrubFrontierSec = p.downloadedSec;
-              state.scrubPath = `${opts.destDir}/scrub.ts`;
-              state.hqPath = `${opts.destDir}/scrub.ts`;
+              state.scrubPath = tsPath;
+              state.hqPath = tsPath;
+              void this.remuxTwin(tsPath, state, lastMux).then((mp4) => {
+                state.scrubMp4 = mp4;
+                state.hqMp4 = mp4;
+                void this.persist(opts.streamId, state, rt);
+              });
               void this.persist(opts.streamId, state, rt);
             },
           });
@@ -252,6 +267,10 @@ export class DownloadOrchestrator {
           rt.get("scrub")!.percent = 1;
           rt.get("hq")!.status = "done"; // same file serves HQ
           rt.get("hq")!.percent = 1;
+          // Final remux (not throttled) so the complete file is playable.
+          const mp4 = await remuxToMp4(tsPath, mp4Twin(tsPath));
+          state.scrubMp4 = state.hqMp4 = mp4 ? mp4Twin(tsPath) : null;
+          void this.persist(opts.streamId, state, rt);
         } catch (err) {
           this.fail(rt.get("scrub")!, err);
           this.fail(rt.get("hq")!, err);
@@ -262,20 +281,29 @@ export class DownloadOrchestrator {
 
     // ── Scrub pass (live, reviewable the moment it completes) ──
     rt.get("scrub")!.status = "running";
+    const scrubTs = `${opts.destDir}/scrub.ts`;
+    const lastMuxScrub = { t: 0 };
     try {
-      await downloadProgressive(scrub.playlistUrl, `${opts.destDir}/scrub.ts`, {
+      await downloadProgressive(scrub.playlistUrl, scrubTs, {
         signal: opts.signal ?? undefined,
         onProgress: (p) => {
           const part = rt.get("scrub")!;
           this.noteVideoProgress(part, p, scrub);
           state.scrubFrontierSec = p.downloadedSec;
-          state.scrubPath = `${opts.destDir}/scrub.ts`;
+          state.scrubPath = scrubTs;
+          void this.remuxTwin(scrubTs, state, lastMuxScrub).then((mp4) => {
+            state.scrubMp4 = mp4;
+            void this.persist(opts.streamId, state, rt);
+          });
           void this.persist(opts.streamId, state, rt);
         },
       });
       rt.get("scrub")!.status = "done";
       rt.get("scrub")!.percent = 1;
-      state.scrubPath = `${opts.destDir}/scrub.ts`;
+      state.scrubPath = scrubTs;
+      const scrubMp4 = await remuxToMp4(scrubTs, mp4Twin(scrubTs));
+      state.scrubMp4 = scrubMp4 ? mp4Twin(scrubTs) : null;
+      void this.persist(opts.streamId, state, rt);
       await opts.onPartDone?.("scrub", state);
     } catch (err) {
       if (opts.signal?.aborted) {
@@ -298,19 +326,28 @@ export class DownloadOrchestrator {
     }
     if (hq && hq.name !== scrub.name) {
       rt.get("hq")!.status = "running";
+      const hqTs = `${opts.destDir}/hq.ts`;
+      const lastMuxHq = { t: 0 };
       try {
-        await downloadProgressive(hq.playlistUrl, `${opts.destDir}/hq.ts`, {
+        await downloadProgressive(hq.playlistUrl, hqTs, {
           signal: opts.signal ?? undefined,
           lookahead: 4,
           onProgress: (p) => {
             const part = rt.get("hq")!;
             this.noteVideoProgress(part, p, hq);
+            void this.remuxTwin(hqTs, state, lastMuxHq).then((mp4) => {
+              state.hqMp4 = mp4;
+              void this.persist(opts.streamId, state, rt);
+            });
             void this.persist(opts.streamId, state, rt);
           },
         });
         rt.get("hq")!.status = "done";
         rt.get("hq")!.percent = 1;
-        state.hqPath = `${opts.destDir}/hq.ts`;
+        state.hqPath = hqTs;
+        const hqMp4 = await remuxToMp4(hqTs, mp4Twin(hqTs));
+        state.hqMp4 = hqMp4 ? mp4Twin(hqTs) : null;
+        void this.persist(opts.streamId, state, rt);
         await opts.onPartDone?.("hq", state);
       } catch (err) {
         this.fail(rt.get("hq")!, err);
@@ -320,9 +357,29 @@ export class DownloadOrchestrator {
       rt.get("hq")!.status = "done";
       rt.get("hq")!.percent = 1;
       state.hqPath = state.scrubPath;
+      state.hqMp4 = state.scrubMp4;
     }
 
     return this.finalize(opts.streamId, state, rt);
+  }
+
+  /**
+   * Throttled mp4-twin remux for a downloading .ts. Returns the twin path
+   * when a remux ran and produced the file, null otherwise (throttled out
+   * or ffmpeg failed — the .ts stays authoritative and the next tick or the
+   * final completion remux will catch up).
+   */
+  private async remuxTwin(
+    tsPath: string,
+    state: { scrubMp4: string | null; hqMp4: string | null },
+    lastMuxAt: { t: number },
+  ): Promise<string | null> {
+    const now = performance.now();
+    if (now - lastMuxAt.t < 20_000) return state.scrubMp4 ?? state.hqMp4;
+    lastMuxAt.t = now;
+    const mp4 = mp4Twin(tsPath);
+    const ok = await remuxToMp4(tsPath, mp4);
+    return ok ? mp4 : null;
   }
 
   /** Aborts a running download by flagging the state; the running fetches

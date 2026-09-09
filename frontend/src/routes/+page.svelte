@@ -278,10 +278,9 @@
         {:else}
           <span class="font-mono text-xs text-ash-dim">paste a URL to list qualities</span>
         {/if}
-        <label class="flex items-center gap-2 text-xs text-ash">
-          <input type="checkbox" bind:checked={scrubFirst} class="accent-accent" />
-          <span class="font-medium">540p scrub-first</span>
-          <span class="text-ash-dim">— separate 540p file scrubs immediately; full quality follows in the background. Off = one download at max quality (still scrubbable while it lands).</span>
+        <label class="flex items-start gap-2 text-xs text-ash" title="Two files: a 540p scrub appears within seconds; the max-quality download follows in the background. Off = a single download at max quality — its chunks become scrubbable as they land.">
+          <input type="checkbox" bind:checked={scrubFirst} class="accent-accent mt-0.5" />
+          <span class="font-medium whitespace-nowrap">540p scrub-first</span>
         </label>
       </div>
       <div class="mt-2 flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 transition-colors focus-within:border-accent">
