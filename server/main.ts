@@ -14,11 +14,13 @@ const ENGINE_BINARY = Deno.env.get("SEMACLIP_ENGINE") ?? "semaclip-engine";
  * engine binary (Python mock) when bundling hasn't happened — but logs it.
  */
 const nativeRoot = new URL("../native/whisper/", import.meta.url);
+const nativeSubdir = Deno.build.os === "windows" ? "win-x64" : "linux-x64";
 let detectionWhisper: WhisperPaths | undefined;
 try {
-  await Deno.stat(new URL("linux-x64/whisper-cli", nativeRoot));
+  const cliName = Deno.build.os === "windows" ? "whisper-cli.exe" : "whisper-cli";
+  await Deno.stat(new URL(`${nativeSubdir}/${cliName}`, nativeRoot));
   await Deno.stat(new URL("models/ggml-base.en-q5_1.bin", nativeRoot));
-  const binDir = new URL("linux-x64/", nativeRoot).pathname;
+  const binDir = new URL(`${nativeSubdir}/`, nativeRoot).pathname;
   detectionWhisper = {
     binDir,
     modelsDir: new URL("models/", nativeRoot).pathname,

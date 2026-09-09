@@ -93,8 +93,17 @@ export class DetectionEngineAdapter {
   private async runPipeline(command: Extract<EngineCommand, { type: "start" }>, jobId: string): Promise<void> {
     const { vodPath, chatPath } = command;
     const t0 = performance.now();
+    /** Measured per-stage wall seconds — emitted in the complete message. */
+    const stageTimes: Partial<Record<EnginePhase, number>> = {};
+    const stamps = new Map<EnginePhase, number>();
+    const beginStage = (p: EnginePhase) => stamps.set(p, performance.now());
+    const endStage = (p: EnginePhase) => {
+      const s = stamps.get(p);
+      if (s !== undefined) stageTimes[p] = (performance.now() - s) / 1000;
+    };
 
     // ── Chat parsing ──
+    beginStage("chat_parsing");
     this.emit({ type: "progress", jobId, phase: "chat_parsing", percent: 0.05, message: "Parsing chat…" });
     let parsedChat: ReturnType<typeof parseTwitchChatJson> | null = null;
     if (chatPath) {
@@ -105,20 +114,23 @@ export class DetectionEngineAdapter {
       this.emit({ type: "error", jobId, phase: "chat_parsing", message: "Cannot determine VOD duration" });
       return;
     }
-    this.emit({ type: "progress", jobId, phase: "chat_parsing", percent: 1 });
+    this.emit({ type: "progress", jobId, phase: "chat_parsing", percent: 1, message: `${parsedChat?.events.length ?? 0} chat events` });
+    endStage("chat_parsing");
 
     // ── Audio extraction + features ──
+    beginStage("audio_extraction");
     this.emit({ type: "progress", jobId, phase: "audio_extraction", percent: 0.05, message: "Extracting audio…" });
     const wavPath = await this.extractAudio(vodPath, this.abort.signal);
     this.emit({ type: "progress", jobId, phase: "audio_extraction", percent: 0.6, message: "Computing per-second features…" });
     const samples = await this.readWavPcm16(wavPath);
     const audio = audioFeatures(samples, 16000);
     // Transcript speech coverage applied after transcription (below).
-    this.emit({ type: "progress", jobId, phase: "audio_extraction", percent: 1 });
-    console.log(`[engine] audio features: ${audio.length}s, ${((performance.now() - t0) / 1000).toFixed(1)}s elapsed`);
+    this.emit({ type: "progress", jobId, phase: "audio_extraction", percent: 1, message: `${audio.length}s of audio` });
+    endStage("audio_extraction");
 
     // ── Transcription (whisper.cpp, parallel chunks) ──
-    this.emit({ type: "progress", jobId, phase: "transcription", percent: 0, message: "Transcribing (parallel chunks)…" });
+    beginStage("transcription");
+    this.emit({ type: "progress", jobId, phase: "transcription", percent: 0, message: `Transcribing (${command.workers ?? "?"} workers)…` });
     const transcriber = new TranscribeAdapter(this.config.whisper, this.config.ffmpegPath);
     let lastTranscribePct = 0;
     const { segments } = await transcriber.transcribe(vodPath, {
@@ -135,17 +147,18 @@ export class DetectionEngineAdapter {
     applyTranscriptCoverage(audio, segments as TranscriptSegment[]);
 
     // Transcript SRT sidecar — the honest caption path (ExportClipUseCase
-    // refuses captions without this artifact). Written next to the extracted
-    // WAV; the use-case layer is told the path via the complete-adjacent
-    // progress message and persists it in stream_metadata.
+    // refuses captions without this artifact). Written to the stream's
+    // artifact dir; the use-case layer registers it in stream_metadata.
     let srtPath: string | null = null;
     if (segments.length > 0 && command.artifactDir) {
       srtPath = `${command.artifactDir}/transcript.srt`;
       await Deno.writeTextFile(srtPath, toSrt(segments as TranscriptSegment[]));
       this.emit({ type: "progress", jobId, phase: "transcription", percent: 1, message: `Transcript: ${segments.length} segments` });
     }
+    endStage("transcription");
 
     // ── Segmentation + scoring (array math) ──
+    beginStage("segmentation");
     this.emit({ type: "progress", jobId, phase: "segmentation", percent: 0.5, message: "Computing baselines…" });
     const chat = chatFeatures(parsedChat?.events ?? [], durationSec);
     const features: FeatureTable = { durationSec, chat, audio, transcript: segments };
@@ -158,14 +171,17 @@ export class DetectionEngineAdapter {
     }
     const baselines = computeBaselines(E, durationSec, { localWindowSec: 1800, globalFloor: 0.5 });
     this.emit({ type: "progress", jobId, phase: "segmentation", percent: 1 });
+    endStage("segmentation");
 
     // ── Axis scoring ──
+    beginStage("axis_scoring");
     this.emit({ type: "progress", jobId, phase: "axis_scoring", percent: 0.5 });
     const candidates = runDetection(features, baselines, [], [new HypeDetector()], {
       maxClips: command.config.maxClips ?? 50,
       minSlotsPerAxis: 1,
     });
     this.emit({ type: "progress", jobId, phase: "axis_scoring", percent: 1 });
+    endStage("axis_scoring");
 
     // ── Endpoint resolution (Phase 1: axis cap only) ──
     this.emit({ type: "progress", jobId, phase: "endpoint_resolution", percent: 1 });
@@ -187,7 +203,18 @@ export class DetectionEngineAdapter {
       });
     }
     this.emit({ type: "complete", jobId, clipsFound: ranked.length });
-    console.log(`[engine] job ${jobId} complete: ${ranked.length} clips in ${((performance.now() - t0) / 1000).toFixed(1)}s`);
+    const total = ((performance.now() - t0) / 1000).toFixed(1);
+    const timings = Object.entries(stageTimes).map(([p, s]) => `${p}=${s!.toFixed(1)}s`).join(", ");
+    console.log(`[engine] job ${jobId} complete: ${ranked.length} clips in ${total}s — ${timings}`);
+    // Complete message carries the timing summary in the message field (the
+    // Processing screen reads it verbatim — the budget is user-visible).
+    this.emit({
+      type: "progress",
+      jobId,
+      phase: "endpoint_resolution",
+      percent: 1,
+      message: `Done in ${total}s (${timings})`,
+    });
   }
 
   private async probeDuration(vodPath: string): Promise<number | null> {

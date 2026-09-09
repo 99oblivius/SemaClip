@@ -52,3 +52,6 @@ frontend/package
 # Deno
 server/node_modules/
 *.waveform.json
+
+# Native binaries + models — fetched by scripts/fetch-native.sh (CI + dev)
+native/

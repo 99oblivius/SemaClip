@@ -91,13 +91,15 @@ export class TranscribeAdapter {
   }
 
   private async speechSegments(wavPath: string): Promise<Array<{ start: number; end: number }>> {
-    const vadBin = `${this.paths.binDir}/whisper-vad-speech-segments`;
+    const vadBin = `${this.paths.binDir}/whisper-vad-speech-segments${Deno.build.os === "windows" ? ".exe" : ""}`;
     const vadModel = `${this.paths.modelsDir}/${this.paths.vadModelFile}`;
     const cmd = new Deno.Command(vadBin, {
       args: ["-vm", vadModel, "-f", wavPath],
       stdout: "piped",
       stderr: "null",
-      env: { LD_LIBRARY_PATH: this.paths.binDir },
+      env: Deno.build.os === "windows"
+        ? {}
+        : { LD_LIBRARY_PATH: this.paths.binDir },
     });
     const out = await cmd.output();
     if (!out.success) throw new Error(`VAD failed (${out.code})`);
@@ -179,7 +181,7 @@ export class TranscribeAdapter {
     wavPath: string,
     chunk: { start: number; end: number },
   ): Promise<TranscriptSegment[]> {
-    const cli = `${this.paths.binDir}/whisper-cli`;
+    const cli = `${this.paths.binDir}/whisper-cli${Deno.build.os === "windows" ? ".exe" : ""}`;
     const model = `${this.paths.modelsDir}/${this.paths.modelFile}`;
     const cmd = new Deno.Command(cli, {
       args: [
@@ -193,7 +195,9 @@ export class TranscribeAdapter {
       ],
       stdout: "piped",
       stderr: "null",
-      env: { LD_LIBRARY_PATH: this.paths.binDir },
+      env: Deno.build.os === "windows"
+        ? {}
+        : { LD_LIBRARY_PATH: this.paths.binDir },
     });
     const out = await cmd.output();
     if (!out.success) throw new Error(`whisper-cli failed (${out.code}) on chunk ${chunk.start}-${chunk.end}`);
