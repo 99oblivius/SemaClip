@@ -21,6 +21,7 @@ import type {
 } from "@/application/use-cases/mod.ts";
 import type { Axis, StreamStatus } from "shared/types";
 import type { EventBus, StreamMetadataRepository, StreamStorage } from "@/application/ports/outbound.ts";
+import type { SqliteExportPresetRepository } from "@/adapters/outbound/persistence/repositories.ts";
 
 export interface HttpDeps {
   importByFile: ImportStreamByFileUseCase;
@@ -40,6 +41,7 @@ export interface HttpDeps {
   exportClip: ExportClipUseCase;
   manageQueue: ManageQueueUseCase;
   settings: SettingsUseCase;
+  presets: SqliteExportPresetRepository;
   metadata: StreamMetadataRepository;
   storage: StreamStorage;
 }
@@ -488,6 +490,19 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   app.put("/api/settings", async (c) => {
     const body = await c.req.json();
     return c.json(await deps.settings.update(body));
+  });
+
+  // ── Export presets (P0-7) ──
+  app.get("/api/presets", async (c) => c.json(await deps.presets.list()));
+  app.put("/api/presets/:id", async (c) => {
+    const body = await c.req.json();
+    // Upsert with the URL id — the body cannot mint arbitrary ids.
+    await deps.presets.save({ ...body, id: c.req.param("id") });
+    return c.json({ ok: true }, 201);
+  });
+  app.delete("/api/presets/:id", async (c) => {
+    await deps.presets.delete(c.req.param("id"));
+    return c.json({ ok: true });
   });
 
   // ── System info ──

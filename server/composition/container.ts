@@ -6,6 +6,7 @@ import {
   SqlitePersonaRepository,
   SqliteStreamMetadataRepository,
   SqliteSettingsRepository,
+  SqliteExportPresetRepository,
   DenoStreamStorage,
 } from "@/adapters/outbound/persistence/mod.ts";
 import { InProcessEventBus } from "@/adapters/outbound/eventbus/mod.ts";
@@ -74,7 +75,7 @@ export interface AppContainer {
   bus: InProcessEventBus;
 }
 
-export function buildContainer(config: AppConfig): AppContainer {
+export async function buildContainer(config: AppConfig): Promise<AppContainer> {
   const db = createDb(config.dbPath);
   const bus = new InProcessEventBus();
   const fs = new DenoFileSystem();
@@ -126,6 +127,45 @@ export function buildContainer(config: AppConfig): AppContainer {
   const exportClip = new ExportClipUseCase(clipRepo, streamRepo, ffmpeg, fs, config.exportDir, metadataRepo);
   const manageQueue = new ManageQueueUseCase(jobRepo);
   const settings = new SettingsUseCase(new SqliteSettingsRepository(db), bus);
+  const presets = new SqliteExportPresetRepository(db);
+  // Seed the spec's default presets once (idempotent by fixed ids).
+  const DEFAULT_PRESETS = [
+    {
+      id: "preset-tiktok-916",
+      name: "TikTok 9:16 H.264",
+      format: "mp4_h264" as const,
+      aspectRatio: "9:16" as const,
+      cropPosition: "center" as const,
+      captions: { enabled: true, preset: "bold-white" as const, position: "bottom" as const, fontSize: 48, backgroundOpacity: 0.8 },
+      nameTemplate: "{date}-{channel}-{axis}-{ts}-tiktok",
+      createdAt: "2026-01-01T00:00:00Z",
+    },
+    {
+      id: "preset-shorts-916-vp9",
+      name: "Shorts 9:16 VP9",
+      format: "webm" as const,
+      aspectRatio: "9:16" as const,
+      cropPosition: "center" as const,
+      captions: { enabled: true, preset: "bold-white" as const, position: "bottom" as const, fontSize: 48, backgroundOpacity: 0.8 },
+      nameTemplate: "{date}-{channel}-{axis}-{ts}-shorts",
+      createdAt: "2026-01-01T00:00:01Z",
+    },
+    {
+      id: "preset-archive-169",
+      name: "16:9 Archive H.264",
+      format: "mp4_h264" as const,
+      aspectRatio: "16:9" as const,
+      cropPosition: "center" as const,
+      captions: { enabled: false, preset: "bold-white" as const, position: "bottom" as const, fontSize: 48, backgroundOpacity: 0.8 },
+      nameTemplate: "{date}-{channel}-{axis}-{ts}",
+      createdAt: "2026-01-01T00:00:02Z",
+    },
+  ];
+  const existingPresets = await presets.list();
+  if (existingPresets.length === 0) {
+    for (const p of DEFAULT_PRESETS) await presets.save(p);
+    console.log(`Seeded ${DEFAULT_PRESETS.length} default export presets`);
+  }
 
   return {
     bus,
@@ -147,6 +187,7 @@ export function buildContainer(config: AppConfig): AppContainer {
       exportClip,
       manageQueue,
       settings,
+      presets,
       metadata: metadataRepo,
       storage: streamStorage,
     },

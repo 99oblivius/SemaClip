@@ -102,6 +102,18 @@ export const migrations: Migration[] = [
       `CREATE INDEX IF NOT EXISTS idx_clips_job ON clips (job_id)`,
     ],
   },
+  {
+    version: "0.4.0",
+    description: "Add export_presets table (P0-7 named format/aspect/caption bundles)",
+    up: [
+      `CREATE TABLE IF NOT EXISTS export_presets (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        config_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+    ],
+  },
 ];
 
 export const LATEST_VERSION = migrations.at(-1)?.version ?? "0.0.0";

@@ -61,3 +61,11 @@ export const settings = sqliteTable("settings", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
 });
+
+/** Export presets (P0-7): named format/aspect/caption bundles, user-editable. */
+export const exportPresets = sqliteTable("export_presets", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  config_json: text("config_json").notNull(),
+  created_at: text("created_at").notNull(),
+});

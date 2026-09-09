@@ -197,6 +197,19 @@ export interface CaptionStyle {
   backgroundOpacity: number; // 0-1
 }
 
+/** Named export bundle (P0-7): everything the export sheet needs in one unit. */
+export interface ExportPreset {
+  id: string;
+  name: string;
+  format: ExportFormat;
+  aspectRatio: AspectRatio;
+  cropPosition: CropPosition;
+  captions: CaptionStyle;
+  /** Filename template tokens: {date} {channel} {axis} {ts} {platform} {title}. */
+  nameTemplate: string;
+  createdAt: string;
+}
+
 export interface ExportClipInput {
   clipId: string;
   format: ExportFormat;

@@ -8,7 +8,7 @@ import type {
   PersonaRepository,
   StreamMetadataRepository,
 } from "@/application/ports/outbound.ts";
-import type { Stream, Job, Clip, Persona, StreamStatus, Axis } from "shared/types";
+import type { Stream, Job, Clip, Persona, StreamStatus, Axis, ExportPreset } from "shared/types";
 
 // ── Row → domain mappers ──────────────────────────────────────
 // SQLite stores JSON as text; booleans as 0/1.
@@ -303,5 +303,37 @@ export class SqliteStreamMetadataRepository implements StreamMetadataRepository 
   async deleteAll(streamId: string): Promise<void> {
     await this.db.delete(schema.streamMetadata)
       .where(eq(schema.streamMetadata.stream_id, streamId)).run();
+  }
+}
+
+// ── Export preset repository (P0-7) ────────────────────────────
+
+export class SqliteExportPresetRepository {
+  constructor(private readonly db: Db) {}
+
+  async list(): Promise<ExportPreset[]> {
+    const rows = await this.db.select().from(schema.exportPresets)
+      .orderBy(asc(schema.exportPresets.created_at)).all();
+    return rows.map((r) => {
+      const cfg = JSON.parse(r.config_json) as Omit<ExportPreset, "id" | "name" | "createdAt">;
+      return { id: r.id, name: r.name, createdAt: r.created_at, ...cfg };
+    });
+  }
+
+  async save(preset: ExportPreset): Promise<void> {
+    const { id, name, createdAt, ...cfg } = preset;
+    await this.db.insert(schema.exportPresets).values({
+      id,
+      name,
+      config_json: JSON.stringify(cfg),
+      created_at: createdAt,
+    }).onConflictDoUpdate({
+      target: schema.exportPresets.id,
+      set: { name, config_json: JSON.stringify(cfg) },
+    }).run();
+  }
+
+  async delete(id: string): Promise<void> {
+    await this.db.delete(schema.exportPresets).where(eq(schema.exportPresets.id, id)).run();
   }
 }

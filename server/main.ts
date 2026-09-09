@@ -32,7 +32,7 @@ try {
   console.log("Engine: external binary mode (SEMACLIP_ENGINE) — native whisper.cpp tree not found");
 }
 
-const container = buildContainer({
+const container = await buildContainer({
   dbPath: DB_PATH,
   dataDir: DATA_DIR,
   cacheDir: CACHE_DIR,
