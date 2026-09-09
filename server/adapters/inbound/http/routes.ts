@@ -20,6 +20,7 @@ import type {
   SettingsUseCase,
 } from "@/application/use-cases/mod.ts";
 import type { Axis, StreamStatus } from "shared/types";
+import type { DownloadState as DownloadStateType } from "@/adapters/outbound/vod/download-orchestrator.ts";
 import type { EventBus, StreamMetadataRepository, StreamStorage, VodDownloadPort } from "@/application/ports/outbound.ts";
 import type { SqliteExportPresetRepository } from "@/adapters/outbound/persistence/repositories.ts";
 import { parseSrt } from "@/adapters/outbound/transcribe/srt-parse.ts";
@@ -45,6 +46,8 @@ export interface HttpDeps {
   settings: SettingsUseCase;
   presets: SqliteExportPresetRepository;
   vod: VodDownloadPort;
+  downloadState: (streamId: string) => Promise<DownloadStateType>;
+  cancelDownload: (streamId: string) => boolean;
   metadata: StreamMetadataRepository;
   storage: StreamStorage;
 }
@@ -111,6 +114,42 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     const body = await c.req.json();
     const result = await deps.importByUrl.execute(body);
     return c.json(result, 201);
+  });
+
+  // ── Progressive download state (docs/DOWNLOAD-PIPELINE.md) ──
+  app.get("/api/streams/:id/download", async (c) => {
+    const streamId = c.req.param("id");
+    const state = await deps.downloadState(streamId);
+    return c.json(state);
+  });
+
+  // Cancel an in-flight progressive download.
+  app.delete("/api/streams/:id/download", async (c) => {
+    const streamId = c.req.param("id");
+    const cancelled = deps.cancelDownload(streamId);
+    return c.json({ ok: cancelled }, cancelled ? 200 : 409);
+  });
+
+  // Available qualities for the import modal's max-quality selector.
+  app.get("/api/vod/qualities", async (c) => {
+    const url = c.req.query("url") ?? "";
+    try {
+      const { extractVodId, resolveQualities } = await import("@/adapters/outbound/vod/hls.ts");
+      const vodId = extractVodId(url);
+      if (!vodId) return c.json({ error: "Not a Twitch VOD URL" }, 400);
+      const qualities = await resolveQualities(vodId);
+      return c.json({
+        qualities: qualities.map((q) => ({
+          name: q.name,
+          width: q.width,
+          height: q.height,
+          fps: q.fps,
+          bandwidth: q.bandwidth,
+        })),
+      });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
+    }
   });
 
 

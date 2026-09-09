@@ -165,6 +165,14 @@ export interface ImportByUrlInput {
   url: string; // Twitch VOD URL
   title?: string;
   streamer?: string;
+  /** Scrub-first progressive download (docs/DOWNLOAD-PIPELINE.md). */
+  progressive?: boolean;
+  /** Highest quality of the scrub pass (default 540). */
+  scrubHeightCap?: number;
+  /** Max resolution of the HQ pass / single download (null = no cap). */
+  maxQualityHeight?: number | null;
+  /** When false, a single download serves both scrub and HQ roles. */
+  includeScrub?: boolean;
 }
 export type ImportResult = { stream: Stream; downloadJobId: string | null };
 

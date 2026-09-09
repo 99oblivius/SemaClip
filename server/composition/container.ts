@@ -15,6 +15,7 @@ import { DetectionEngineAdapter } from "@/adapters/outbound/engine/DetectionEngi
 import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
 import { DEFAULT_SETTINGS, cpuWorkers } from "@/application/use-cases/SettingsUseCase.ts";
 import { TwitchDlAdapter } from "@/adapters/outbound/vod/mod.ts";
+import { DownloadOrchestrator } from "@/adapters/outbound/vod/download-orchestrator.ts";
 import { FFmpegAdapter } from "@/adapters/outbound/ffmpeg/mod.ts";
 import {
   ImportStreamByFileUseCase,
@@ -100,7 +101,8 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
 
   // Use cases
   const importByFile = new ImportStreamByFileUseCase(streamRepo, fs, ffmpeg);
-  const importByUrl = new ImportStreamByUrlUseCase(streamRepo, vodDownloader, fs, bus, config.cacheDir);
+  const downloadOrchestrator = new DownloadOrchestrator(metadataRepo);
+  const importByUrl = new ImportStreamByUrlUseCase(streamRepo, vodDownloader, fs, bus, config.cacheDir, downloadOrchestrator);
   const deleteStream = new DeleteStreamUseCase(streamRepo, jobRepo, metadataRepo, streamStorage);
   const updateStream = new UpdateStreamUseCase(streamRepo);
   const attachChat = new AttachChatUseCase(streamRepo, fs);
@@ -189,6 +191,8 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
       settings,
       presets,
       vod: vodDownloader,
+      downloadState: (id: string) => downloadOrchestrator.getState(id),
+      cancelDownload: (id: string) => importByUrl.cancelProgressive(id),
       metadata: metadataRepo,
       storage: streamStorage,
     },

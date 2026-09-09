@@ -71,6 +71,43 @@ export async function resolveQualities(vodId: string): Promise<HlsQuality[]> {
   return parseMasterPlaylist(await res.text());
 }
 
+export interface VodMeta {
+  title: string;
+  streamer: string;
+  game: string | null;
+  durationSec: number;
+}
+
+/** VOD metadata via GQL — no twitch-dl dependency (progressive path). */
+export async function fetchVodMeta(vodId: string): Promise<VodMeta> {
+  const res2 = await fetch(GQL_URL, {
+    method: "POST",
+    headers: { "Client-ID": CLIENT_ID, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      query: '{ video(id: "' + vodId + '") { title owner { displayName } game { displayName } lengthSeconds } }',
+    }),
+  });
+  if (!res2.ok) throw new Error(`GQL metadata failed: ${res2.status}`);
+  const data = await res2.json() as {
+    data?: {
+      video?: {
+        title: string | null;
+        owner?: { displayName: string } | null;
+        game?: { displayName: string } | null;
+        lengthSeconds: number;
+      } | null;
+    };
+  };
+  const v = data.data?.video;
+  if (!v) throw new Error("VOD not found or unavailable");
+  return {
+    title: v.title ?? "Untitled",
+    streamer: v.owner?.displayName ?? "unknown",
+    game: v.game?.displayName ?? null,
+    durationSec: v.lengthSeconds,
+  };
+}
+
 /**
  * Parses an usher master playlist into quality descriptors.
  * Skips audio-only entries (no RESOLUTION) and malformed lines rather than
@@ -180,7 +217,7 @@ export async function downloadProgressive(
   destPath: string,
   opts: {
     onProgress: (p: ProgressiveProgress) => void;
-    signal?: AbortSignal;
+    signal?: AbortSignal | undefined;
     /** Fetch-ahead window size (default 3). */
     lookahead?: number;
   },
