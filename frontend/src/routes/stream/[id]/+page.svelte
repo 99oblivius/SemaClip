@@ -61,6 +61,48 @@
   const currentClip = $derived(visibleClips[currentClipIndex]);
   const stream = $derived(streamQuery.data);
 
+  // ── Undo/redo history (P0-12): endpoint edits push undo entries; Ctrl+Z /
+  // Ctrl+Shift+Z walk the stack. Entries carry the clip id + before/after,
+  // so undo works even after the selection moved. ──
+  type EndpointEdit = { clipId: string; before: { startTime: number; endTime: number }; after: { startTime: number; endTime: number } };
+  let undoStack = $state<EndpointEdit[]>([]);
+  let redoStack = $state<EndpointEdit[]>([]);
+  let lastUndoToast = $state<string | null>(null);
+
+  function pushEdit(clipId: string, before: { startTime: number; endTime: number }, after: { startTime: number; endTime: number }) {
+    if (before.startTime === after.startTime && before.endTime === after.endTime) return;
+    undoStack = [...undoStack, { clipId, before, after }];
+    if (undoStack.length > 100) undoStack = undoStack.slice(-100); // bounded
+    redoStack = []; // new edit invalidates the redo branch
+  }
+
+  function applyEndpoint(clipId: string, e: { startTime: number; endTime: number }) {
+    queryClient.setQueryData<Clip[]>(['clips', streamId], (old) =>
+      old?.map((c) => (c.id === clipId ? { ...c, startTime: e.startTime, endTime: e.endTime } : c)),
+    );
+    apiClient.updateClip(clipId, e).catch((err) => console.error('updateClip failed:', err));
+  }
+
+  function undoEdit() {
+    const entry = undoStack[undoStack.length - 1];
+    if (!entry) return;
+    undoStack = undoStack.slice(0, -1);
+    redoStack = [...redoStack, entry];
+    applyEndpoint(entry.clipId, entry.before);
+    lastUndoToast = 'Endpoint restored';
+    setTimeout(() => (lastUndoToast = null), 2000);
+  }
+
+  function redoEdit() {
+    const entry = redoStack[redoStack.length - 1];
+    if (!entry) return;
+    redoStack = redoStack.slice(0, -1);
+    undoStack = [...undoStack, entry];
+    applyEndpoint(entry.clipId, entry.after);
+    lastUndoToast = 'Endpoint reapplied';
+    setTimeout(() => (lastUndoToast = null), 2000);
+  }
+
   /** Persist an endpoint change locally + to the backend (fire-and-forget with
    *  rollback on failure — a silently dropped edit desyncs UI and DB). */
   function setEndpoint(which: 'start' | 'end', time: number) {
@@ -69,6 +111,8 @@
       ? { startTime: Math.min(time, currentClip.endTime - 1) }
       : { endTime: Math.max(time, currentClip.startTime + 1) };
     const before = { startTime: currentClip.startTime, endTime: currentClip.endTime };
+    const after = { startTime: next.startTime ?? currentClip.startTime, endTime: next.endTime ?? currentClip.endTime };
+    pushEdit(currentClip.id, before, after);
     queryClient.setQueryData<Clip[]>(['clips', streamId], (old) =>
       old?.map((c) => (c.id === currentClip.id ? { ...c, ...next } : c)),
     );
@@ -197,11 +241,13 @@
   }
 
   function adjustEndpoints(clip: Clip, start: number, end: number) {
-    // Local optimistic update — the backend persists via a dedicated endpoint if needed.
-    // For now, update in the query cache.
+    const before = { startTime: clip.startTime, endTime: clip.endTime };
+    const after = { startTime: start, endTime: end };
+    pushEdit(clip.id, before, after);
     queryClient.setQueryData<Clip[]>(['clips', streamId], (old) =>
       old?.map((c) => (c.id === clip.id ? { ...c, startTime: start, endTime: end } : c)),
     );
+    apiClient.updateClip(clip.id, after).catch((err) => console.error('updateClip failed:', err));
   }
 
   /** Toggle clip-follow: frame the timeline to the selected clip's bounds
@@ -324,9 +370,17 @@
         e.preventDefault();
         showKeyboardHelp = true;
         break;
+      case 'z': case 'Z':
+        // Ctrl+Z undo / Ctrl+Shift+Z redo (endpoint edits, P0-12).
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault();
+          if (e.shiftKey) redoEdit();
+          else undoEdit();
+        }
+        break;
       case 'Escape':
-        // SPA navigation — full reload (v1) dropped all client state.
-        window.location.href = `/stream/${streamId}/processing`;
+        // Back out one level: Review → Library (SPA nav preserves state).
+        window.location.href = '/';
         break;
     }
   }

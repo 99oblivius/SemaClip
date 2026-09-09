@@ -39,6 +39,8 @@
         { key: 'A', action: 'Accept clip' },
         { key: 'D', action: 'Discard clip (marks rejected)' },
         { key: 'U', action: 'Undo discard' },
+        { key: 'Ctrl+Z', action: 'Undo endpoint edit' },
+        { key: 'Ctrl+Shift+Z', action: 'Redo endpoint edit' },
         { key: 'S', action: 'Snooze clip to queue end' },
         { key: 'Q', action: 'Toggle unreviewed-only filter' },
         { key: 'E', action: 'Export current clip' },

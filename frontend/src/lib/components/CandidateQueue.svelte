@@ -11,6 +11,10 @@
 
   let { clips, currentClipIndex, reviewed, onSelectClip }: Props = $props();
 
+  // ── Key-light (P2 exit gate): the active candidate is the lit row; the
+  // gsap keyLight action dims siblings. Applied per-row via class here
+  // (CSS dimming) because gsap DOM mutation fights Svelte's keyed each. ──
+  const activeId = $derived(clips[currentClipIndex]?.id ?? null);
   // Review progress pinned at the queue top (P0-11 made visible).
   const reviewedCount = $derived(clips.filter((c) => reviewed.has(c.id)).length);
 </script>
@@ -25,8 +29,9 @@
   <div class="flex-1 overflow-y-auto">
     {#each clips as clip, i (clip.id)}
       <button
-        class="flex w-full items-center gap-3 border-l-2 px-3 py-2 text-left transition-colors hover:bg-surface-2
-        {i === currentClipIndex ? 'border-accent bg-surface-2' : 'border-transparent'}"
+        class="flex w-full items-center gap-3 border-l-2 px-3 py-2 text-left transition-all duration-200
+        {i === currentClipIndex ? 'border-accent bg-surface-2' : 'border-transparent'}
+        {activeId && clip.id !== activeId ? 'opacity-45' : ''}"
         onclick={() => onSelectClip(i)}
       >
         <span class="w-5 font-mono text-xs text-ash-dim">{i + 1}</span>
