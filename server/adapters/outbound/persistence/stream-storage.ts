@@ -13,10 +13,6 @@ import type { StreamStorage } from "@/application/ports/outbound.ts";
  *           ├── density.json  ← cached chat density
  *           ├── thumbnails/   ← frame thumbnails
  *           └── exports/      ← exported clips
- *
- * Derived artifacts (waveform.json, density.json) live at the stream root
- * because there's exactly one per stream. Thumbnails and exports get
- * subdirectories because there can be many.
  */
 export class DenoStreamStorage implements StreamStorage {
   constructor(private readonly dataDir: string) {}
@@ -25,24 +21,8 @@ export class DenoStreamStorage implements StreamStorage {
     return `${this.dataDir}/streams/${streamId}`;
   }
 
-  vodPath(streamId: string, filename: string): string {
-    return `${this.streamDir(streamId)}/vod/${filename}`;
-  }
-
-  chatPath(streamId: string, filename: string): string {
-    return `${this.streamDir(streamId)}/chat/${filename}`;
-  }
-
   artifactPath(streamId: string, name: string): string {
     return `${this.streamDir(streamId)}/${name}`;
-  }
-
-  thumbnailPath(streamId: string, name: string): string {
-    return `${this.streamDir(streamId)}/thumbnails/${name}`;
-  }
-
-  exportPath(streamId: string, filename: string): string {
-    return `${this.streamDir(streamId)}/exports/${filename}`;
   }
 
   async ensureStreamDirs(streamId: string): Promise<void> {

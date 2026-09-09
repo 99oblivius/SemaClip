@@ -33,7 +33,6 @@ export interface JobRepository {
 export interface ClipRepository {
   save(clip: Clip): Promise<void>;
   findById(id: string): Promise<Clip | null>;
-  listByJob(jobId: string): Promise<Clip[]>;
   listByStream(streamId: string, filter?: { axis?: Axis; rejected?: boolean }): Promise<Clip[]>;
   update(clip: Clip): Promise<void>;
 }
@@ -57,16 +56,8 @@ export interface StreamMetadataRepository {
 export interface StreamStorage {
   /** Root directory for a stream's artifacts. */
   streamDir(streamId: string): string;
-  /** Path for the stream's VOD file. */
-  vodPath(streamId: string, filename: string): string;
-  /** Path for the stream's chat file. */
-  chatPath(streamId: string, filename: string): string;
   /** Path for a derived artifact (e.g. waveform.json, density.json). */
   artifactPath(streamId: string, name: string): string;
-  /** Path for a thumbnail image. */
-  thumbnailPath(streamId: string, name: string): string;
-  /** Path for an exported clip. */
-  exportPath(streamId: string, filename: string): string;
   /** Ensure all subdirectories exist for a stream. */
   ensureStreamDirs(streamId: string): Promise<void>;
   /** Delete all artifacts for a stream (called on stream deletion). */
@@ -151,12 +142,9 @@ export const JOB_STATUS_TOPIC = "job:status";
 export const STREAM_STATUS_TOPIC = "stream:status";
 export const DOWNLOAD_PROGRESS_TOPIC = "download:progress";
 
-// ── Clock port (testability) ───────────────────────────────────
-
-export interface Clock {
-  now(): Date;
-  isoNow(): string;
-}
+// ── Clock note: no Clock port — domain code uses `new Date()` directly. A
+// clock abstraction earned nothing at this size (v1 declared one, nothing
+// implemented it). Reintroduce only when a test genuinely needs frozen time.
 
 // ── File system port ───────────────────────────────────────────
 

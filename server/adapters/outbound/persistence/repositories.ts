@@ -176,16 +176,6 @@ export class SqliteJobRepository implements JobRepository {
   async delete(id: string): Promise<void> {
     await this.db.delete(schema.jobs).where(eq(schema.jobs.id, id)).run();
   }
-
-  /** Shift positions of queued jobs after a deletion/cancellation. */
-  async compactPositions(): Promise<void> {
-    const queued = await this.listQueued();
-    for (let i = 0; i < queued.length; i++) {
-      if (queued[i]!.position !== i) {
-        await this.update({ ...queued[i]!, position: i });
-      }
-    }
-  }
 }
 
 // ── Clip repository ─────────────────────────────────────────────
@@ -215,13 +205,6 @@ export class SqliteClipRepository implements ClipRepository {
   async findById(id: string): Promise<Clip | null> {
     const rows = await this.db.select().from(schema.clips).where(eq(schema.clips.id, id)).limit(1).all();
     return rows[0] ? rowToClip(rows[0]) : null;
-  }
-
-  async listByJob(jobId: string): Promise<Clip[]> {
-    const rows = await this.db.select().from(schema.clips)
-      .where(eq(schema.clips.job_id, jobId))
-      .orderBy(asc(schema.clips.rank)).all();
-    return rows.map(rowToClip);
   }
 
   async listByStream(streamId: string, filter?: { axis?: Axis; rejected?: boolean }): Promise<Clip[]> {

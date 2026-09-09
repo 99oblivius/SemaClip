@@ -1,3 +1,10 @@
+/**
+ * Streams: list/get/delete/update/attach-chat.
+ *
+ * List/Get are thin delegations — they exist as named use-cases so the HTTP
+ * adapter has one dependency shape, not raw repos. The real logic lives in
+ * Delete/Update/AttachChat (multi-step, guarded).
+ */
 import type {
   StreamRepository,
   JobRepository,

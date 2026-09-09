@@ -323,6 +323,9 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
       }
     } finally {
       try { reader.releaseLock(); } catch { /* ok */ }
+      // Client disconnect must not leave a full-speed audio decode running to
+      // EOF — kill the process, then reap it.
+      try { proc.kill(); } catch { /* already exited */ }
       try { await proc.status; } catch { /* ok */ }
     }
   }

@@ -98,7 +98,7 @@ export function buildContainer(config: AppConfig): AppContainer {
   const listClips = new ListClipsUseCase(clipRepo);
   const getClip = new GetClipUseCase(clipRepo);
   const rejectClip = new RejectClipUseCase(clipRepo);
-  const exportClip = new ExportClipUseCase(clipRepo, streamRepo, ffmpeg, fs, config.exportDir);
+  const exportClip = new ExportClipUseCase(clipRepo, streamRepo, ffmpeg, fs, config.exportDir, metadataRepo);
   const manageQueue = new ManageQueueUseCase(jobRepo);
   const settings = new SettingsUseCase(new SqliteSettingsRepository(db), bus);
 
