@@ -132,6 +132,7 @@
         backgroundOpacity: captionBgOpacity,
       },
       outputPath: null,
+      filename: sampleName || null,
     });
   }
 

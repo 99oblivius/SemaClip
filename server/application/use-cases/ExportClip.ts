@@ -31,7 +31,14 @@ export class ExportClipUseCase {
     await this.fs.ensureDir(exportDir);
 
     const ext = input.format === "webm" ? ".webm" : ".mp4";
-    const filename = `semaclip_${clip.axis}_${this.fmtTime(clip.peakTime)}${ext}`;
+    // Client-computed filename from the naming template (P1-2); server
+    // sanitizes as defense-in-depth — the template renders in the browser
+    // where all context (channel, date, preset) lives.
+    const base = input.filename?.trim();
+    const safeBase = base
+      ? base.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 120)
+      : null;
+    const filename = safeBase ? `${safeBase}${ext}` : `semaclip_${clip.axis}_${this.fmtTime(clip.peakTime)}${ext}`;
     const outputPath = `${exportDir}/${filename}`;
 
     // Caption SRT: only a genuinely generated transcript sidecar qualifies.

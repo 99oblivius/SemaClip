@@ -217,6 +217,8 @@ export interface ExportClipInput {
   cropPosition: CropPosition;
   captions: CaptionStyle;
   outputPath: string | null; // null = default location
+  /** Filename without extension; null = server default (semaclip_axis_peaktime). */
+  filename: string | null;
 }
 export interface ExportResult {
   clipId: string;
