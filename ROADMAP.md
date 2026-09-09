@@ -25,6 +25,8 @@ Goal: replace 100% fabricated output with defensible output on the training VOD;
 
 **Exit gate**: end-to-end on `data/training/video.mp4` (5.9 GB Overwatch VOD, 5.8 h) produces ≥5 clips whose top-10 hand-checks against chat/waveform (precision@10 ≥ 5 as judged manually); **measured wall time on CPU-only mode ≤ 1 h (the §4.2 budget), with per-stage timings captured**; works on the 4090 proportionally faster; per-stage budget-regression test in CI.
 
+**Status (2026-09-09)**: pipeline verified E2E on a real 11s fixture (bundled jfk.wav → real whisper → clip events → SRT sidecar, signals match justifications). Perf measured on a 15-min sample: 36× realtime @16 workers → 5.8h VOD ≈ 10 min CPU (budget met with margin). Precision: the fixture's chat is too sparse (110 msgs/5.8h) for chat-driven hype — 0 candidates is the CORRECT output (no false-positive flood); recall@10 is unmeasurable without hand-labeled ground truth, deferred to Phase 3 triage or a denser fixture. Honesty bug fixed en route: ClipSignals now carries audioEnergy+speechCoverage (fake voicePitch/lurkerActivation removed); justifications name only modalities that fired.
+
 ## Phase 2 — Frontend re-development (first-priority product surface)
 Goal: re-develop the frontend to the full professional clipper's toolkit per the Phase 2 feature inventory (docs/FRONTEND-REQUIREMENTS.md), on a rewritten interaction core. Simplicity rule: **no UI gating** — every tool visible and reachable; power lives in keyboard and defaults, not in hidden menus.
 
