@@ -45,7 +45,13 @@ function rankInternal(candidates: Candidate[], opts: PipelineOptions): Candidate
     byAxis.set(c.axis, list);
   }
 
-  // Percentile + z-boost within axis.
+  // Percentile + z-boost within axis, blended with the absolute excess score.
+  // Percentile alone saturates: with 100+ candidates per axis (dense chat),
+  // the top quintile all reads 1.00 and rank order within it is lost. The
+  // absolute score (excess × gain, already 0-1) preserves magnitude; the
+  // percentile preserves "best of this stream" context. 50/50 keeps a
+  // moderate burst in a quiet stream competitive with a huge burst in a
+  // wild one — which is the point of axis-relative ranking.
   for (const [, list] of byAxis) {
     const scores = list.map((c) => c.score);
     const mean = scores.reduce((a, b) => a + b, 0) / Math.max(1, list.length);
@@ -53,7 +59,8 @@ function rankInternal(candidates: Candidate[], opts: PipelineOptions): Candidate
     for (const c of list) {
       const pct = list.filter((o) => o.score <= c.score).length / list.length;
       const z = std > 0 ? (c.score - mean) / std : 0;
-      c.score = Math.min(1, pct * (1 + Math.max(0, z) * 0.1));
+      const relative = Math.min(1, pct * (1 + Math.max(0, z) * 0.1));
+      c.score = clamp01(0.5 * relative + 0.5 * c.score);
     }
   }
 
@@ -96,3 +103,7 @@ export function candidateToClipEvent(jobId: string, c: Candidate, id: string): E
 }
 
 export type { ClipSignals };
+
+function clamp01(v: number): number {
+  return Math.max(0, Math.min(1, v));
+}

@@ -41,7 +41,7 @@ for (let s = 0; s < durationSec; s++) {
   const c = chat[s]!;
   E[s] = 1.0 * Math.min(1, c.velocity / 10) + 1.4 * Math.min(1, c.emoteDensity / 8) + 0.5 * c.capsRatio;
 }
-const baselines = computeBaselines(E, durationSec, { localWindowSec: 1800, globalFloor: 0.5 });
+const baselines = computeBaselines(E, durationSec, { localWindowSec: 300, outlierK: 3, minSpread: 0.02 });
 const t5 = performance.now();
 console.log(`[baselines] global=${baselines.global.toFixed(3)} in ${((t5 - t4) / 1000).toFixed(2)}s`);
 

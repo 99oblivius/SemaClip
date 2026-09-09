@@ -40,7 +40,7 @@ for (let s = 0; s < duration; s++) {
   E[s] = (c ? Math.min(1, c.velocity / 10) + 1.4 * Math.min(1, c.emoteDensity / 8) + 0.5 * c.capsRatio : 0)
     + 0.6 * Math.min(1, (a?.rms ?? 0) * 3);
 }
-const baselines = computeBaselines(E, duration, { localWindowSec: 1800, globalFloor: 0.5 });
+const baselines = computeBaselines(E, duration, { localWindowSec: 300, outlierK: 3, minSpread: 0.02 });
 const candidates = runDetection(features, baselines, [], [new HypeDetector()], { maxClips: 50, minSlotsPerAxis: 1 });
 
 function fmt(sec: number): string {

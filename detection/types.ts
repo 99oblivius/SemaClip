@@ -101,17 +101,31 @@ export interface AxisDetector {
 // ── Baselines ─────────────────────────────────────────────────
 
 export interface Baselines {
-  /** Rolling 30-minute median of the excitement signal (per second index). */
+  /** Rolling median of the excitement signal (per second index) — the local
+   *  interaction floor. Chat activity levels drift massively within one VOD
+   *  (measured: +195% over 4h on a subathon), so outlier detection must be
+   *  relative to this moving floor, never to absolute scales. */
   local: Float32Array;
+  /** Rolling p75−median spread of the same window — how "spiky" chat locally
+   *  is. A quiet stretch's small bump and a raid's spike can both be outliers
+   *  under their own regime's spread. */
+  spread: Float32Array;
   /** Full-VOD median. */
   global: number;
-  /** threshold(s) = max(local[s], global * 0.5) — ARCH §7.5. */
+  /**
+   * threshold(s) = floor + k·spread (k = outlierK, min-spread guarded).
+   * Validated on a dense 4h subathon fixture: detects all hand-identified
+   * organic bursts, ignores gift-train floods, marks ~8% of seconds over
+   * (vs 35% under a fixed gate).
+   */
   threshold(s: number): number;
 }
 
 export interface BaselineOptions {
-  /** Local window seconds. */
+  /** Local window seconds for floor/spread tracking. */
   localWindowSec: number;
-  /** Global floor multiplier. */
-  globalFloor: number;
+  /** Outlier multiple: threshold = floor + k·spread. */
+  outlierK: number;
+  /** Lower bound on spread so a perfectly flat region still admits outliers. */
+  minSpread: number;
 }

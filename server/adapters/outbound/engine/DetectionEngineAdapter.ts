@@ -169,7 +169,7 @@ export class DetectionEngineAdapter {
       E[s] = (c ? Math.min(1, c.velocity / 10) + 1.4 * Math.min(1, c.emoteDensity / 8) + 0.5 * c.capsRatio : 0)
         + 0.6 * Math.min(1, (a?.rms ?? 0) * 3);
     }
-    const baselines = computeBaselines(E, durationSec, { localWindowSec: 1800, globalFloor: 0.5 });
+    const baselines = computeBaselines(E, durationSec, { localWindowSec: 300, outlierK: 3, minSpread: 0.02 });
     this.emit({ type: "progress", jobId, phase: "segmentation", percent: 1 });
     endStage("segmentation");
 

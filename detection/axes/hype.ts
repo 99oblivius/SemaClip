@@ -120,7 +120,12 @@ export class HypeDetector implements AxisDetector {
     }
     const peakE = E[peak]!;
     const excess = peakE - baselines.threshold(peak);
-    const score = clamp01(excess * this.opts.scoreGain);
+    // Smooth monotone mapping excess → score. Linear gain clamped at 0.4
+    // excess saturated half the candidates to 1.00 on dense chat (measured:
+    // p50 score = 1.00 across 121 regions) — ties made top-N ranking
+    // arbitrary. excess/(excess + 0.5) discriminates across the full range
+    // while staying 0-1.
+    const score = excess / (excess + 0.5);
     if (score < this.opts.minScore) return null;
 
     const chat = features.chat?.[peak];

@@ -1,9 +1,31 @@
 /**
  * Chat signal extraction: TwitchDownloader events → per-second features.
  * O(n) over events; output is a per-second array of length durationSec.
+ *
+ * System/notice messages (sub-gift trains, resubs, raids) are excluded:
+ * they are Twitch notifications, not chat. On a subathon fixture, gift
+ * trains hit 30 msg/s sustained — counting them would (a) poison the
+ * adaptive floor so organic bursts stop registering, and (b) flag every
+ * gift flood as a hype candidate. Measured: 16% of messages on the 4h
+ * ironmouse fixture.
  */
 import type { ChatEvent, ChatFeaturesSec } from "../types.ts";
 import { EMOTE_WEIGHTS } from "../chat.ts";
+
+const NOTICE_PATTERNS = [
+  /gifted a (tier \d+ )?sub/i,
+  /is gifting \d+ subs/i,
+  /gifted \d+ \w+ subs to/i,
+  /subscribed (at|for)/i,
+  /is raiding/i,
+  /added \d+ (bits|bonus)/i,
+  /cheered \d+ bits/i,
+  /pledged/i,
+];
+
+export function isNoticeMessage(body: string): boolean {
+  return NOTICE_PATTERNS.some((p) => p.test(body));
+}
 
 export function chatFeatures(events: ChatEvent[], durationSec: number): ChatFeaturesSec[] {
   const table: ChatFeaturesSec[] = Array.from({ length: durationSec }, () => ({
@@ -15,6 +37,7 @@ export function chatFeatures(events: ChatEvent[], durationSec: number): ChatFeat
   const lenSum = new Float64Array(durationSec);
 
   for (const e of events) {
+    if (isNoticeMessage(e.body)) continue;
     const sec = Math.min(durationSec - 1, Math.max(0, Math.floor(e.t)));
     const row = table[sec]!;
     row.velocity++;

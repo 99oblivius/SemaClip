@@ -83,7 +83,7 @@ Deno.test("audio features: RMS of silence ≈ 0, of tone > 0", () => {
 Deno.test("baselines: threshold = max(local median, global × floor)", () => {
   const E = new Float32Array(100);
   for (let s = 0; s < 100; s++) E[s] = s / 100; // ramp 0..0.99
-  const b = computeBaselines(E, 100, { localWindowSec: 10, globalFloor: 0.5 });
+  const b = computeBaselines(E, 100, { localWindowSec: 10, outlierK: 3, minSpread: 0.02 });
   // Global median of a uniform ramp ≈ 0.495 → floor ≈ 0.2475.
   assertEquals(b.global > 0.4 && b.global < 0.6, true);
   assertEquals(b.threshold(50) >= b.local[50]!, true);
@@ -105,7 +105,7 @@ Deno.test("hype detector fires on a synthetic chat burst above baseline", () => 
   const features: FeatureTable = { durationSec: DUR, chat, audio: null, transcript: null };
   // Threshold fixed low: the burst's emote mass towers over baseline chatter.
   const baselines: Baselines = {
-    local: new Float32Array(DUR), global: 0.05, threshold: () => 0.08,
+    local: new Float32Array(DUR), spread: new Float32Array(DUR), global: 0.05, threshold: () => 0.08,
   };
   const candidates = new HypeDetector().detect(features, baselines, []);
 
@@ -126,7 +126,7 @@ Deno.test("hype detector: quiet stream produces zero candidates", () => {
   const chat = chatFeatures(events, DUR);
   const features: FeatureTable = { durationSec: DUR, chat, audio: null, transcript: null };
   const baselines: Baselines = {
-    local: new Float32Array(DUR), global: 1.0, threshold: () => 0.5,
+    local: new Float32Array(DUR), spread: new Float32Array(DUR), global: 1.0, threshold: () => 0.5,
   };
   assertEquals(new HypeDetector().detect(features, baselines, []).length, 0);
 });
@@ -142,7 +142,7 @@ Deno.test("pipeline: runs detectors, ranks, respects maxClips", () => {
   }));
   const ranked = runDetection(
     { durationSec: DUR, chat: null, audio: null, transcript: null },
-    { local: new Float32Array(DUR), global: 0, threshold: () => 0 },
+    { local: new Float32Array(DUR), spread: new Float32Array(DUR), global: 0, threshold: () => 0 },
     [],
     [
       { axis: "hype", detect: () => cands },
