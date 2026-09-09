@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createQuery, createMutation, useQueryClient } from '@tanstack/svelte-query';
+  import { page } from '$app/stores';
   import { apiClient } from '$lib/api/client';
   import { playerStore } from '$lib/stores/player';
   import Icon from '$lib/components/Icon.svelte';
@@ -9,8 +10,8 @@
   const queryClient = useQueryClient();
 
   // Selected clip: ?clip=<id> query param, else the first un-rejected clip.
-  const urlParams = new URLSearchParams(window.location.search);
-  let selectedClipId = $state(urlParams.get('clip'));
+  // SSR: window is undefined — $page.url is the SSR-safe equivalent.
+  let selectedClipId = $state($page.url.searchParams.get('clip'));
 
   const streamsQuery = createQuery(() => ({
     queryKey: ['streams'],

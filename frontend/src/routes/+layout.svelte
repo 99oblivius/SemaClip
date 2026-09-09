@@ -6,6 +6,7 @@
   import { QueryClientProvider } from '@tanstack/svelte-query';
   import { onMount, type Snippet } from 'svelte';
   import { page } from '$app/stores';
+  import { browser } from '$app/environment';
   import type { PageData } from './$types';
 
   let { children, data }: { children: Snippet; data: PageData } = $props();
@@ -27,6 +28,9 @@
   ]);
 
   function reviewHref(): string {
+    // SSR has no localStorage — dev-mode SSR crashed on undefined (500 on /).
+    // The rail just falls back to Library during SSR; hydration replaces it.
+    if (!browser) return '/';
     const last = localStorage.getItem('semaclip-last-stream');
     return last ? `/stream/${last}` : '/';
   }
