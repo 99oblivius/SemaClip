@@ -159,9 +159,35 @@ export interface GpuCapability {
   ok: boolean;
   /** Human-readable reason when not ok (probing logs, settings UI). */
   reason?: string;
+  /** Verified device args (e.g. -vaapi_device /dev/dri/renderD128) — the
+   *  work chain must reuse the probed device, not ffmpeg's default pick
+   *  (which on multi-GPU machines can be a decode-only node). */
+  deviceArgs?: string[] | undefined;
 }
 
-export async function probeGpuEncoder(opts: { ffmpegPath?: string | undefined; forced?: GpuBackend | undefined } = {}): Promise<GpuCapability> {
+let cache: GpuCapability | null = null;
+/** Backends that failed on real input this process — probe skips them. */
+const blacklisted = new Set<GpuBackend>();
+/** Probe once per process; Settings visits and proxy runs share the result. */
+export async function probeGpuEncoderCached(): Promise<GpuCapability> {
+  if (!cache) {
+    let cap = await probeGpuEncoder();
+    if (cap.backend !== "cpu" && blacklisted.has(cap.backend)) {
+      cap = await probeGpuEncoder({ skip: blacklisted });
+    }
+    cache = cap;
+  }
+  return cache;
+}
+
+/** Blacklist a backend that verified at probe time but failed on real
+ *  input; the next proxy run re-probes with it excluded. */
+export function blacklistGpuBackend(backend: GpuBackend): void {
+  blacklisted.add(backend);
+  cache = null;
+}
+
+export async function probeGpuEncoder(opts: { ffmpegPath?: string | undefined; forced?: GpuBackend | undefined; skip?: Set<GpuBackend> | undefined } = {}): Promise<GpuCapability> {
   const ffmpegPath = opts.ffmpegPath ?? "ffmpeg";
   const platform: "linux" | "windows" = Deno.build.os === "windows" ? "windows" : "linux";
 
@@ -173,17 +199,23 @@ export async function probeGpuEncoder(opts: { ffmpegPath?: string | undefined; f
 
   for (const c of candidates) {
     if (opts.forced && c.backend !== opts.forced) continue;
+    if (opts.skip?.has(c.backend)) continue;
     // VAAPI: try each render node — the first that passes wins. Render
     // nodes are enumerated generically (no /dev/dri on some systems).
-    const deviceVariants: Array<typeof c> = c.deviceArgs
+    const deviceVariants: Array<{ chain: typeof c; dev?: string }> = c.deviceArgs
       ? (await listRenderNodes()).map((dev) => ({
-          ...c,
-          hwaccelArgs: [...c.hwaccelArgs, ...c.deviceArgs!(dev)],
+          chain: { ...c, hwaccelArgs: [...c.hwaccelArgs, ...c.deviceArgs!(dev)] },
+          dev,
         }))
-      : [c];
-    for (const variant of deviceVariants) {
+      : [{ chain: c }];
+    for (const { chain: variant, dev } of deviceVariants) {
       if (await testEncode(ffmpegPath, variant, 540)) {
-        return { backend: c.backend, ok: true, reason: `${c.encoder} verified (${variant.hwaccelArgs.join(" ")})` };
+        return {
+          backend: c.backend,
+          ok: true,
+          reason: `${c.encoder} verified (${variant.hwaccelArgs.join(" ")})`,
+          deviceArgs: c.deviceArgs && dev ? c.deviceArgs(dev) : undefined,
+        };
       }
     }
   }
@@ -206,7 +238,7 @@ export function proxyEncodeArgs(cap: GpuCapability, height: number): {
   }
   const c = CANDIDATES.find((x) => x.backend === cap.backend)!;
   return {
-    hwaccelArgs: c.hwaccelArgs,
+    hwaccelArgs: [...c.hwaccelArgs, ...(cap.deviceArgs ?? [])],
     vf: c.workVf.replace("{H}", String(height)),
     encoderArgs: ["-c:v", c.encoder, ...c.encoderArgs],
   };

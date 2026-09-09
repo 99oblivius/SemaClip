@@ -1,13 +1,5 @@
 import type { FFmpegExportPort, MediaProbePort } from "@/application/ports/outbound.ts";
-import { probeGpuEncoder, proxyEncodeArgs, type GpuCapability } from "./gpu-probe.ts";
-
-/** Process-wide GPU capability cache — probing spawns short ffmpeg runs;
- *  once is right. Invalidated to CPU on runtime hardware failure. */
-let gpuCache: GpuCapability | null = null;
-async function probeGpuEncoderCached(): Promise<GpuCapability> {
-  if (!gpuCache) gpuCache = await probeGpuEncoder();
-  return gpuCache;
-}
+import { probeGpuEncoderCached, proxyEncodeArgs, blacklistGpuBackend } from "./gpu-probe.ts";
 
 type ExportInput = Parameters<FFmpegExportPort["exportClip"]>[0];
 
@@ -83,8 +75,10 @@ export class FFmpegAdapter implements FFmpegExportPort, MediaProbePort {
           input.outputPath,
         ];
         await this.run(cpuArgs);
-        // Don't trust this backend again this process.
-        gpuCache = { backend: "cpu", ok: true, reason: "hardware encode failed at runtime — CPU fallback" };
+        // Don't trust this backend blindly again — blacklist it so the
+        // next proxy run re-probes excluding it (the failure may have been
+        // input-specific, but repeated failures would cost ~11s each).
+        blacklistGpuBackend(cap.backend);
       } else {
         throw err;
       }
