@@ -23,6 +23,7 @@ import {
   downloadProgressive,
   type HlsQuality,
 } from "./hls.ts";
+import { downloadChat } from "./chat-fetch.ts";
 
 export type DownloadPartKind = "chat" | "markers" | "scrub" | "hq";
 export type DownloadPartStatus = "pending" | "running" | "done" | "failed" | "skipped";
@@ -46,6 +47,9 @@ export interface DownloadState {
   scrubFrontierSec: number;
   scrubPath: string | null;
   hqPath: string | null;
+  /** Path of the fetched chat JSON (progressive part 1). */
+  chatPath: string | null;
+  chatCount: number;
   qualities: { name: string; width: number; height: number }[];
   startedAt: string | null;
 }
@@ -117,6 +121,8 @@ export class DownloadOrchestrator {
       scrubFrontierSec: 0,
       scrubPath: null,
       hqPath: null,
+      chatPath: null,
+      chatCount: 0,
       qualities: [],
       startedAt: null,
     };
@@ -156,6 +162,8 @@ export class DownloadOrchestrator {
       scrubFrontierSec: 0,
       scrubPath: null,
       hqPath: null,
+      chatPath: null,
+      chatCount: 0,
       qualities: [],
       startedAt: new Date().toISOString(),
     };
@@ -166,9 +174,41 @@ export class DownloadOrchestrator {
     // Chat/markers are near-instant next to video; tiny fixed weights.
     rt.get("chat")!.weightBytes = 1;
     rt.get("markers")!.weightBytes = 1;
-    rt.get("chat")!.status = "done"; // chat attaches via the import use-case
-    rt.get("chat")!.percent = 1;
-    rt.get("markers")!.status = "done"; // fetched on demand, cached by the route
+
+    // ── Part 1: chat (GQL, page-by-page) ──
+    rt.get("chat")!.status = "running";
+    try {
+      const chatPath = `${opts.destDir}/chat.json`;
+      const n = await downloadChat(vodId, chatPath, {
+        signal: opts.signal,
+        onProgress: ({ comments }) => {
+          const part = rt.get("chat")!;
+          // Percent unknown until done — show pages as pseudo-percent via
+          // log scale (chat pages are tiny; the bar mainly proves liveness).
+          part.percent = Math.min(0.95, Math.log10(1 + comments) / 4);
+          void this.persist(opts.streamId, state, rt);
+        },
+      });
+      rt.get("chat")!.status = "done";
+      rt.get("chat")!.percent = 1;
+      state.chatPath = chatPath;
+      state.chatCount = n;
+    } catch (err) {
+      if (opts.signal?.aborted) {
+        rt.get("chat")!.status = "failed";
+        rt.get("chat")!.error = "aborted";
+        rt.get("markers")!.status = "skipped";
+        rt.get("scrub")!.status = "skipped";
+        rt.get("hq")!.status = "skipped";
+        return this.finalize(opts.streamId, state, rt);
+      }
+      // Chat failure doesn't block video — the stream can still be reviewed.
+      this.fail(rt.get("chat")!, err);
+    }
+    await this.persist(opts.streamId, state, rt);
+
+    // ── Part 2: markers (fetched on demand + cached by the API route) ──
+    rt.get("markers")!.status = "done";
     rt.get("markers")!.percent = 1;
 
     // ── Quality resolution (any failure fails both video parts) ──

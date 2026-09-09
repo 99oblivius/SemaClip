@@ -117,13 +117,16 @@ export class ImportStreamByUrlUseCase {
     this.aborts.delete(streamId);
 
     // Point the stream at the best downloaded media: HQ if present, else
-    // the scrub file (single-download case). Chat arrives via twitch-dl
-    // separately if the orchestrator marked it pending.
+    // the scrub file (single-download case), plus the fetched chat.
     const existing = await this.streams.findById(streamId);
     if (!existing) return;
     const best = result.hqPath ?? result.scrubPath;
-    if (best) {
-      await this.streams.update({ ...existing, vodPath: best });
+    if (best || result.chatPath) {
+      await this.streams.update({
+        ...existing,
+        ...(best ? { vodPath: best } : {}),
+        ...(result.chatPath ? { chatPath: result.chatPath } : {}),
+      });
     }
   }
 

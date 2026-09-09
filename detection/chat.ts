@@ -51,8 +51,19 @@ export function parseTwitchChatJson(raw: string): ParsedChat {
     throw new Error("Chat JSON has no comments array — not TwitchDownloader format");
   }
 
+  // TwitchDownloader-compatible shape: duration falls back to the max
+  // comment offset when the fuller `video.length` field is absent (the GQL
+  // chat fetcher writes only comments; duration comes from stream metadata).
   const video = (data.video ?? {}) as Record<string, unknown>;
-  const durationSec = typeof video.length === "number" ? video.length : null;
+  let durationSec = typeof video.length === "number" ? video.length : null;
+  if (durationSec === null) {
+    let maxT = 0;
+    for (const c of Array.isArray(comments) ? comments : []) {
+      const t = (c as Record<string, unknown>).content_offset_seconds;
+      if (typeof t === "number" && Number.isFinite(t) && t > maxT) maxT = t;
+    }
+    durationSec = maxT > 0 ? Math.ceil(maxT) : null;
+  }
 
   const streamerObj = (data.streamer ?? {}) as Record<string, unknown>;
   const streamer = typeof streamerObj.login === "string" ? streamerObj.login : null;
