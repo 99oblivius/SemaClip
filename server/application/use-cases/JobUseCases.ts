@@ -209,8 +209,18 @@ export class StartJobUseCase {
         await this.settleJob(jobId, stream, { type: "fail", error: event.message });
         break;
       }
+      case "segment": {
+        // Regimes accumulate in metadata as they arrive; the timeline reads
+        // the persisted list rather than replaying WS events after reload.
+        if (!this.metadata) break;
+        const raw = await this.metadata.get(stream.id, "regimes_json");
+        const list = raw ? (JSON.parse(raw) as { start: number; end: number; type: string }[]) : [];
+        list.push({ start: event.start, end: event.end, type: event.regime });
+        await this.metadata.set(stream.id, "regimes_json", JSON.stringify(list));
+        break;
+      }
       default:
-        // progress, segment, candidate events forwarded to WS clients via the bus.
+        // progress, candidate events forwarded to WS clients via the bus.
         break;
     }
   }

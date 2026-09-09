@@ -6,7 +6,7 @@ import type {
   MediaProbePort,
 } from "@/application/ports/outbound.ts";
 import { DOWNLOAD_PROGRESS_TOPIC } from "@/application/ports/outbound.ts";
-import type { ImportByFileInput, ImportByUrlInput, ImportResult } from "shared/types";
+import type { ImportByFileInput, ImportByUrlInput, ImportResult, Stream } from "shared/types";
 import { createStream } from "@/domain/mod.ts";
 import type { DownloadOrchestrator } from "@/adapters/outbound/vod/download-orchestrator.ts";
 import { fetchVodMeta, extractVodId } from "@/adapters/outbound/vod/hls.ts";
@@ -113,6 +113,10 @@ export class ImportStreamByUrlUseCase {
       maxQualityHeight: input.maxQualityHeight ?? null,
       includeScrub: input.includeScrub ?? true,
       signal: controller.signal,
+      // Attach each artifact to the stream record the moment its part
+      // completes — review can start on scrub while HQ still downloads,
+      // and chat lands even if a later video pass fails.
+      onPartDone: (kind, state) => this.attachPart(streamId, kind, state),
     });
     this.aborts.delete(streamId);
 
@@ -128,6 +132,24 @@ export class ImportStreamByUrlUseCase {
         ...(result.chatPath ? { chatPath: result.chatPath } : {}),
       });
     }
+  }
+
+  /** Point the stream at each artifact as its part completes. */
+  private async attachPart(
+    streamId: string,
+    kind: "chat" | "markers" | "scrub" | "hq",
+    state: { chatPath: string | null; scrubPath: string | null; hqPath: string | null },
+  ): Promise<void> {
+    const existing = await this.streams.findById(streamId);
+    if (!existing) return;
+    const patch: Partial<Stream> = {};
+    if (kind === "chat" && state.chatPath) patch.chatPath = state.chatPath;
+    if (kind === "scrub" && state.scrubPath && !existing.vodPath.includes("/scrub.ts")) {
+      patch.vodPath = state.scrubPath;
+    }
+    if (kind === "hq" && state.hqPath) patch.vodPath = state.hqPath;
+    if (Object.keys(patch).length === 0) return;
+    await this.streams.update({ ...existing, ...patch });
   }
 
   /** Cancel an in-flight progressive download (route: DELETE /download). */

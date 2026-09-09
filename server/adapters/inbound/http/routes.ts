@@ -302,6 +302,15 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     return c.json({ markers });
   });
 
+  // ── Regimes: persisted segmentation boundaries for the timeline ──
+  app.get("/api/streams/:id/regimes", async (c) => {
+    const stream = await deps.getStream.execute(c.req.param("id"));
+    if (!stream) return c.json({ error: "Stream not found" }, 404);
+    const raw = await deps.metadata.get(stream.id, "regimes_json");
+    const regimes = raw ? JSON.parse(raw) as { start: number; end: number; type: string }[] : [];
+    return c.json({ regimes });
+  });
+
   // ── Transcript (P0-8): parsed SRT cues for the caption editor ──
   app.get("/api/streams/:id/transcript", async (c) => {
     const stream = await deps.getStream.execute(c.req.param("id"));

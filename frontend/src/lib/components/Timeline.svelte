@@ -36,6 +36,22 @@
   type Marker = { t: number; label: string; source: string };
   let hoveredMarker = $state<Marker | null>(null);
 
+  // ── Regimes layer: persisted segmentation boundaries (lull/gameplay/
+  // chatting/hype). Static per job run; drawn as a top-edge tint band. ──
+  const regimesQuery = createQuery(() => ({
+    queryKey: ['regimes', streamId],
+    queryFn: () => apiClient.getRegimes(streamId),
+    staleTime: Infinity,
+  }));
+  type Regime = { start: number; end: number; type: string };
+  let regimes = $derived(regimesQuery.data?.regimes ?? [] as Regime[]);
+  const REGIME_COLORS: Record<string, string> = {
+    lull: 'rgba(100, 116, 139, 0.25)',
+    gameplay: 'rgba(100, 116, 139, 0.08)',
+    chatting: 'rgba(56, 189, 248, 0.15)',
+    hype: 'rgba(204, 0, 0, 0.12)',
+  };
+
   function markerClick(m: Marker) {
     onSeek?.(m.t);
     playerStore.update((s) => ({ ...s, pendingSeek: m.t }));
@@ -328,6 +344,29 @@
       if (labelX < lastLabelEnd + 4) continue; // skip overlapping label
       ctx.fillText(label, labelX, 2);
       lastLabelEnd = labelX + labelW;
+    }
+
+    // ── Regime band: bottom-edge tint per regime; boundaries as faint
+    // verticals. Drawn first so markers/clip marks stay on top. ──
+    if (regimes.length > 0) {
+      for (const r of regimes) {
+        const x0 = timeToX(r.start);
+        const x1 = timeToX(r.end);
+        if (x1 < 0 || x0 > w) continue;
+        ctx.fillStyle = REGIME_COLORS[r.type] ?? 'rgba(100, 116, 139, 0.08)';
+        const cx0 = Math.max(0, x0);
+        const cx1 = Math.min(w, x1);
+        ctx.fillRect(cx0, h - 6, cx1 - cx0, 6);
+        // Boundary hairline between regimes.
+        if (x0 > 0 && x0 < w) {
+          ctx.strokeStyle = 'rgba(148, 163, 184, 0.35)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(Math.round(x0) + 0.5, 0);
+          ctx.lineTo(Math.round(x0) + 0.5, h);
+          ctx.stroke();
+        }
+      }
     }
 
     // ── Marker flags (P0-6): hairline with a notch at the top, drawn under

@@ -136,6 +136,8 @@ export class DownloadOrchestrator {
    * Runs the full progressive pipeline. Resolves when every part is terminal
    * (done or failed); live state is readable via getState() throughout.
    * One download per stream at a time — a second run while running throws.
+   * onPartDone fires as each part reaches a terminal status, so consumers
+   * (e.g. chat → stream record) don't wait for the whole pipeline.
    */
   async run(opts: {
     streamId: string;
@@ -146,6 +148,7 @@ export class DownloadOrchestrator {
     maxQualityHeight: number | null;
     includeScrub: boolean;
     signal?: AbortSignal;
+    onPartDone?: (kind: DownloadPartKind, state: DownloadState) => void | Promise<void>;
   }): Promise<DownloadState> {
     const existing = await this.getState(opts.streamId);
     if (existing.phase === "running") {
@@ -193,6 +196,7 @@ export class DownloadOrchestrator {
       rt.get("chat")!.percent = 1;
       state.chatPath = chatPath;
       state.chatCount = n;
+      await opts.onPartDone?.("chat", state);
     } catch (err) {
       if (opts.signal?.aborted) {
         rt.get("chat")!.status = "failed";
@@ -271,6 +275,8 @@ export class DownloadOrchestrator {
       });
       rt.get("scrub")!.status = "done";
       rt.get("scrub")!.percent = 1;
+      state.scrubPath = `${opts.destDir}/scrub.ts`;
+      await opts.onPartDone?.("scrub", state);
     } catch (err) {
       if (opts.signal?.aborted) {
         rt.get("scrub")!.status = "failed";
@@ -305,6 +311,7 @@ export class DownloadOrchestrator {
         rt.get("hq")!.status = "done";
         rt.get("hq")!.percent = 1;
         state.hqPath = `${opts.destDir}/hq.ts`;
+        await opts.onPartDone?.("hq", state);
       } catch (err) {
         this.fail(rt.get("hq")!, err);
       }

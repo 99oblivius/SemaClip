@@ -179,4 +179,7 @@ export const apiClient = {
   // ── Markers (P0-6) ──
   getMarkers: (streamId: string) =>
     api<{ markers: { t: number; label: string; source: string }[] }>(`/streams/${streamId}/markers`),
+
+  getRegimes: (streamId: string) =>
+    api<{ regimes: { start: number; end: number; type: string }[] }>(`/streams/${streamId}/regimes`),
 };

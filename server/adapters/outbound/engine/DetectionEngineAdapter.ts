@@ -18,6 +18,7 @@ import { parseTwitchChatJson } from "../../../../detection/chat.ts";
 import { chatFeatures } from "../../../../detection/signals/chat.ts";
 import { audioFeatures, applyTranscriptCoverage } from "../../../../detection/signals/audio.ts";
 import { computeBaselines } from "../../../../detection/baselines.ts";
+import { computeRegimes } from "../../../../detection/segmentation.ts";
 import { HypeDetector } from "../../../../detection/axes/hype.ts";
 import { ReactionDetector } from "../../../../detection/axes/reaction.ts";
 import { runDetection } from "../../../../detection/pipeline.ts";
@@ -172,13 +173,18 @@ export class DetectionEngineAdapter {
         + 0.6 * Math.min(1, (a?.rms ?? 0) * 3);
     }
     const baselines = computeBaselines(E, durationSec, { localWindowSec: 300, outlierK: 3, minSpread: 0.02 });
+    const regimes = computeRegimes(chat.length > 0 ? chat : null, audio, E, durationSec);
+    this.emit({ type: "progress", jobId, phase: "segmentation", percent: 0.75, message: `${regimes.length} regimes` });
+    for (const r of regimes) {
+      this.emit({ type: "segment", jobId, start: r.start, end: r.end, regime: r.type });
+    }
     this.emit({ type: "progress", jobId, phase: "segmentation", percent: 1 });
     endStage("segmentation");
 
     // ── Axis scoring ──
     beginStage("axis_scoring");
     this.emit({ type: "progress", jobId, phase: "axis_scoring", percent: 0.5 });
-    const candidates = runDetection(features, baselines, [], [new HypeDetector(), new ReactionDetector()], {
+    const candidates = runDetection(features, baselines, regimes, [new HypeDetector(), new ReactionDetector()], {
       maxClips: command.config.maxClips ?? 50,
       minSlotsPerAxis: 1,
     });
