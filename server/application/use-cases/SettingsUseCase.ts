@@ -31,6 +31,30 @@ export function cpuWorkers(tier: AppSettings["cpuUsage"], totalCores: number): n
   return Math.max(1, Math.floor(totalCores * CPU_USAGE_FRACTION[tier]));
 }
 
+/**
+ * Memory ceiling for transcription workers (the 2026-09-09 incident: 16
+ * whisper workers × full-VOD decode paged a 64GB machine). Per-worker RSS
+ * ≈ model + whisper state + decoded audio; after the per-chunk WAV-slice
+ * fix a worker holds ~modelSize + model state + slice (~350MB for base-q5),
+ * but the cap keeps a misconfigured model or huge chunk budget from
+ * repeating the failure regardless.
+ */
+export const TRANSCRIBE_WORKER_MEM_BUDGET = 0.5; // fraction of total RAM whisper workers may use
+export const TRANSCRIBE_WORKER_MEM_FLOOR = 1; // always allow at least one worker
+
+/** Clamp worker count so estimated per-worker RSS fits the memory budget.
+ *  perWorkerBytes: caller-provided estimate (model + chunk PCM + overhead). */
+export function memoryCappedWorkers(
+  requested: number,
+  totalMemBytes: number,
+  perWorkerBytes: number,
+): number {
+  if (perWorkerBytes <= 0) return requested;
+  const budget = totalMemBytes * TRANSCRIBE_WORKER_MEM_BUDGET;
+  const capped = Math.floor(budget / perWorkerBytes);
+  return Math.max(TRANSCRIBE_WORKER_MEM_FLOOR, Math.min(requested, capped));
+}
+
 /** Shallow-merges a persisted/incoming partial onto defaults, dropping unknown
  *  keys so a stale client can't pollute the shape. */
 function coerce(raw: unknown): AppSettings {

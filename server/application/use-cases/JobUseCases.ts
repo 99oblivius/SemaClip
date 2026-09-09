@@ -29,6 +29,9 @@ import { PythonEngineAdapter } from "@/adapters/outbound/engine/PythonEngineAdap
 export class StartJobUseCase {
   /** Max silence from the engine before the job fails. Generous — cold model
    *  loads can take minutes — but bounded. */
+  // 5 min of event silence = dead engine. Stages that can legitimately run
+  // longer emit heartbeats (e.g. proxy_generation); the watchdog is the
+  // backstop, not a stage timeout.
   private static readonly EVENT_WATCHDOG_MS = 5 * 60 * 1000;
 
   constructor(

@@ -12,6 +12,7 @@
  * nothing relies on system-installed packages.
  */
 import type { TranscriptSegment } from "../../../../detection/types.ts";
+import { memoryCappedWorkers } from "@/application/use-cases/SettingsUseCase.ts";
 
 export interface WhisperPaths {
   /** Directory containing whisper-cli + whisper-vad-speech-segments (+ libs). */
@@ -48,6 +49,32 @@ export class TranscribeAdapter {
   ) {}
 
   /**
+   * CPU-tier worker count clamped by a host memory budget. Per-worker RSS
+   * estimate: model file + whisper context/compute state (~4× model for
+   * base-class models) + the ≤120s decoded slice (~15MB float32).
+   */
+  private async resolveWorkers(requested?: number): Promise<number> {
+    const byCpu = requested ?? Math.min(Math.max(1, (navigator.hardwareConcurrency ?? 4) >> 1), 8);
+    const modelBytes = await Deno.stat(`${this.paths.modelsDir}/${this.paths.modelFile}`)
+      .then((s) => s.size).catch(() => 0);
+    if (modelBytes === 0) return byCpu;
+    const perWorker = modelBytes * 5 + 15 * 1024 * 1024;
+    let totalMem = 8 * 1024 * 1024 * 1024; // conservative fallback
+    try {
+      const mem = new TextDecoder().decode(await Deno.readFile("/proc/meminfo"));
+      const m = /MemTotal:\s+(\d+) kB/.exec(mem);
+      if (m) totalMem = parseInt(m[1]!, 10) * 1024;
+    } catch {
+      // non-Linux (Windows): keep the fallback
+    }
+    const capped = memoryCappedWorkers(byCpu, totalMem, perWorker);
+    if (capped < byCpu) {
+      console.log(`[transcribe] workers ${byCpu} → ${capped} (memory cap: ${Math.round(perWorker / 1024 / 1024)}MB/worker)`);
+    }
+    return capped;
+  }
+
+  /**
    * Full transcription of a VOD. Returns segments with VOD-absolute times.
    */
   async transcribe(
@@ -55,7 +82,7 @@ export class TranscribeAdapter {
     opts: TranscribeOptions = {},
   ): Promise<{ segments: TranscriptSegment[]; totalMs: number; workers: number }> {
     const totalStart = performance.now();
-    const workers = opts.workers ?? Math.min(Math.max(1, (navigator.hardwareConcurrency ?? 4) >> 1), 8);
+    const workers = await this.resolveWorkers(opts.workers);
 
     // 1. Extract 16kHz mono WAV.
     const wavPath = await this.extractAudio(vodPath);
@@ -67,10 +94,15 @@ export class TranscribeAdapter {
     // 3. Chunk speech regions (30-120s targets, 2s tail pad).
     const chunks = this.chunkSpeech(speech, 120, 2);
 
-    // 4. Parallel workers.
+    // 4. Slice the WAV per chunk (each worker reads only its slice — pointing
+    //    every worker at the full file made whisper-cli decode ~1.8GB of PCM
+    //    per process; 16 workers paged the machine). Slicing is cheap: ffmpeg
+    //    -ss/-t copy on pcm_s16le. Chunks are sliced lazily in runChunks so
+    //    at most `workers` slice files exist at once, each ≤ 120s ≈ 3.8MB.
+    // 5. Parallel workers (memory-capped).
     const results = await this.runChunks(wavPath, chunks, workers, opts);
 
-    // 5. Merge (offset-corrected, sorted).
+    // 6. Merge (offset-corrected, sorted).
     const segments = results
       .flatMap((r) => r.segments.map((s) => ({ start: s.start + r.offset, end: s.end + r.offset, text: s.text })))
       .sort((a, b) => a.start - b.start);
@@ -158,6 +190,9 @@ export class TranscribeAdapter {
     const results: ChunkResult[] = [];
     let next = 0;
     let done = 0;
+    // Slice-file registry for cleanup: slices are created lazily per chunk
+    // and removed once their result is collected.
+    const slicePaths = new Map<number, string>();
 
     const worker = async (): Promise<void> => {
       for (;;) {
@@ -166,20 +201,59 @@ export class TranscribeAdapter {
         if (opts.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const chunk = chunks[i]!;
         const started = performance.now();
-        const segments = await this.transcribeChunk(wavPath, chunk);
-        results.push({ offset: chunk.start, segments, elapsedMs: performance.now() - started });
-        done++;
-        opts.onProgress?.(done / chunks.length);
+        // Slice this chunk's audio: whisper-cli then decodes ≤120s of PCM
+        // (~3.8MB) instead of the full VOD (~1.8GB float32).
+        const slicePath = await this.sliceWav(wavPath, chunk, i);
+        slicePaths.set(i, slicePath);
+        try {
+          const segments = await this.transcribeChunk(slicePath, { start: 0, end: chunk.end - chunk.start }, opts.signal);
+          results.push({ offset: chunk.start, segments, elapsedMs: performance.now() - started });
+          done++;
+          opts.onProgress?.(done / chunks.length);
+        } finally {
+          slicePaths.delete(i);
+          await Deno.remove(slicePath).catch(() => {}); // free the slice promptly
+        }
       }
     };
 
-    await Promise.all(Array.from({ length: Math.min(workers, chunks.length) }, worker));
+    try {
+      await Promise.all(Array.from({ length: Math.min(workers, chunks.length) }, worker));
+    } finally {
+      // Abort/failure mid-run: remove any slice files still on disk.
+      for (const p of slicePaths.values()) await Deno.remove(p).catch(() => {});
+    }
     return results;
+  }
+
+  /** Extract chunk [start, end) from the source WAV into a small slice file.
+   *  pcm_s16le copy: sample-accurate seek on plain PCM, no re-encode. */
+  private async sliceWav(
+    wavPath: string,
+    chunk: { start: number; end: number },
+    index: number,
+  ): Promise<string> {
+    const out = await Deno.makeTempFile({ prefix: `semaclip-slice-${index}-`, suffix: ".wav" });
+    const cmd = new Deno.Command(this.ffmpegPath, {
+      args: [
+        "-y", "-i", wavPath,
+        "-ss", String(chunk.start), "-t", String(chunk.end - chunk.start),
+        "-c", "copy", out,
+      ],
+      stdout: "null", stderr: "null",
+    });
+    const status = await cmd.spawn().status;
+    if (!status.success) {
+      await Deno.remove(out).catch(() => {});
+      throw new Error(`WAV slice failed (${status.code}) on chunk ${chunk.start}-${chunk.end}`);
+    }
+    return out;
   }
 
   private async transcribeChunk(
     wavPath: string,
     chunk: { start: number; end: number },
+    signal?: AbortSignal | undefined,
   ): Promise<TranscriptSegment[]> {
     const cli = `${this.paths.binDir}/whisper-cli${Deno.build.os === "windows" ? ".exe" : ""}`;
     const model = `${this.paths.modelsDir}/${this.paths.modelFile}`;
@@ -189,6 +263,8 @@ export class TranscribeAdapter {
         "-f", wavPath,
         // Default output = timestamped lines on stdout: "[00:00:02.000 --> 00:00:10.400] text".
         // (-otxt strips timestamps — unusable for segment extraction.)
+        // The wav is pre-sliced to the chunk, so no -ot/-d windowing needed
+        // (kept for parity if a caller passes an unsliced path).
         "-np", // no prints
         "-ot", String(Math.round(chunk.start * 1000)), // offset-t: milliseconds
         "-d", String(Math.round((chunk.end - chunk.start) * 1000)), // duration: milliseconds
@@ -199,7 +275,14 @@ export class TranscribeAdapter {
         ? {}
         : { LD_LIBRARY_PATH: this.paths.binDir },
     });
-    const out = await cmd.output();
+    const child = cmd.spawn();
+    // Cancel must kill in-flight whisper processes — the signal is only
+    // checked between chunk dispatches, so a running child would otherwise
+    // keep 2GB+ of RSS alive after the job settled (2026-09-09 incident).
+    const onAbort = () => { try { child.kill(); } catch { /* already exited */ } };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const out = await child.output();
+    signal?.removeEventListener("abort", onAbort);
     if (!out.success) throw new Error(`whisper-cli failed (${out.code}) on chunk ${chunk.start}-${chunk.end}`);
     return this.parseWhisperTxt(new TextDecoder().decode(out.stdout));
   }
