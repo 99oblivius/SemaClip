@@ -92,7 +92,7 @@ export interface ClipSignals {
 // Newline-delimited JSON over stdin/stdout.
 
 export type EngineCommand =
-  | { type: "start"; jobId: string; vodPath: string; chatPath: string | null; config: JobConfig }
+  | { type: "start"; jobId: string; vodPath: string; chatPath: string | null; config: JobConfig; /** Destination for derived artifacts (SRT). */ artifactDir?: string | undefined; /** Worker budget from the CPU-usage tier. */ workers?: number | undefined }
   | { type: "cancel" };
 
 export type EngineEvent =
@@ -219,4 +219,10 @@ export interface AppSettings {
   defaultAspectRatio: AspectRatio;
   defaultCaptions: CaptionStyle;
   engineBinaryPath: string | null;
+  /**
+   * How hard SemaClip may push the CPU ("I bought my CPU to use it" tiers).
+   * slow = ≤25% of cores, medium = ≤50%, fast = all cores. Applied to the
+   * transcription worker pool and whisper thread count; re-probed per job.
+   */
+  cpuUsage: "slow" | "medium" | "fast";
 }

@@ -15,7 +15,20 @@ export const DEFAULT_SETTINGS: AppSettings = {
     backgroundOpacity: 0.8,
   },
   engineBinaryPath: null,
+  cpuUsage: "medium",
 };
+
+/** Worker budget per tier: fraction of total cores usable by workers. */
+export const CPU_USAGE_FRACTION: Record<AppSettings["cpuUsage"], number> = {
+  slow: 0.25,
+  medium: 0.5,
+  fast: 1.0,
+};
+
+/** Worker count for a tier: ceil(cores × fraction), ≥1. */
+export function cpuWorkers(tier: AppSettings["cpuUsage"], totalCores: number): number {
+  return Math.max(1, Math.floor(totalCores * CPU_USAGE_FRACTION[tier]));
+}
 
 /** Shallow-merges a persisted/incoming partial onto defaults, dropping unknown
  *  keys so a stale client can't pollute the shape. */
@@ -40,6 +53,9 @@ function coerce(raw: unknown): AppSettings {
   }
   if (o.engineBinaryPath === null || typeof o.engineBinaryPath === "string") {
     base.engineBinaryPath = o.engineBinaryPath as string | null;
+  }
+  if (o.cpuUsage === "slow" || o.cpuUsage === "medium" || o.cpuUsage === "fast") {
+    base.cpuUsage = o.cpuUsage;
   }
   return base;
 }

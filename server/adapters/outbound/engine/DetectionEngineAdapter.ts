@@ -21,6 +21,7 @@ import { HypeDetector } from "../../../../detection/axes/hype.ts";
 import { runDetection } from "../../../../detection/pipeline.ts";
 import type { FeatureTable, TranscriptSegment } from "../../../../detection/types.ts";
 import { TranscribeAdapter, type WhisperPaths } from "../transcribe/TranscribeAdapter.ts";
+import { toSrt } from "../transcribe/srt.ts";
 import { generateUuid } from "@/infrastructure/uuid.ts";
 
 export interface DetectionEngineConfig {
@@ -121,6 +122,7 @@ export class DetectionEngineAdapter {
     const transcriber = new TranscribeAdapter(this.config.whisper, this.config.ffmpegPath);
     let lastTranscribePct = 0;
     const { segments } = await transcriber.transcribe(vodPath, {
+      workers: command.workers ?? Math.min(Math.max(1, (navigator.hardwareConcurrency ?? 4) >> 1), 8),
       signal: this.abort.signal,
       onProgress: (f) => {
         const pct = Math.floor(f * 100);
@@ -131,6 +133,17 @@ export class DetectionEngineAdapter {
       },
     });
     applyTranscriptCoverage(audio, segments as TranscriptSegment[]);
+
+    // Transcript SRT sidecar — the honest caption path (ExportClipUseCase
+    // refuses captions without this artifact). Written next to the extracted
+    // WAV; the use-case layer is told the path via the complete-adjacent
+    // progress message and persists it in stream_metadata.
+    let srtPath: string | null = null;
+    if (segments.length > 0 && command.artifactDir) {
+      srtPath = `${command.artifactDir}/transcript.srt`;
+      await Deno.writeTextFile(srtPath, toSrt(segments as TranscriptSegment[]));
+      this.emit({ type: "progress", jobId, phase: "transcription", percent: 1, message: `Transcript: ${segments.length} segments` });
+    }
 
     // ── Segmentation + scoring (array math) ──
     this.emit({ type: "progress", jobId, phase: "segmentation", percent: 0.5, message: "Computing baselines…" });

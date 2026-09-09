@@ -5,6 +5,8 @@ import type {
   EnginePort,
   EventBus,
   FileSystemPort,
+  StreamMetadataRepository,
+  StreamStorage,
 } from "@/application/ports/outbound.ts";
 import { ENGINE_EVENT_TOPIC, JOB_STATUS_TOPIC, STREAM_STATUS_TOPIC } from "@/application/ports/outbound.ts";
 import type { Job, JobConfig, EngineEvent, Stream, ClipSignals } from "shared/types";
@@ -37,6 +39,11 @@ export class StartJobUseCase {
     private readonly bus: EventBus,
     private readonly fs: FileSystemPort,
     private readonly eventWatchdogMs: number = StartJobUseCase.EVENT_WATCHDOG_MS,
+    /** Set when the engine is the in-process v2 engine: enables SRT registration. */
+    private readonly metadata?: StreamMetadataRepository | undefined,
+    private readonly storage?: StreamStorage | undefined,
+    /** CPU-usage tier worker budget, resolved from settings at construction. */
+    private readonly workersBudget?: number | undefined,
   ) {}
 
   async execute(streamId: string, config?: JobConfig): Promise<Job> {
@@ -88,12 +95,21 @@ export class StartJobUseCase {
     });
 
     try {
+      // Resolve the per-stream artifact dir before the engine runs, so derived
+      // artifacts (SRT) land in the stream's own directory, not a temp path.
+      let artifactDir: string | undefined;
+      if (this.storage) {
+        await this.storage.ensureStreamDirs(stream.id);
+        artifactDir = this.storage.streamDir(stream.id);
+      }
       await this.engine.start({
         type: "start",
         jobId: job.id,
         vodPath: stream.vodPath,
         chatPath: stream.chatPath,
         config: job.config,
+        artifactDir,
+        workers: this.workersBudget,
       });
       // Engine exited cleanly with no `complete` event → the job would wedge
       // 'running' forever (the v1 queue deadlock). Fail it.
@@ -104,6 +120,18 @@ export class StartJobUseCase {
       const message = stderr.length > 0 ? `${detail} — stderr: …${stderr.slice(-3).join(" | ")}` : detail;
       await this.settleIfRunning(started.id, stream, { type: "fail", error: message });
     } finally {
+      // Register the transcript SRT if the engine wrote one (both success and
+      // failure paths — a partial transcript still enables captioning).
+      if (this.metadata && this.storage) {
+        const srtPath = `${this.storage.streamDir(stream.id)}/transcript.srt`;
+        try {
+          if (await this.fs.exists(srtPath)) {
+            await this.metadata.set(stream.id, "transcript_srt", JSON.stringify({ path: srtPath }));
+          }
+        } catch (err) {
+          console.error(`Job ${job.id}: SRT registration failed:`, err);
+        }
+      }
       if (watchdogTimer !== null) clearTimeout(watchdogTimer);
       unsub();
       unsubWatchdog();

@@ -12,6 +12,7 @@ import { InProcessEventBus } from "@/adapters/outbound/eventbus/mod.ts";
 import { PythonEngineAdapter } from "@/adapters/outbound/engine/mod.ts";
 import { DetectionEngineAdapter } from "@/adapters/outbound/engine/DetectionEngineAdapter.ts";
 import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
+import { DEFAULT_SETTINGS, cpuWorkers } from "@/application/use-cases/SettingsUseCase.ts";
 import { TwitchDlAdapter } from "@/adapters/outbound/vod/mod.ts";
 import { FFmpegAdapter } from "@/adapters/outbound/ffmpeg/mod.ts";
 import {
@@ -101,7 +102,18 @@ export function buildContainer(config: AppConfig): AppContainer {
   const deleteStream = new DeleteStreamUseCase(streamRepo, jobRepo, metadataRepo, streamStorage);
   const updateStream = new UpdateStreamUseCase(streamRepo);
   const attachChat = new AttachChatUseCase(streamRepo, fs);
-  const startJob = new StartJobUseCase(streamRepo, jobRepo, clipRepo, engine, bus, fs);
+  const startJob = new StartJobUseCase(
+    streamRepo,
+    jobRepo,
+    clipRepo,
+    engine,
+    bus,
+    fs,
+    undefined,
+    metadataRepo,
+    streamStorage,
+    cpuWorkers(DEFAULT_SETTINGS.cpuUsage, navigator.hardwareConcurrency ?? 4),
+  );
   const cancelJob = new CancelJobUseCase(jobRepo, streamRepo, engine, bus, startJob);
   const listJobs = new ListJobsUseCase(jobRepo);
   const getStream = new GetStreamUseCase(streamRepo);
