@@ -25,6 +25,7 @@ import type { EventBus, StreamMetadataRepository, StreamStorage, VodDownloadPort
 import type { SqliteExportPresetRepository } from "@/adapters/outbound/persistence/repositories.ts";
 import { parseSrt } from "@/adapters/outbound/transcribe/srt-parse.ts";
 import { cuesToSrt } from "@/adapters/outbound/transcribe/srt-write.ts";
+import { probeGpuEncoder } from "@/adapters/outbound/ffmpeg/gpu-probe.ts";
 
 export interface HttpDeps {
   importByFile: ImportStreamByFileUseCase;
@@ -702,6 +703,15 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
 
     return c.json(devices);
   });
+
+  // ── GPU encode capability (probeGpuEncoder, vendor-aware) ──
+  // Surface the detected encode path so Settings can show what the proxy
+  // will use. Probed live (test-encode), not assumed from vendor strings.
+  app.get("/api/system/gpu-encoder", async (c) => {
+    const cap = await probeGpuEncoder();
+    return c.json({ backend: cap.backend, detail: cap.reason ?? "" });
+  });
+
   // ── Video file serving (range requests for <video>) ──
   // Video streaming — prefers the scrub proxy (P0-10) when one was generated
   // during processing; falls back to the source VOD.

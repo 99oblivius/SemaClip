@@ -1,4 +1,13 @@
 import type { FFmpegExportPort, MediaProbePort } from "@/application/ports/outbound.ts";
+import { probeGpuEncoder, proxyEncodeArgs, type GpuCapability } from "./gpu-probe.ts";
+
+/** Process-wide GPU capability cache — probing spawns short ffmpeg runs;
+ *  once is right. Invalidated to CPU on runtime hardware failure. */
+let gpuCache: GpuCapability | null = null;
+async function probeGpuEncoderCached(): Promise<GpuCapability> {
+  if (!gpuCache) gpuCache = await probeGpuEncoder();
+  return gpuCache;
+}
 
 type ExportInput = Parameters<FFmpegExportPort["exportClip"]>[0];
 
@@ -35,28 +44,56 @@ export class FFmpegAdapter implements FFmpegExportPort, MediaProbePort {
   }
 
   /**
-   * Generates a scrub proxy (P0-10): 960×540-class H.264 with fast settings.
-   * Proxies trade encode time for scrub speed — `veryfast` preset, constant
-   * bitrate-friendly CRF, audio passthrough re-encoded to AAC stereo.
+   * Generates a scrub proxy (P0-10): 960×540-class H.264, hardware-accelerated
+   * when a GPU encoder verifies (nvenc > qsv > vaapi > amf, probed once and
+   * cached; cpu libx264 fallback). Hardware encode releases the CPU — the
+   * measured 12-core libx264 process became ~2s of core-time on NVENC.
    */
-  async generateProxy(input: { vodPath: string; outputPath: string; height: number }): Promise<{ proxyPath: string; durationMs: number }> {
+  async generateProxy(input: { vodPath: string; outputPath: string; height: number }): Promise<{ proxyPath: string; durationMs: number; backend: string }> {
     const start = performance.now();
+    const cap = await probeGpuEncoderCached();
+    const enc = proxyEncodeArgs(cap, input.height);
     const args = [
       "-y",
+      ...enc.hwaccelArgs,
       "-i", input.vodPath,
       "-nostats",
-      "-vf", `scale=-2:${input.height}`,
-      "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+      "-vf", enc.vf,
+      ...enc.encoderArgs,
       "-c:a", "aac", "-b:a", "96k",
       "-movflags", "+faststart", // stream-ready for the <video> element
       input.outputPath,
     ];
-    await this.run(args);
+    try {
+      await this.run(args);
+    } catch (err) {
+      // A hardware path that verified at probe time can still fail on the
+      // real input (odd dimensions, device busy). Fall back to CPU once
+      // rather than failing the whole proxy — detection already finished.
+      if (cap.backend !== "cpu") {
+        console.error(`[ffmpeg] ${cap.backend} proxy failed (${err instanceof Error ? err.message : err}) — retrying on CPU`);
+        const cpuArgs = [
+          "-y",
+          "-i", input.vodPath,
+          "-nostats",
+          "-vf", `scale=-2:${input.height}`,
+          "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+          "-c:a", "aac", "-b:a", "96k",
+          "-movflags", "+faststart",
+          input.outputPath,
+        ];
+        await this.run(cpuArgs);
+        // Don't trust this backend again this process.
+        gpuCache = { backend: "cpu", ok: true, reason: "hardware encode failed at runtime — CPU fallback" };
+      } else {
+        throw err;
+      }
+    }
     const stat = await Deno.stat(input.outputPath);
     if (stat.size < 1024) {
       throw new Error(`Proxy produced suspiciously small file (${stat.size} bytes)`);
     }
-    return { proxyPath: input.outputPath, durationMs: performance.now() - start };
+    return { proxyPath: input.outputPath, durationMs: performance.now() - start, backend: cap.backend };
   }
 
   private async probeDimensions(vodPath: string): Promise<[number, number]> {
