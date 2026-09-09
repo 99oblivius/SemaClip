@@ -137,7 +137,7 @@ Deno.test("pipeline: runs detectors, ranks, respects maxClips", () => {
     axis: i % 2 === 0 ? "hype" : "humor",
     start: i * 3, end: i * 3 + 2, peak: i * 3 + 1,
     score: 0.3 + (i % 7) / 10,
-    signals: { chatExcitement: 0.5, voicePitch: 0, emoteVelocity: 0.4, lurkerActivation: 0 },
+    signals: { chatExcitement: 0.5, emoteVelocity: 0.4, audioEnergy: 0, speechCoverage: 0 },
     justification: null,
   }));
   const ranked = runDetection(

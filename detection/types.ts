@@ -75,9 +75,11 @@ export interface Regime {
 /** Per-signal evidence for a candidate (rendered as the clip's signal bars). */
 export interface ClipSignals {
   chatExcitement: number;
-  voicePitch: number;
   emoteVelocity: number;
-  lurkerActivation: number;
+  /** Audio RMS energy at the peak second (0-1). */
+  audioEnergy: number;
+  /** Fraction of the clip window covered by speech (0-1). */
+  speechCoverage: number;
 }
 
 export interface Candidate {

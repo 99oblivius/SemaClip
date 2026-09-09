@@ -384,9 +384,9 @@
               {#if currentClip.signals}
                 <div class="flex flex-col gap-1.5">
                   <SignalBar label="chat" value={currentClip.signals.chatExcitement} />
-                  <SignalBar label="voice" value={currentClip.signals.voicePitch} />
                   <SignalBar label="emote" value={currentClip.signals.emoteVelocity} />
-                  <SignalBar label="lurker" value={currentClip.signals.lurkerActivation} />
+                  <SignalBar label="audio" value={currentClip.signals.audioEnergy} />
+                  <SignalBar label="speech" value={currentClip.signals.speechCoverage} />
                 </div>
               {:else}
                 <div class="text-xs text-ash-dim italic">No signal data from engine.</div>

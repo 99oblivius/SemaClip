@@ -81,11 +81,20 @@ export interface PersonaState {
 
 // ── Signal breakdown (clip evidence) ──────────────────────────
 
+/**
+ * Per-modality evidence for a clip. Absent modalities are 0 AND the
+ * justification must not cite them (honesty rule: every nonzero signal is
+ * backed by real computation, every zero is a real absence).
+ */
 export interface ClipSignals {
-  chatExcitement: number; // 0-1
-  voicePitch: number;
+  /** Chat velocity+emote excitement at the peak second (0-1). */
+  chatExcitement: number;
+  /** Emote-weighted message velocity (0-1). */
   emoteVelocity: number;
-  lurkerActivation: number;
+  /** Audio RMS energy at the peak second (0-1). */
+  audioEnergy: number;
+  /** Fraction of the clip window covered by speech (0-1, from VAD/whisper). */
+  speechCoverage: number;
 }
 
 // ── Engine IPC protocol (Python ↔ Deno) ───────────────────────

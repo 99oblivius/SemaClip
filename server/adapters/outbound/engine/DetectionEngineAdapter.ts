@@ -255,6 +255,10 @@ export class DetectionEngineAdapter {
     for (let i = 12; i < Math.min(200, raw.byteLength - 8); i++) {
       if (dec.decode(raw.slice(i, i + 4)) === "data") { dataOff = i + 8; break; }
     }
-    return new Int16Array(raw.buffer, dataOff, Math.floor((raw.byteLength - dataOff) / 2));
+    // Int16Array requires an even byteOffset; also guard a truncated header.
+    if (dataOff % 2 !== 0) dataOff += 1;
+    const avail = raw.byteLength - dataOff;
+    if (avail < 2) throw new Error(`WAV has no PCM data: ${path}`);
+    return new Int16Array(raw.buffer, dataOff, Math.floor(avail / 2));
   }
 }

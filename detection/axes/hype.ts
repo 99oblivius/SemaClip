@@ -124,6 +124,25 @@ export class HypeDetector implements AxisDetector {
     if (score < this.opts.minScore) return null;
 
     const chat = features.chat?.[peak];
+    const audio = features.audio?.[peak];
+    const chatE = chat
+      ? saturate(chat.velocity, SATURATION_VELOCITY) * 0.7 + saturate(chat.emoteDensity, SATURATION_EMOTE) * 0.3
+      : 0;
+    const audioE = audio ? clamp01(audio.rms * 3) : 0;
+    // Coverage: seconds in [start,end] whose E is over threshold — the burst's
+    // actual footprint, not the padded window.
+    let covered = 0;
+    for (let s = start; s <= end; s++) {
+      if (E[s]! > baselines.threshold(s) && E[s]! > 0.15) covered++;
+    }
+    const speechCoverage = covered / Math.max(1, end - start + 1);
+    // Justification names the modalities that actually fired — never cites a
+    // silent modality (honesty rule).
+    const drivers = [
+      chat && chatE > 0.1 ? `chat excitement ${chatE.toFixed(2)}` : null,
+      audio && audioE > 0.1 ? `audio energy ${audioE.toFixed(2)}` : null,
+    ].filter((x) => x !== null);
+    const driverLabel = drivers.length > 0 ? drivers.join(" + ") : `excitement ${peakE.toFixed(2)}`;
     return {
       axis: this.axis,
       start: Math.max(0, start - this.opts.prePadSec),
@@ -131,12 +150,12 @@ export class HypeDetector implements AxisDetector {
       peak,
       score,
       signals: {
-        chatExcitement: clamp01(chat ? saturate(chat.velocity, SATURATION_VELOCITY) * 0.7 + saturate(chat.emoteDensity, SATURATION_EMOTE) * 0.3 : 0),
-        voicePitch: 0,
+        chatExcitement: clamp01(chatE),
         emoteVelocity: clamp01(chat ? saturate(chat.emoteDensity, SATURATION_EMOTE) : 0),
-        lurkerActivation: 0,
+        audioEnergy: audioE,
+        speechCoverage: clamp01(speechCoverage),
       },
-      justification: `Chat burst ${dur}s — emote-weighted excitement ${peakE.toFixed(2)} vs threshold ${baselines.threshold(peak).toFixed(2)}`,
+      justification: `${drivers.length > 0 ? "Burst" : "Activity"} ${dur}s — ${driverLabel} vs threshold ${baselines.threshold(peak).toFixed(2)}`,
     };
   }
 }

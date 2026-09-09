@@ -40,15 +40,15 @@ function hasString(v: unknown, key: string): boolean {
 function validateSignals(v: unknown): ClipSignals | null {
   if (typeof v !== "object" || v === null) return null;
   const s = v as Record<string, unknown>;
-  const keys: Array<keyof ClipSignals> = ["chatExcitement", "voicePitch", "emoteVelocity", "lurkerActivation"];
+  const keys: Array<keyof ClipSignals> = ["chatExcitement", "emoteVelocity", "audioEnergy", "speechCoverage"];
   for (const k of keys) {
     if (!inRange01(s[k])) return null;
   }
   return {
     chatExcitement: s.chatExcitement as number,
-    voicePitch: s.voicePitch as number,
     emoteVelocity: s.emoteVelocity as number,
-    lurkerActivation: s.lurkerActivation as number,
+    audioEnergy: s.audioEnergy as number,
+    speechCoverage: s.speechCoverage as number,
   };
 }
 

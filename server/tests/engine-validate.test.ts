@@ -4,7 +4,7 @@ import { parseEngineEvent } from "@/adapters/outbound/engine/validate.ts";
 Deno.test("accepts a well-formed clip event with signals", () => {
   const line = JSON.stringify({
     type: "clip", jobId: "j1", id: "c1", axis: "hype", start: 1, end: 2, peak: 1.5,
-    score: 0.9, justification: "why", signals: { chatExcitement: 0.8, voicePitch: 0.5, emoteVelocity: 0.7, lurkerActivation: 0.2 },
+    score: 0.9, justification: "why", signals: { chatExcitement: 0.8, emoteVelocity: 0.7, audioEnergy: 0.5, speechCoverage: 0.6 },
   });
   const r = parseEngineEvent(line);
   assertEquals(r.ok, true);
@@ -38,7 +38,7 @@ Deno.test("rejects invalid axis", () => {
 Deno.test("rejects invalid signals (out of [0,1])", () => {
   const r = parseEngineEvent(JSON.stringify({
     type: "clip", jobId: "j", axis: "hype", start: 0, end: 1, peak: 0.5, score: 0.5,
-    signals: { chatExcitement: 2, voicePitch: 0, emoteVelocity: 0, lurkerActivation: 0 },
+    signals: { chatExcitement: 2, emoteVelocity: 0, audioEnergy: 0, speechCoverage: 0 },
   }));
   assertEquals(r.ok, false);
 });
