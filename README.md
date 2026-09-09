@@ -1,24 +1,27 @@
 # SemaClip
 
-> **/ˈsɛməklɪp/** — from Greek *σῆμα* (sema: sign, signal, mark) + English *clip*. A clip found by reading the signals.
+> /ˈsɛməklɪp/ — Greek σῆμα (sign, signal) + clip. A clip found by reading the signals.
 
-SemaClip is an intelligent, local-first engine for automatically detecting clip-worthy moments in stream VODs. Unlike existing tools that reduce the problem to "find the loudest second," SemaClip models the multidimensional nature of what makes a moment worth clipping — hype, humor, skill, awkwardness, emotion, and tension — each with its own detection logic, its own temporal structure, and its own relationship to signal strength.
+SemaClip is a local-first desktop application that finds clip-worthy moments in stream VODs and turns them into finished, exportable clips. Unlike tools that reduce the problem to "find the loudest second," SemaClip reads multiple signal classes — chat dynamics, audio energy, speech structure — and classifies moments by type (hype, humor, skill, awkward, emotional, tension), each with its own detector and clip boundaries.
 
-**Status: Alpha — full-stack implementation in progress.** Backend (Deno + Hono + SQLite), Python ML engine (stub), and SvelteKit frontend with signal-terrain timeline, keyboard-driven review, and export sheet. See [DESIGN.md](DESIGN.md) for the UI spec and [ARCHITECTURE.md](ARCHITECTURE.md) for the pipeline design.
+## Status
 
-## Philosophy
+**v2 architecture — pre-implementation.** The v1 codebase (Deno server + SvelteKit frontend) is a real, working skeleton being completed against the v2 architecture; the v1 ML engine was a mock and is being replaced. Current state and phase gates: [ROADMAP.md](ROADMAP.md). Functional design: [ARCHITECTURE.md](ARCHITECTURE.md). The superseded v1 design docs are archived under [docs/archive/v1/](docs/archive/v1/).
 
-A human editor does not scan for the loudest moment and cut. They recognize *kinds* of moments, each with a different shape, and cut each kind differently. SemaClip models this directly through:
+## Design principles
 
-- **Multi-axis detection** — six independent moment types, each with its own detector
-- **Adaptive temporal segmentation** — windows follow content structure, not fixed durations
-- **Contextual scoring** — a top-2% humor moment outranks a top-20% hype moment
-- **Online personalization** — learns your stream from implicit feedback, no manual labeling
-- **Dynamic endpoints** — clips end when the emotional arc resolves, not at a fixed offset
+- **Honest UI** — nothing on screen is simulated; failures are loud, never silent green checkmarks.
+- **Consumer-hardware floor** — ~16 GB RAM / ~6 GB VRAM, AMD or NVIDIA or CPU-only, Windows and Linux; performance scales up automatically via a hardware-tier model manifest.
+- **Edit-first** — review, trim, compose, and export are the product; detection feeds it.
+- **Local inference** — whisper.cpp + llama.cpp (GGUF, Vulkan/CPU); no cloud dependency.
 
-## Architecture
+## Stack
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete v1 design document.
+Deno Desktop (CEF shell, cross-compiled `.msi`/`.AppImage`, built-in auto-update) · TypeScript backend · Svelte 5 + SvelteKit + Tailwind v4 · FFmpeg · whisper.cpp · llama.cpp · node:sqlite + Drizzle.
+
+## Layout
+
+See ARCHITECTURE.md §3. `frontend/` (SvelteKit SPA), `server/` (Deno backend, hexagonal but slimmed), `detection/` (pure-TypeScript signal logic, fully unit-tested), `native/` (versioned external binaries, fetched by CI), `shared/` (single source of truth for wire types).
 
 ## License
 
