@@ -7,6 +7,7 @@ import type {
   ImportResult,
   ExportClipInput,
   ExportResult,
+  ExportPreset,
   QueueAction,
   AppSettings,
   Axis,
@@ -102,6 +103,16 @@ export const apiClient = {
 
   updateSettings: (settings: Partial<AppSettings>) =>
     api<AppSettings>('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
+
+  // ── Export presets (P0-7) ──
+  listPresets: () =>
+    api<ExportPreset[]>('/presets'),
+
+  savePreset: (preset: ExportPreset) =>
+    api<{ ok: boolean }>(`/presets/${preset.id}`, { method: 'PUT', body: JSON.stringify(preset) }),
+
+  deletePreset: (id: string) =>
+    api<{ ok: boolean }>(`/presets/${id}`, { method: 'DELETE' }),
 
   // ── System ──
   listComputeDevices: () =>
