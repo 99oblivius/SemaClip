@@ -91,6 +91,8 @@ export interface VodDownloadPort {
     onProgress: (p: { percent: number; bytesDownloaded: number; totalBytes: number }) => void,
   ): Promise<{ vodPath: string; chatPath: string | null }>;
   isSupported(url: string): boolean;
+  /** External markers for the VOD (P1-8 v1: Twitch `/marker` entries). */
+  fetchMarkers(url: string): Promise<{ t: number; label: string; source: string }[]>;
 }
 
 // ── Media probe port (ffprobe) ────────────────────────────────

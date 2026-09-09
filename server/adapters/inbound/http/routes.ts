@@ -20,7 +20,7 @@ import type {
   SettingsUseCase,
 } from "@/application/use-cases/mod.ts";
 import type { Axis, StreamStatus } from "shared/types";
-import type { EventBus, StreamMetadataRepository, StreamStorage } from "@/application/ports/outbound.ts";
+import type { EventBus, StreamMetadataRepository, StreamStorage, VodDownloadPort } from "@/application/ports/outbound.ts";
 import type { SqliteExportPresetRepository } from "@/adapters/outbound/persistence/repositories.ts";
 import { parseSrt } from "@/adapters/outbound/transcribe/srt-parse.ts";
 import { cuesToSrt } from "@/adapters/outbound/transcribe/srt-write.ts";
@@ -44,6 +44,7 @@ export interface HttpDeps {
   manageQueue: ManageQueueUseCase;
   settings: SettingsUseCase;
   presets: SqliteExportPresetRepository;
+  vod: VodDownloadPort;
   metadata: StreamMetadataRepository;
   storage: StreamStorage;
 }
@@ -211,6 +212,29 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     } catch {
       return c.json({ error: "Cannot read chat file" }, 500);
     }
+  });
+
+  // ── Markers (P1-8): external shortlist evidence, fetched on demand ──
+  app.get("/api/streams/:id/markers", async (c) => {
+    const stream = await deps.getStream.execute(c.req.param("id"));
+    if (!stream) return c.json({ error: "Stream not found" }, 404);
+
+    // Cached in stream metadata on first fetch.
+    const cached = await deps.metadata.get(stream.id, "markers");
+    if (cached) {
+      try {
+        return c.json(JSON.parse(cached) as { markers: { t: number; label: string; source: string }[] });
+      } catch {
+        // fall through to refetch
+      }
+    }
+
+    if (!stream.sourceUrl) {
+      return c.json({ markers: [] }); // local files have no marker source
+    }
+    const markers = await deps.vod.fetchMarkers(stream.sourceUrl);
+    await deps.metadata.set(stream.id, "markers", JSON.stringify({ markers }));
+    return c.json({ markers });
   });
 
   // ── Transcript (P0-8): parsed SRT cues for the caption editor ──

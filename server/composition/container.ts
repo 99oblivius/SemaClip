@@ -188,6 +188,7 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
       manageQueue,
       settings,
       presets,
+      vod: vodDownloader,
       metadata: metadataRepo,
       storage: streamStorage,
     },

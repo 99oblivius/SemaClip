@@ -24,6 +24,7 @@ export class ImportStreamByFileUseCase {
     const stream = createStream({
       vodPath: input.vodPath,
       chatPath: input.chatPath ?? null,
+      sourceUrl: input.sourceUrl ?? null,
       title: input.title,
       streamer: input.streamer,
       duration: duration ?? undefined,

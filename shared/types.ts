@@ -156,6 +156,8 @@ export interface ImportByFileInput {
   chatPath?: string | null;
   title?: string;
   streamer?: string;
+  /** Original VOD URL if the file was downloaded from Twitch (enables markers). */
+  sourceUrl?: string | null;
 }
 export interface ImportByUrlInput {
   url: string; // Twitch VOD URL

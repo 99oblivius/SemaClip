@@ -81,6 +81,72 @@ export class TwitchDlAdapter implements VodDownloadPort {
     return unit === "GB" ? value * 1e9 : value * 1e6;
   }
 
+  /**
+   * Fetches the video's moments via the public persisted query
+   * `VideoPlayer_ChapterSelectButtonVideo` (the same operation Twitch's own
+   * chapter-select UI uses — verified live; ad-hoc `video.markers` queries
+   * 404 because that field no longer exists on the schema).
+   *
+   * Returns chapter markers (GAME_CHANGE — game/title changes, the
+   * streamer's own segment map). User-placed `/marker` STREAM_MARKERs are
+   * user-scoped and need OAuth; they are a later auth'd addition.
+   * Returns [] for VODs without moments or on any GQL failure — markers are
+   * an enhancement layer, never a hard dependency.
+   */
+  async fetchMarkers(url: string): Promise<{ t: number; label: string; source: string }[]> {
+    let vodId: string;
+    try {
+      vodId = this.extractVodId(url);
+    } catch {
+      return [];
+    }
+    try {
+      const res = await fetch("https://gql.twitch.tv/gql", {
+        method: "POST",
+        headers: { "Client-ID": "kimne78kx3ncx6brgo4mv6wki5h1ko" },
+        body: JSON.stringify({
+          operationName: "VideoPlayer_ChapterSelectButtonVideo",
+          extensions: {
+            persistedQuery: {
+              sha256Hash: "71835d5ef425e154bf282453a926d99b328cdc5e32f36d3a209d0f4778b41203",
+              version: 1,
+            },
+          },
+          variables: { videoID: vodId },
+        }),
+      });
+      if (!res.ok) return [];
+      const data = await res.json() as {
+        data?: {
+          video?: {
+            moments?: {
+              edges?: {
+                node?: {
+                  positionMilliseconds?: number;
+                  durationMilliseconds?: number;
+                  type?: string;
+                  description?: string | null;
+                };
+              }[];
+            } | null;
+          } | null;
+        };
+      };
+      const edges = data.data?.video?.moments?.edges ?? [];
+      return edges
+        .map((e) => e.node)
+        .filter((n): n is { positionMilliseconds: number; type?: string; description: string | null } =>
+          typeof n?.positionMilliseconds === "number")
+        .map((n) => ({
+          t: Math.floor(n.positionMilliseconds / 1000),
+          label: n.description ?? "",
+          source: "chapter",
+        }));
+    } catch {
+      return [];
+    }
+  }
+
   private async run(
     args: string[],
     opts: {
