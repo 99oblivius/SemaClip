@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { createMutation, useQueryClient } from '@tanstack/svelte-query';
+  import { createMutation, useQueryClient, createQuery } from '@tanstack/svelte-query';
   import { apiClient } from '$lib/api/client';
   import Icon from './Icon.svelte';
   import DeleteConfirmModal from './DeleteConfirmModal.svelte';
   import type { Stream } from '$shared/types';
+  import type { DownloadState } from '$lib/api/download';
 
   interface Props {
     stream: Stream;
@@ -57,6 +58,31 @@
   }));
 
   let saved = $state(false);
+
+  // ── Media section: download state + piece actions ──
+  const downloadQuery = createQuery(() => ({
+    queryKey: ['download', stream.id],
+    queryFn: () => apiClient.getDownloadState(stream.id),
+    refetchInterval: 1000,
+    enabled: Boolean(stream.sourceUrl),
+  }));
+  const dlState = $derived(downloadQuery.data as DownloadState | undefined);
+  const hasScrub = $derived(Boolean(dlState?.scrubPath));
+  const hasHq = $derived(Boolean(dlState?.hqPath));
+  const mediaBusy = $derived(dlState?.phase === 'running');
+
+  const deleteScrubMutation = createMutation(() => ({
+    mutationFn: () => apiClient.deleteScrub(stream.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['download', stream.id] });
+      queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
+    },
+  }));
+
+  const pieceMutation = createMutation(() => ({
+    mutationFn: (kind: 'scrub' | 'hq') => apiClient.downloadPiece(stream.id, kind),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['download', stream.id] }),
+  }));
 
   const dirty = $derived(
     loaded && (
@@ -171,6 +197,67 @@
             />
           </label>
         </div>
+
+        <!-- Media (progressive downloads) -->
+        {#if stream.sourceUrl && dlState}
+          <div class="flex flex-col gap-2 border-t border-border pt-3">
+            <span class="font-mono text-xs text-ash uppercase tracking-wider">Media</span>
+            {#if dlState.qualities.length > 0}
+              <div class="flex flex-wrap gap-1.5">
+                {#each dlState.qualities as q (q.name)}
+                  <span class="rounded border border-border px-1.5 py-0.5 font-mono text-[10px] {hasHq && q.height <= 540 ? 'text-ash-dim' : 'text-ash'}">
+                    {q.name}
+                  </span>
+                {/each}
+              </div>
+            {/if}
+            <div class="flex flex-wrap items-center gap-2">
+              {#if hasScrub}
+                <button
+                  class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-error hover:text-error disabled:opacity-50"
+                  onclick={() => deleteScrubMutation.mutate()}
+                  disabled={mediaBusy || deleteScrubMutation.isPending}
+                  title="Delete the 540p scrub file — review then scrubs the full-quality file"
+                >
+                  <Icon name="trash" size={12} /> Delete LQ scrub
+                </button>
+              {:else}
+                <button
+                  class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
+                  onclick={() => pieceMutation.mutate('scrub')}
+                  disabled={mediaBusy || pieceMutation.isPending}
+                  title="Download a 540p scrub file for fast review"
+                >
+                  <Icon name="download" size={12} /> Download scrub
+                </button>
+              {/if}
+              {#if !hasHq}
+                <button
+                  class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
+                  onclick={() => pieceMutation.mutate('hq')}
+                  disabled={mediaBusy || pieceMutation.isPending}
+                  title="Download the full-quality file (capped by settings)"
+                >
+                  <Icon name="download" size={12} /> Download HQ
+                </button>
+              {:else}
+                <span class="flex items-center gap-1 font-mono text-[10px] text-success">
+                  <Icon name="check" size={11} /> HQ on disk
+                </span>
+              {/if}
+            </div>
+            {#if mediaBusy}
+              <div class="h-0.5 overflow-hidden rounded-full bg-surface-3">
+                <div class="h-full bg-accent transition-all" style="width: {dlState.overall.percent * 100}%"></div>
+              </div>
+            {/if}
+            {#if deleteScrubMutation.isError}
+              <p class="font-mono text-[10px] text-error">{deleteScrubMutation.error?.message}</p>
+            {:else if pieceMutation.isError}
+              <p class="font-mono text-[10px] text-error">{pieceMutation.error?.message}</p>
+            {/if}
+          </div>
+        {/if}
 
         <!-- Actions -->
         <div class="flex items-center justify-between gap-2 border-t border-border pt-3">

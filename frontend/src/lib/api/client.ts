@@ -69,6 +69,15 @@ export const apiClient = {
   cancelDownload: (streamId: string) =>
     api<{ ok: boolean }>(`/streams/${streamId}/download`, { method: 'DELETE' }),
 
+  deleteScrub: (streamId: string) =>
+    api<{ deleted: boolean }>(`/streams/${streamId}/scrub`, { method: 'DELETE' }),
+
+  downloadPiece: (streamId: string, kind: 'scrub' | 'hq', maxHeight?: number | null) =>
+    api<{ started: boolean; quality: string | null }>(`/streams/${streamId}/download-piece`, {
+      method: 'POST',
+      body: JSON.stringify({ kind, maxHeight: maxHeight ?? null }),
+    }),
+
 
 
   /** Attach chat by local file path. */

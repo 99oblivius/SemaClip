@@ -48,6 +48,8 @@ export interface HttpDeps {
   vod: VodDownloadPort;
   downloadState: (streamId: string) => Promise<DownloadStateType>;
   cancelDownload: (streamId: string) => boolean;
+  deleteScrub: (streamId: string) => Promise<{ deleted: boolean }>;
+  downloadPiece: (opts: { streamId: string; kind: "scrub" | "hq"; scrubHeightCap?: number; maxHeight?: number | null; signal?: AbortSignal | undefined }) => Promise<{ started: boolean; quality: string | null }>
   metadata: StreamMetadataRepository;
   storage: StreamStorage;
 }
@@ -128,6 +130,30 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     const streamId = c.req.param("id");
     const cancelled = deps.cancelDownload(streamId);
     return c.json({ ok: cancelled }, cancelled ? 200 : 409);
+  });
+
+  // Stream-config media actions (download-pipeline scope).
+  app.delete("/api/streams/:id/scrub", async (c) => {
+    const result = await deps.deleteScrub(c.req.param("id"));
+    return c.json(result);
+  });
+
+  app.post("/api/streams/:id/download-piece", async (c) => {
+    const body = await c.req.json() as { kind?: string; maxHeight?: number | null };
+    if (body.kind !== "scrub" && body.kind !== "hq") {
+      return c.json({ error: "kind must be 'scrub' or 'hq'" }, 400);
+    }
+    try {
+      const result = await deps.downloadPiece({
+        streamId: c.req.param("id"),
+        kind: body.kind,
+        scrubHeightCap: 540,
+        maxHeight: body.maxHeight ?? null,
+      });
+      return c.json(result, 202);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 409);
+    }
   });
 
   // Available qualities for the import modal's max-quality selector.

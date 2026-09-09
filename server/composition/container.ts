@@ -16,6 +16,7 @@ import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdap
 import { DEFAULT_SETTINGS, cpuWorkers } from "@/application/use-cases/SettingsUseCase.ts";
 import { TwitchDlAdapter } from "@/adapters/outbound/vod/mod.ts";
 import { DownloadOrchestrator } from "@/adapters/outbound/vod/download-orchestrator.ts";
+import { MediaActionsUseCase } from "@/application/use-cases/MediaActions.ts";
 import { FFmpegAdapter } from "@/adapters/outbound/ffmpeg/mod.ts";
 import {
   ImportStreamByFileUseCase,
@@ -102,6 +103,7 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
   // Use cases
   const importByFile = new ImportStreamByFileUseCase(streamRepo, fs, ffmpeg);
   const downloadOrchestrator = new DownloadOrchestrator(metadataRepo);
+  const mediaActions = new MediaActionsUseCase(streamRepo, metadataRepo, fs, downloadOrchestrator, config.cacheDir);
   const importByUrl = new ImportStreamByUrlUseCase(streamRepo, vodDownloader, fs, bus, config.cacheDir, downloadOrchestrator);
   const deleteStream = new DeleteStreamUseCase(streamRepo, jobRepo, metadataRepo, streamStorage);
   const updateStream = new UpdateStreamUseCase(streamRepo);
@@ -193,6 +195,9 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
       vod: vodDownloader,
       downloadState: (id: string) => downloadOrchestrator.getState(id),
       cancelDownload: (id: string) => importByUrl.cancelProgressive(id),
+      deleteScrub: (id: string) => mediaActions.deleteScrub(id),
+      downloadPiece: (opts: { streamId: string; kind: "scrub" | "hq"; scrubHeightCap?: number; maxHeight?: number | null; signal?: AbortSignal | undefined }) =>
+        mediaActions.downloadPiece(opts),
       metadata: metadataRepo,
       storage: streamStorage,
     },
