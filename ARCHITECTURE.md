@@ -92,13 +92,34 @@ VOD + chat.json
 
 Cancellation is cooperative: the pipeline checks a cancel flag between stages and inside per-second loops; the engine process is killed at stage boundaries, never mid-model-load.
 
+### 4.2 Performance budget (hard requirement)
+
+**A 6-hour VOD processes in under 1 hour on the consumer floor (CPU-only, ~16 GB RAM); under ~15 min with a mid-tier GPU.** The budget is validated in Phase 1's exit gate — the measured per-phase timings are displayed in the UI, not just logged.
+
+Where the time budget goes (6 h = 21,600 s of audio):
+
+| Stage | Strategy | CPU-only target | Mid-GPU |
+|---|---|---|---|
+| Decode + feature arrays | ffmpeg to 16 kHz mono WAV; RMS/speech-ratio arrays computed in a streaming pass | ~2–5 min | same |
+| **Transcription** | **Parallel chunked whisper.cpp**: split on silence into 30–120 s chunks, N worker processes (N = min(cores÷2, 8)), each pinned `small`/`base` int8 on CPU — near-linear scaling. GPU tiers: single `large-v3-turbo` Q5 via Vulkan, chunks pipelined | ~20–35 min (8 workers × ~3–5× realtime) | ~3–6 min |
+| Chat + detection arrays | Pure TS, per-second math | seconds | seconds |
+| Segmentation/axes/ranking/endpoints | Array math, O(n) | seconds | seconds |
+| LLM triage | Batched parallel calls to llama.cpp server; skipped on CPU-only tier unless time budget remains | 0–10 min | ~5 min |
+| Export | On-demand, not in the pipeline | — | — |
+
+Rules:
+- Transcription parallelism is the only stage where multi-processing pays; it is built in from Phase 1, not retrofitted. Worker count, model per tier, and chunk overlap are manifest-driven; workers are plain OS processes (whisper.cpp CLI), so Windows/Linux behave identically.
+- Every stage reports measured seconds in `progress` events (`message` includes elapsed + estimated remaining); the Processing screen shows actuals. A phase exceeding its budget share logs a warning (visible in job diagnostics) — budgets are asserted in an integration test with a mock decoder so regressions are caught in CI.
+- CPU tiers skip LLM triage by default (keep detection honest: clips are marked `triage: 'skipped'`, not silently absent).
+- These figures are engineering targets validated on the Phase 1 exit gate run; the manifest tier table is adjusted to *measured* hardware, not optimistic paper numbers.
+
 ### 4.1 Model tiers (the 16 GB / 6 GB floor)
 
 Model selection is a **manifest lookup by detected hardware tier**, not a config file the user must understand:
 
 | Tier | Detected | Transcription | LLM triage | Notes |
 |---|---|---|---|---|
-| CPU-only | no GPU, ≥8 GB RAM | whisper.cpp `small` (int8, CPU) | skipped or 1.5B Q4 | Slow but complete; UI shows estimated time. |
+| CPU-only | no GPU, ≥8 GB RAM | whisper.cpp `small` (int8, CPU, parallel workers §4.2) | skipped by default | Slow but complete; UI shows measured time. |
 | Low VRAM | <6 GB VRAM | `base` or `small` on GPU + CPU offload | 1.5-3B Q4 | 6 GB floor target. |
 | Mid | 6–12 GB VRAM | `large-v3-turbo` Q5 | 7B Q4 | Default target tier. |
 | High | >12 GB VRAM | `large-v3` | 7B-14B Q4/Q5 | Automatic scale-up. |
@@ -107,6 +128,27 @@ Model selection is a **manifest lookup by detected hardware tier**, not a config
 - Manifest (`shared/model-manifest.ts`) maps tier → model file + quantization + context size; llama.cpp server is spawned once per job with the tier's model and killed after.
 - All models download on first use to the platform cache dir (Windows: `%LOCALAPPDATA%\SemaClip\models`; Linux: `~/.local/share/SemaClip/models`) with SHA-256 verification, resumable download, and a Settings UI showing what is present.
 - **No RAM/VRAM probing failure may crash the app**: probe failure → CPU tier + visible warning.
+
+### 4.2 Performance budget (hard requirement)
+
+**A 6-hour VOD processes in under 1 hour on the consumer floor (CPU-only, ~16 GB RAM); under ~15 min with a mid-tier GPU.** The budget is validated in Phase 1's exit gate — the measured per-phase timings are displayed in the UI, not just logged.
+
+Where the time budget goes (6 h = 21,600 s of audio):
+
+| Stage | Strategy | CPU-only target | Mid-GPU |
+|---|---|---|---|
+| Decode + feature arrays | ffmpeg to 16 kHz mono WAV; RMS/speech-ratio arrays computed in a streaming pass | ~2–5 min | same |
+| **Transcription** | **Parallel chunked whisper.cpp**: split on silence into 30–120 s chunks, N worker processes (N = min(cores÷2, 8)), each pinned `small`/`base` int8 on CPU — near-linear scaling. GPU tiers: single `large-v3-turbo` Q5 via Vulkan, chunks pipelined | ~20–35 min (8 workers × ~3–5× realtime) | ~3–6 min |
+| Chat + detection arrays | Pure TS, per-second math | seconds | seconds |
+| Segmentation/axes/ranking/endpoints | Array math, O(n) | seconds | seconds |
+| LLM triage | Batched parallel calls to llama.cpp server; skipped on CPU-only tier unless time budget remains | 0–10 min | ~5 min |
+| Export | On-demand, not in the pipeline | — | — |
+
+Rules:
+- Transcription parallelism is the only stage where multi-processing pays; it is built in from Phase 1, not retrofitted. Worker count, model per tier, and chunk overlap are manifest-driven; workers are plain OS processes (whisper.cpp CLI), so Windows/Linux behave identically.
+- Every stage reports measured seconds in `progress` events (`message` includes elapsed + estimated remaining); the Processing screen shows actuals. A phase exceeding its budget share logs a warning (visible in job diagnostics) — budgets are asserted in an integration test with a mock decoder so regressions are caught in CI.
+- CPU tiers skip LLM triage by default (keep detection honest: clips are marked `triage: 'skipped'`, not silently absent).
+- These figures are engineering targets validated on the Phase 1 exit gate run; the manifest tier table is adjusted to *measured* hardware, not optimistic paper numbers.
 
 ## 5. The five subsystems in functional detail
 
@@ -175,6 +217,7 @@ type EngineEvent =
 - **File dialogs**: Deno Desktop native dialogs via bindings; drag-drop paths normalized per-OS.
 - **Tray + window**: implemented via Deno Desktop APIs on both platforms; verified in the Windows test matrix (§10).
 - **Loopback bind**: server binds `127.0.0.1` on both OSes (v1 bound 0.0.0.0 with arbitrary-path routes — LAN file-read vulnerability).
+- **CPU parallelism as a first-class resource**: worker pools (transcription chunks, LLM batches) size themselves from hardware concurrency and re-probe on job start; nothing in the pipeline is single-threaded by accident. See §4.2.
 
 ## 8. Update & release engineering
 
@@ -194,7 +237,7 @@ type EngineEvent =
 - Settings → Updates: channel selector (stable/nightly), current version (`Deno.desktopVersion`), "check now" button, last-check timestamp, pending-update indicator with "restart to apply".
 - `Deno.autoUpdate({url: channelBaseUrl, interval: 6h, onUpdateReady, onRollback})` — wired in main.ts; channel switch re-invokes with the other manifest URL.
 - Linux: native staging applies on next launch with rollback.
-- Windows (Deno gap): patches download + stage; the app shows "update ready — restart to install" and a tiny external updater exe (written to app data, itself replaceable) performs the swap on a fresh process, then relaunches. This is the documented workaround until Deno ships Windows apply; it is the same pattern Electron's squirrel uses.
+- Windows (Deno gap): patches download + stage; the app shows "update ready — restart to install" and a tiny external updater exe (written to app data, itself replaceable) performs the swap on a fresh process, then relaunches. **Accepted decision (2026-09-09, Livia): functional Windows auto-update regardless of method.** This updater is a *workaround for Deno's missing Windows launcher swap* — it lives behind `server/adapters/updater/windows-update.ts`, its contract (stage dir layout, swap protocol, readiness check) is documented in that module's header comment, and it is flagged for replacement the moment Deno ships native Windows apply. Cleanup = delete the adapter and the staged path; everything else (manifests, channel logic, UI) is untouched by the workaround.
 
 ### 8.4 Manifest hosting
 - GitHub Releases for full artifacts; **GitHub Pages** for `latest.json` + patch files (both channels), from a `releases` branch pushed by CI. Zero paid infra; SHA-256 is mandatory in the manifest per Deno's contract; Ed25519 signing adds tamper protection beyond TLS.

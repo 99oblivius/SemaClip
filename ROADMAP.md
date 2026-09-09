@@ -16,17 +16,19 @@ Goal: every existing checkmark tells the truth; the audited failure classes are 
 **Exit gate**: all seven merged, CI green, the five lifecycle tests pass, export of a real clip produces a real playable file on this machine.
 
 ## Phase 1 — Real engine v0.1: one axis, real data
-Goal: replace 100% fabricated output with defensible output on the training VOD.
+Goal: replace 100% fabricated output with defensible output on the training VOD; validate the performance budget.
 
 1. `detection/` package: chat.ts, audio.ts, signals; hype detector; multi-timescale baselines; fixed-width endpoints with recovery heuristic.
-2. whisper.cpp integration (TranscribeAdapter): audio extraction via ffmpeg, GGUF model manifest, tier detection (nvidia-smi / Vulkan / CPU), model download to platform cache with SHA-256.
-3. Wire through the (now honest) job lifecycle with real progress events; persist ClipSignals; populate rank.
+2. whisper.cpp integration (TranscribeAdapter): audio extraction via ffmpeg, GGUF model manifest, tier detection (nvidia-smi / Vulkan / CPU), model download to platform cache with SHA-256. **Parallel chunked transcription** per ARCHITECTURE.md §4.2 (silence-split chunks, worker pool sized from cores, per-chunk progress aggregation).
+3. Wire through the (now honest) job lifecycle with real progress events incl. measured per-stage timings; persist ClipSignals; populate rank.
 4. Chat parser for TwitchDownloader format (schema-validated; the 586 KB sample in data/training/ is the fixture).
 
-**Exit gate**: end-to-end on `data/training/video.mp4` (5.9 GB Overwatch VOD) produces ≥5 clips whose top-10 hand-checks against chat/waveform (precision@10 ≥ 5 as judged manually); runtime measured and displayed; works on the CPU tier (slow but complete) and on the 4090.
+**Exit gate**: end-to-end on `data/training/video.mp4` (5.9 GB Overwatch VOD, 5.8 h) produces ≥5 clips whose top-10 hand-checks against chat/waveform (precision@10 ≥ 5 as judged manually); **measured wall time on CPU-only mode ≤ 1 h (the §4.2 budget), with per-stage timings captured**; works on the 4090 proportionally faster; per-stage budget-regression test in CI.
 
-## Phase 2 — UI: finish the instrument (first-priority product surface)
-Goal: the DESIGN.md (v1) instrument becomes real — that spec's UI intent is kept; this phase finishes it.
+## Phase 2 — Frontend re-development (first-priority product surface)
+Goal: re-develop the frontend to the full professional clipper's toolkit per the Phase 2 feature inventory (docs/FRONTEND-REQUIREMENTS.md), on a rewritten interaction core. Simplicity rule: **no UI gating** — every tool visible and reachable; power lives in keyboard and defaults, not in hidden menus.
+
+Reference: docs/FRONTEND-REQUIREMENTS.md (professional-VOD-clipper expectations, feature inventory, UX spec) — written from research into what avid clippers expect; the v1 DESIGN.md palette/typography/instrument principles carry over as the visual foundation.
 
 1. Seek model rewrite (single source of truth; no sub-0.5s dead zone; frame-step works — the H7 core interaction).
 2. Chat: use server `?around=` pagination; follow-mode correctness beyond 500 messages.
