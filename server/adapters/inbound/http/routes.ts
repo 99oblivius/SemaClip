@@ -26,6 +26,12 @@ import type { SqliteExportPresetRepository } from "@/adapters/outbound/persisten
 import { parseSrt } from "@/adapters/outbound/transcribe/srt-parse.ts";
 import { cuesToSrt } from "@/adapters/outbound/transcribe/srt-write.ts";
 import { probeGpuEncoder } from "@/adapters/outbound/ffmpeg/gpu-probe.ts";
+import {
+  extractVodId,
+  resolveQualities,
+  pickScrubQuality,
+  pickBestQuality,
+} from "@/adapters/outbound/vod/hls.ts";
 
 export interface HttpDeps {
   importByFile: ImportStreamByFileUseCase;
@@ -799,6 +805,94 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     } catch {
       return c.json({ error: "Cannot read video file" }, 500);
     }
+  });
+
+  // ── HLS player proxy: serves the media playlist with chunk URLs rewritten
+  // to this server, so the frontend player (hls.js) streams the SAME bytes
+  // the orchestrator downloads — already-downloaded chunks come from disk,
+  // not-yet-downloaded chunks proxy from Twitch. One fetch, growing playback.
+  app.get("/api/streams/:id/hls.m3u8", async (c) => {
+    const stream = await deps.getStream.execute(c.req.param("id"));
+    if (!stream?.sourceUrl) return c.json({ error: "No source URL" }, 404);
+    const vodId = extractVodId(stream.sourceUrl);
+    if (!vodId) return c.json({ error: "Not a Twitch VOD URL" }, 400);
+
+    const track = c.req.query("track") === "hq" ? "hq" : "scrub";
+    const qualities = await resolveQualities(vodId);
+    const q = track === "hq"
+      ? pickBestQuality(qualities, null)
+      : (pickScrubQuality(qualities, 540) ?? pickBestQuality(qualities, null));
+    if (!q) return c.json({ error: "No qualities available" }, 404);
+
+    const playlistText = await (await fetch(q.playlistUrl)).text();
+    const origin = new URL(c.req.url).origin;
+    // Chunk index = ordinal position among non-comment, non-tag lines.
+    let index = 0;
+    const out = playlistText.split("\n").map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) return line;
+      return `${origin}/api/streams/${stream.id}/hls-chunk/${track}/${index++}`;
+    });
+    return c.body(out.join("\n"), 200, { "Content-Type": "application/vnd.apple.mpegurl" });
+  });
+
+  // Chunk proxy: index → local byte range (from the chunk map) when the
+  // chunk is already on disk, else a remote proxy fetch of that chunk URL.
+  app.get("/api/streams/:id/hls-chunk/:track/:index", async (c) => {
+    const stream = await deps.getStream.execute(c.req.param("id"));
+    if (!stream?.sourceUrl) return c.json({ error: "No source URL" }, 404);
+    const vodId = extractVodId(stream.sourceUrl);
+    if (!vodId) return c.json({ error: "Not a Twitch VOD URL" }, 400);
+    const track = c.req.param("track") === "hq" ? "hq" : "scrub";
+    const index = parseInt(c.req.param("index"), 10);
+    if (!Number.isFinite(index) || index < 0) return c.json({ error: "Bad index" }, 400);
+
+    // Chunk map: "index offset len" lines, derived from the download
+    // state's .ts path ({dir}/scrub.chunks next to scrub.ts).
+    const dl = await deps.downloadState(stream.id);
+    const tsPath = track === "hq" ? dl.hqPath : dl.scrubPath;
+    const mapPath = tsPath ? `${tsPath.replace(/\.ts$/, "")}.chunks` : null;
+
+    if (tsPath && mapPath) {
+      const mapText = await Deno.readTextFile(mapPath).catch(() => "");
+      for (const line of mapText.split("\n")) {
+        const m = /^(\d+) (\d+) (\d+)$/.exec(line.trim());
+        if (m && parseInt(m[1]!, 10) === index) {
+          const offset = parseInt(m[2]!, 10);
+          const len = parseInt(m[3]!, 10);
+          const file = await Deno.open(tsPath, { read: true });
+          try {
+            await file.seek(offset, Deno.SeekMode.Start);
+            const buf = new Uint8Array(len);
+            await file.read(buf);
+            c.header("Content-Type", "video/mp2t");
+            return c.body(buf);
+          } finally {
+            file.close();
+          }
+        }
+      }
+    }
+
+    // Not on disk yet — proxy the remote chunk (index-based resolution of
+    // the media playlist).
+    const qualities = await resolveQualities(vodId);
+    const q = track === "hq"
+      ? pickBestQuality(qualities, null)
+      : (pickScrubQuality(qualities, 540) ?? pickBestQuality(qualities, null));
+    if (!q) return c.json({ error: "No qualities available" }, 404);
+    const playlistText = await (await fetch(q.playlistUrl)).text();
+    const chunks = playlistText.split("\n").map((l) => l.trim())
+      .filter((l) => l && !l.startsWith("#"));
+    const chunkUrl = chunks[index];
+    if (!chunkUrl) return c.json({ error: "Chunk out of range" }, 404);
+    const resolved = chunkUrl.startsWith("http") ? chunkUrl : new URL(chunkUrl, q.playlistUrl).href;
+    const upstream = await fetch(resolved);
+    if (!upstream.ok || !upstream.body) {
+      return c.json({ error: `Chunk upstream ${upstream.status}` }, 502);
+    }
+    c.header("Content-Type", "video/mp2t");
+    return c.body(upstream.body);
   });
 
   // ── WebSocket ──

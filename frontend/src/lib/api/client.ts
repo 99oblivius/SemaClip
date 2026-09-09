@@ -156,6 +156,9 @@ export const apiClient = {
   videoUrl: (streamId: string) =>
     `${API_BASE}/video/${streamId}`,
 
+  hlsPlaylistUrl: (streamId: string, track: 'scrub' | 'hq' = 'scrub') =>
+    `${API_BASE}/streams/${streamId}/hls.m3u8?track=${track}`,
+
   // ── Signal terrain data ──
   chatDensity: (streamId: string) =>
     api<{ duration: number; density: number[] }>(`/streams/${streamId}/chat-density`),

@@ -7,9 +7,13 @@
   import type { Clip } from '$shared/types';
   import { onDestroy } from 'svelte';
   import { browser } from '$app/environment';
+  import Hls from 'hls.js';
 
   interface Props {
     streamId: string;
+    /** Stream has a remote source (Twitch URL) — play through the HLS proxy
+     *  (growing playback: chunks stream as the downloader lands them). */
+    hls?: boolean;
     duration: number | null;
     clips: Clip[];
     currentClip: Clip | undefined;
@@ -19,6 +23,7 @@
 
   let {
     streamId,
+    hls = false,
     duration,
     clips,
     currentClip,
@@ -27,6 +32,7 @@
   }: Props = $props();
 
   let videoEl = $state<HTMLVideoElement | undefined>(undefined);
+  let hlsInstance: Hls | null = null;
   let containerEl = $state<HTMLDivElement | undefined>(undefined);
 
   // Local UI state — restored from localStorage for persistence across refreshes.
@@ -72,6 +78,25 @@
       currentTime = storeTime;
       autoAdvanceClip = null;
     }
+  });
+
+  // HLS attach: when the stream has a remote source, play through the
+  // server's chunk proxy (already-downloaded chunks served from disk, the
+  // rest proxied from Twitch — growing playback without double-fetching).
+  $effect(() => {
+    if (!hls || !videoEl) return;
+    if (!Hls.isSupported()) return; // falls back to native <video src>
+    const instance = new Hls({ enableWorker: true, lowLatencyMode: false });
+    hlsInstance = instance;
+    instance.loadSource(apiClient.hlsPlaylistUrl(streamId));
+    instance.attachMedia(videoEl);
+    instance.on(Hls.Events.ERROR, (_evt, data) => {
+      if (data.fatal) console.error('[hls] fatal:', data.type, data.details);
+    });
+    return () => {
+      instance.destroy();
+      if (hlsInstance === instance) hlsInstance = null;
+    };
   });
 
   function seekTo(time: number) {
@@ -189,7 +214,7 @@
 <div bind:this={containerEl} class="relative flex-1 overflow-hidden rounded-lg">
   <video
     bind:this={videoEl}
-    src={apiClient.videoUrl(streamId)}
+    src={hls ? undefined : apiClient.videoUrl(streamId)}
     class="h-full w-full"
     ontimeupdate={handleTimeUpdate}
     onloadedmetadata={(e: Event & { currentTarget: HTMLVideoElement }) => {

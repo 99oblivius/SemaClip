@@ -225,6 +225,11 @@ export async function downloadProgressive(
      *  append and onProgress reports cumulative seconds (existing + new) so
      *  the frontier never regresses. Default 0 = fresh download. */
     resumeSec?: number;
+    /** Per-chunk byte offsets written so far — [index, byteOffset] pairs
+     *  appended as chunks land in the file. The HLS chunk proxy uses these
+     *  to serve downloaded chunks from disk (single fetch for both the
+     *  player and the downloader). Missing entry = chunk not on disk. */
+    onChunk?: (index: number, byteOffset: number, byteLength: number) => void;
   },
 ): Promise<void> {
   const playlist = await fetchPlaylist(playlistUrl);
@@ -287,8 +292,10 @@ export async function downloadProgressive(
         const ready = reorderBuffer.get(nextWriteIndex)!;
         reorderBuffer.delete(nextWriteIndex);
         await dest.write(ready.data);
+        const chunkOffset = bytes;
         bytes += ready.data.byteLength;
         downloadedSec += chunks[ready.index]!.durationSec;
+        opts.onChunk?.(ready.index, chunkOffset, ready.data.byteLength);
         opts.onProgress({
           downloadedSec,
           totalSec,

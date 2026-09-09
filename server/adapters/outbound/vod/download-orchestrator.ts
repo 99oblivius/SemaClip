@@ -273,10 +273,16 @@ export class DownloadOrchestrator {
           ? Math.floor(await this.fileSeconds(tsPath))
           : 0;
         try {
-          await downloadProgressive(target.playlistUrl, tsPath, {
-            signal: opts.signal ?? undefined,
-            resumeSec,
-            onProgress: (p) => {
+          const mapPath = `${opts.destDir}/scrub.chunks`;
+          const mapFile = await Deno.open(mapPath, { write: true, create: true, append: resumeSec > 0, truncate: resumeSec === 0 });
+          try {
+            await downloadProgressive(target.playlistUrl, tsPath, {
+              signal: opts.signal ?? undefined,
+              resumeSec,
+              onChunk: (index, offset, len) => {
+                void mapFile.write(new TextEncoder().encode(`${index} ${offset} ${len}\n`));
+              },
+              onProgress: (p) => {
               const part = rt.get("scrub")!;
               this.noteVideoProgress(part, p, target);
               state.scrubFrontierSec = p.downloadedSec;
@@ -298,6 +304,9 @@ export class DownloadOrchestrator {
           const mp4 = await remuxToMp4(tsPath, mp4Twin(tsPath));
           state.scrubMp4 = state.hqMp4 = mp4 ? mp4Twin(tsPath) : null;
           void this.persist(opts.streamId, state, rt);
+          } finally {
+            await mapFile.close();
+          }
         } catch (err) {
           this.fail(rt.get("scrub")!, err);
           this.fail(rt.get("hq")!, err);
@@ -313,10 +322,15 @@ export class DownloadOrchestrator {
     const scrubResume = opts.resume
       ? Math.floor(await this.fileSeconds(scrubTs))
       : 0;
+    const scrubMapPath = `${opts.destDir}/scrub.chunks`;
+    const scrubMapFile = await Deno.open(scrubMapPath, { write: true, create: true, append: scrubResume > 0, truncate: scrubResume === 0 });
     try {
       await downloadProgressive(scrub.playlistUrl, scrubTs, {
         signal: opts.signal ?? undefined,
         resumeSec: scrubResume,
+        onChunk: (index, offset, len) => {
+          void scrubMapFile.write(new TextEncoder().encode(`${index} ${offset} ${len}\n`));
+        },
         onProgress: (p) => {
           const part = rt.get("scrub")!;
           this.noteVideoProgress(part, p, scrub);
@@ -335,12 +349,14 @@ export class DownloadOrchestrator {
       const scrubMp4 = await remuxToMp4(scrubTs, mp4Twin(scrubTs));
       state.scrubMp4 = scrubMp4 ? mp4Twin(scrubTs) : null;
       void this.persist(opts.streamId, state, rt);
+      await scrubMapFile.close();
       await opts.onPartDone?.("scrub", state);
     } catch (err) {
       if (opts.signal?.aborted) {
         rt.get("scrub")!.status = "failed";
         rt.get("scrub")!.error = "aborted";
         rt.get("hq")!.status = "skipped"; // cancelled before starting
+        await scrubMapFile.close();
         await this.persist(opts.streamId, state, rt);
         return this.finalize(opts.streamId, state, rt);
       }
@@ -362,11 +378,16 @@ export class DownloadOrchestrator {
       const hqResume = opts.resume
         ? Math.floor(await this.fileSeconds(hqTs))
         : 0;
+      const hqMapPath = `${opts.destDir}/hq.chunks`;
+      const hqMapFile = await Deno.open(hqMapPath, { write: true, create: true, append: hqResume > 0, truncate: hqResume === 0 });
       try {
         await downloadProgressive(hq.playlistUrl, hqTs, {
           signal: opts.signal ?? undefined,
           lookahead: 4,
           resumeSec: hqResume,
+          onChunk: (index, offset, len) => {
+            void hqMapFile.write(new TextEncoder().encode(`${index} ${offset} ${len}\n`));
+          },
           onProgress: (p) => {
             const part = rt.get("hq")!;
             this.noteVideoProgress(part, p, hq);
@@ -383,9 +404,15 @@ export class DownloadOrchestrator {
         const hqMp4 = await remuxToMp4(hqTs, mp4Twin(hqTs));
         state.hqMp4 = hqMp4 ? mp4Twin(hqTs) : null;
         void this.persist(opts.streamId, state, rt);
+        await hqMapFile.close();
         await opts.onPartDone?.("hq", state);
       } catch (err) {
         this.fail(rt.get("hq")!, err);
+        try {
+          await hqMapFile.close();
+        } catch {
+          // already closed
+        }
       }
     } else {
       // Same quality — scrub file is the HQ file.

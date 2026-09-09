@@ -83,6 +83,32 @@
     mutationFn: (kind: 'scrub' | 'hq') => apiClient.downloadPiece(stream.id, kind),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['download', stream.id] }),
   }));
+  let pendingPiece = $state<'scrub' | 'hq' | null>(null);
+  function startPiece(kind: 'scrub' | 'hq') {
+    pendingPiece = kind;
+    pieceMutation.mutate(kind);
+  }
+  // Piece live progress from the polled download state (1s refresh).
+  const pieceProgress = $derived.by(() => {
+    if (!dlState) return null;
+    const kind = pendingPiece ?? 'scrub';
+    const part = dlState.parts.find((p) => p.kind === kind);
+    if (!part || part.status !== 'running') return null;
+    return { kind, percent: part.percent, frontier: part.downloadedSec ?? 0 };
+  });
+
+  function fmtPieceTime(sec: number): string {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    return h > 0 ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m${String(Math.floor(sec % 60)).padStart(2, '0')}s`;
+  }
+
+  // Clear the pending marker when the piece reaches a terminal status.
+  $effect(() => {
+    if (!pendingPiece || !dlState) return;
+    const part = dlState.parts.find((p) => p.kind === pendingPiece);
+    if (part && part.status !== 'running') pendingPiece = null;
+  });
 
   const dirty = $derived(
     loaded && (
@@ -221,10 +247,19 @@
                 >
                   <Icon name="trash" size={12} /> Delete LQ scrub
                 </button>
+              {:else if pieceProgress?.kind === 'scrub'}
+                <!-- In-flight: cancel button (the piece aborts + partial file is kept) -->
+                <button
+                  class="flex items-center gap-1 rounded-md border border-accent px-2 py-1 text-xs text-accent transition-colors hover:border-error hover:text-error"
+                  onclick={() => { pendingPiece = null; apiClient.deleteDownload(stream.id); }}
+                  title="Abort the scrub download and delete its files"
+                >
+                  <Icon name="close" size={12} /> Cancel scrub ({Math.round((pieceProgress.percent ?? 0) * 100)}%)
+                </button>
               {:else}
                 <button
                   class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
-                  onclick={() => pieceMutation.mutate('scrub')}
+                  onclick={() => startPiece('scrub')}
                   disabled={mediaBusy || pieceMutation.isPending}
                   title="Download a 540p scrub file for fast review"
                 >
@@ -232,21 +267,40 @@
                 </button>
               {/if}
               {#if !hasHq}
-                <button
-                  class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
-                  onclick={() => pieceMutation.mutate('hq')}
-                  disabled={mediaBusy || pieceMutation.isPending}
-                  title="Download the full-quality file (capped by settings)"
-                >
-                  <Icon name="download" size={12} /> Download HQ
-                </button>
+                {#if pieceProgress?.kind === 'hq'}
+                  <button
+                    class="flex items-center gap-1 rounded-md border border-accent px-2 py-1 text-xs text-accent transition-colors hover:border-error hover:text-error"
+                    onclick={() => { pendingPiece = null; apiClient.deleteDownload(stream.id); }}
+                    title="Abort the HQ download and delete its files"
+                  >
+                    <Icon name="close" size={12} /> Cancel HQ
+                  </button>
+                {:else}
+                  <button
+                    class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
+                    onclick={() => startPiece('hq')}
+                    disabled={mediaBusy || pieceMutation.isPending}
+                    title="Download the full-quality file (capped by settings)"
+                  >
+                    <Icon name="download" size={12} /> Download HQ
+                  </button>
+                {/if}
               {:else}
                 <span class="flex items-center gap-1 font-mono text-[10px] text-success">
                   <Icon name="check" size={11} /> HQ on disk
                 </span>
               {/if}
             </div>
-            {#if mediaBusy}
+            {#if pieceProgress}
+              <div class="flex flex-col gap-0.5">
+                <div class="h-1 overflow-hidden rounded-full bg-surface-3">
+                  <div class="h-full bg-accent transition-all" style="width: {(pieceProgress.percent ?? 0) * 100}%"></div>
+                </div>
+                <span class="font-mono text-[10px] text-ash-dim">
+                  {pieceProgress.kind} · {fmtPieceTime(pieceProgress.frontier)} on disk
+                </span>
+              </div>
+            {:else if mediaBusy}
               <div class="h-0.5 overflow-hidden rounded-full bg-surface-3">
                 <div class="h-full bg-accent transition-all" style="width: {dlState.overall.percent * 100}%"></div>
               </div>

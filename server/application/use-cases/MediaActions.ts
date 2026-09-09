@@ -12,8 +12,12 @@
 import type { StreamRepository, StreamMetadataRepository, FileSystemPort } from "@/application/ports/outbound.ts";
 import { DownloadOrchestrator, type DownloadState } from "@/adapters/outbound/vod/download-orchestrator.ts";
 import { resolveQualities, pickScrubQuality, pickBestQuality, downloadProgressive, extractVodId } from "@/adapters/outbound/vod/hls.ts";
+import { remuxToMp4, mp4Twin } from "@/adapters/outbound/vod/remux.ts";
 
 export class MediaActionsUseCase {
+  /** Live piece downloads by stream — DELETE /download aborts these too. */
+  private readonly pieceAborts = new Map<string, AbortController>();
+
   constructor(
     private readonly streams: StreamRepository,
     private readonly metadata: StreamMetadataRepository,
@@ -22,6 +26,15 @@ export class MediaActionsUseCase {
     /** Server cache root — the import flow writes VODs to {cacheDir}/vods/{streamId}. */
     private readonly cacheDir: string,
   ) {}
+
+  /** Abort a live piece download, if any. */
+  cancelPiece(streamId: string): boolean {
+    const controller = this.pieceAborts.get(streamId);
+    if (!controller) return false;
+    controller.abort();
+    this.pieceAborts.delete(streamId);
+    return true;
+  }
 
   /**
    * The artifact dir — derived from the scrubPath recorded by the download
@@ -137,29 +150,59 @@ export class MediaActionsUseCase {
     });
 
     const wasScrub = opts.kind === "scrub";
+    // Own the abort: DELETE /download must be able to cancel piece runs.
+    const controller = new AbortController();
+    this.pieceAborts.set(opts.streamId, controller);
+    if (opts.signal) opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
+    const pieceSignal = controller.signal;
+    // Piece progress: maintained locally then written wholesale — the
+    // fire-and-forget get/set chain here raced itself and dropped updates
+    // (the user-visible frozen progress bar).
+    let lastWrite = 0;
+    const liveState = await this.orchestrator.getState(opts.streamId);
     try {
       await downloadProgressive(quality.playlistUrl, destPath, {
-        signal: opts.signal,
+        signal: pieceSignal,
         lookahead: wasScrub ? 3 : 4,
+        onChunk: (index, offset, len) => {
+          void Deno.writeTextFile(
+            `${dir}/${opts.kind}.chunks`,
+            `${index} ${offset} ${len}\n`,
+            { append: true },
+          ).catch(() => {});
+        },
         onProgress: (p) => {
-          // Live state via the orchestrator's metadata channel.
-          void this.orchestrator.getState(opts.streamId).then((s) => {
-            if (wasScrub) s.scrubFrontierSec = p.downloadedSec;
-            const part = s.parts.find((x) => x.kind === opts.kind);
-            if (part) {
-              part.percent = p.percent;
-              part.downloadedSec = p.downloadedSec;
-              part.totalSec = p.totalSec;
-            }
-            void this.orchestrator.setState(opts.streamId, s);
-          });
+          if (wasScrub) liveState.scrubFrontierSec = p.downloadedSec;
+          const part = liveState.parts.find((x) => x.kind === opts.kind);
+          if (part) {
+            part.percent = p.percent;
+            part.downloadedSec = p.downloadedSec;
+            part.totalSec = p.totalSec;
+          }
+          liveState.overall.percent = p.percent;
+          // Throttle writes to ~2 Hz — every chunk would thrash SQLite.
+          const now = performance.now();
+          if (now - lastWrite > 1000) {
+            lastWrite = now;
+            void this.orchestrator.setState(opts.streamId, liveState);
+          }
         },
       });
+      // Final write + playable mp4 twin (raw TS is unplayable in Chromium).
+      if (wasScrub) liveState.scrubFrontierSec = Number.MAX_SAFE_INTEGER;
+      const twin = await remuxToMp4(destPath, mp4Twin(destPath));
+      if (wasScrub) {
+        liveState.scrubMp4 = twin ? mp4Twin(destPath) : null;
+      } else {
+        liveState.hqMp4 = twin ? mp4Twin(destPath) : null;
+      }
+      await this.orchestrator.setState(opts.streamId, liveState);
     } catch (err) {
+      this.pieceAborts.delete(opts.streamId);
       const state = await this.orchestrator.getState(opts.streamId);
       const part = state.parts.find((x) => x.kind === opts.kind);
       if (part) {
-        part.status = opts.signal?.aborted ? "skipped" : "failed";
+        part.status = controller.signal.aborted ? "skipped" : "failed";
         part.error = err instanceof Error ? err.message : String(err);
       }
       state.phase = "failed";
@@ -168,20 +211,23 @@ export class MediaActionsUseCase {
       throw err;
     }
 
-    const state = await this.orchestrator.getState(opts.streamId);
-    const part = state.parts.find((x) => x.kind === opts.kind);
+    const part = liveState.parts.find((x) => x.kind === opts.kind);
     if (part) {
       part.status = "done";
       part.percent = 1;
     }
     if (wasScrub) {
-      state.scrubPath = destPath;
-      state.scrubFrontierSec = Number.MAX_SAFE_INTEGER; // complete file
+      liveState.scrubPath = destPath;
     } else {
-      state.hqPath = destPath;
+      liveState.hqPath = destPath;
     }
-    state.phase = "done";
-    await this.orchestrator.setState(opts.streamId, state);
+    this.pieceAborts.delete(opts.streamId);
+    // Done only when BOTH video parts have playable files (a piece run can
+    // complete while the other piece never landed).
+    const bothPlayable = liveState.scrubPath !== null && liveState.hqPath !== null
+      && (liveState.scrubMp4 !== null || liveState.hqMp4 !== null);
+    liveState.phase = bothPlayable ? "done" : "idle";
+    await this.orchestrator.setState(opts.streamId, liveState);
     return { started: true, quality: quality.name };
   }
 }

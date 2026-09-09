@@ -442,6 +442,7 @@
       <VideoPlayer
         bind:this={playerComp}
         {streamId}
+        hls={Boolean(stream?.sourceUrl)}
         duration={stream?.duration ?? null}
         clips={visibleClips}
         currentClip={currentClip}
