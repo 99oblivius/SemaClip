@@ -132,6 +132,7 @@ export const ENGINE_PHASES = [
   "llm_triage",
   "axis_scoring",
   "endpoint_resolution",
+  "proxy_generation",
   "export_preparation",
 ] as const;
 export type EnginePhase = (typeof ENGINE_PHASES)[number];
@@ -145,6 +146,7 @@ export const PHASE_LABELS: Record<EnginePhase, string> = {
   llm_triage: "LLM triage",
   axis_scoring: "Per-axis scoring",
   endpoint_resolution: "Endpoint resolution",
+  proxy_generation: "Scrub proxy",
   export_preparation: "Export preparation",
 };
 

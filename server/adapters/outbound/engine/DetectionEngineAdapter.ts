@@ -13,6 +13,7 @@ import type { EnginePort } from "@/application/ports/outbound.ts";
 import { ENGINE_EVENT_TOPIC } from "@/application/ports/outbound.ts";
 import type { EventBus } from "@/application/ports/outbound.ts";
 import type { EngineCommand, EngineEvent, EnginePhase, Stream } from "shared/types";
+import { FFmpegAdapter } from "@/adapters/outbound/ffmpeg/FFmpegAdapter.ts";
 import { parseTwitchChatJson } from "../../../../detection/chat.ts";
 import { chatFeatures } from "../../../../detection/signals/chat.ts";
 import { audioFeatures, applyTranscriptCoverage } from "../../../../detection/signals/audio.ts";
@@ -203,6 +204,23 @@ export class DetectionEngineAdapter {
         signals: c.signals,
       });
     }
+
+    // ── Proxy generation (P0-10): scrub media, generated post-detection so
+    // it never delays candidate discovery. Failure is non-fatal — the video
+    // route falls back to the source VOD. ──
+    if (command.artifactDir) {
+      try {
+        this.emit({ type: "progress", jobId, phase: "proxy_generation", percent: 0.5, message: "Generating scrub proxy…" });
+        const proxyPath = `${command.artifactDir}/proxy.mp4`;
+        const ffmpeg = new FFmpegAdapter(this.config.ffmpegPath);
+        await ffmpeg.generateProxy({ vodPath, outputPath: proxyPath, height: 540 });
+        this.emit({ type: "progress", jobId, phase: "proxy_generation", percent: 1, message: "Proxy ready (540p)" });
+      } catch (err) {
+        console.error(`[engine] proxy generation failed (non-fatal):`, err);
+        this.emit({ type: "progress", jobId, phase: "proxy_generation", percent: 1, message: "Proxy generation failed — using full-res" });
+      }
+    }
+
     this.emit({ type: "complete", jobId, clipsFound: ranked.length });
     const total = ((performance.now() - t0) / 1000).toFixed(1);
     const timings = Object.entries(stageTimes).map(([p, s]) => `${p}=${s!.toFixed(1)}s`).join(", ");

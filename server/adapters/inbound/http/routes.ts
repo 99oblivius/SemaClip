@@ -629,18 +629,39 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     return c.json(devices);
   });
   // ── Video file serving (range requests for <video>) ──
+  // Video streaming — prefers the scrub proxy (P0-10) when one was generated
+  // during processing; falls back to the source VOD.
   app.get("/api/video/:streamId", async (c) => {
     const stream = await deps.getStream.execute(c.req.param("streamId"));
     if (!stream || !stream.vodPath) return c.json({ error: "Video not available" }, 404);
+
+    // Proxy preference: explicit ?src=full override, else proxy if it exists.
+    const wantFull = c.req.query("src") === "full";
+    let mediaPath = stream.vodPath;
+    if (!wantFull) {
+      try {
+        const meta = await deps.metadata.get(stream.id, "transcript_srt");
+        if (meta) {
+          const artifactDir = (JSON.parse(meta) as { path: string }).path.replace(/\/[^/]+$/, "");
+          const proxyPath = `${artifactDir}/proxy.mp4`;
+          if (await Deno.stat(proxyPath).then(() => true).catch(() => false)) {
+            mediaPath = proxyPath;
+          }
+        }
+      } catch {
+        // fall back to source
+      }
+    }
+
     try {
-      const stat = await Deno.stat(stream.vodPath);
+      const stat = await Deno.stat(mediaPath);
       const range = c.req.header("range");
       if (range) {
         const m = /bytes=(\d*)-(\d*)/.exec(range);
         if (m) {
           const start = m[1] ? parseInt(m[1], 10) : 0;
           const end = m[2] ? parseInt(m[2], 10) : stat.size - 1;
-          const file = await Deno.open(stream.vodPath, { read: true });
+          const file = await Deno.open(mediaPath, { read: true });
           await file.seek(start, Deno.SeekMode.Start);
           const buf = new Uint8Array(end - start + 1);
           await file.read(buf);
@@ -651,7 +672,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
           return c.body(buf, 206);
         }
       }
-      const file = await Deno.open(stream.vodPath, { read: true });
+      const file = await Deno.open(mediaPath, { read: true });
       c.header("Content-Length", String(stat.size));
       c.header("Accept-Ranges", "bytes");
       return c.body(file.readable);

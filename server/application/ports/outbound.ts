@@ -122,6 +122,13 @@ export interface FFmpegExportPort {
       backgroundOpacity: number;
     };
   }): Promise<{ exportPath: string; durationMs: number }>;
+  /** Generate a low-res scrub proxy (P0-10). Null vodPath output = reuse source dir. */
+  generateProxy(input: {
+    vodPath: string;
+    outputPath: string;
+    /** Target height in px (width derived from aspect). */
+    height: number;
+  }): Promise<{ proxyPath: string; durationMs: number }>;
 }
 
 /** Key-value settings store (the `settings` table — v1 created it, nothing used it). */

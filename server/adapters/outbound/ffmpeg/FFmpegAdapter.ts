@@ -34,6 +34,31 @@ export class FFmpegAdapter implements FFmpegExportPort, MediaProbePort {
     return { exportPath: input.outputPath, durationMs: performance.now() - start };
   }
 
+  /**
+   * Generates a scrub proxy (P0-10): 960×540-class H.264 with fast settings.
+   * Proxies trade encode time for scrub speed — `veryfast` preset, constant
+   * bitrate-friendly CRF, audio passthrough re-encoded to AAC stereo.
+   */
+  async generateProxy(input: { vodPath: string; outputPath: string; height: number }): Promise<{ proxyPath: string; durationMs: number }> {
+    const start = performance.now();
+    const args = [
+      "-y",
+      "-i", input.vodPath,
+      "-nostats",
+      "-vf", `scale=-2:${input.height}`,
+      "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+      "-c:a", "aac", "-b:a", "96k",
+      "-movflags", "+faststart", // stream-ready for the <video> element
+      input.outputPath,
+    ];
+    await this.run(args);
+    const stat = await Deno.stat(input.outputPath);
+    if (stat.size < 1024) {
+      throw new Error(`Proxy produced suspiciously small file (${stat.size} bytes)`);
+    }
+    return { proxyPath: input.outputPath, durationMs: performance.now() - start };
+  }
+
   private async probeDimensions(vodPath: string): Promise<[number, number]> {
     try {
       const cmd = new Deno.Command(this.probeBinaryPath, {
