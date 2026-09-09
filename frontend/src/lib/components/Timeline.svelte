@@ -25,6 +25,22 @@
     onSeek,
   }: Props = $props();
 
+  // ── Markers layer (P0-6): external shortlist evidence (Twitch chapters /
+  // user markers). Fetched once; rendered as hairline flags with tooltips.
+  const markersQuery = createQuery(() => ({
+    queryKey: ['markers', streamId],
+    queryFn: () => apiClient.getMarkers(streamId),
+    staleTime: Infinity, // markers are static per VOD
+  }));
+  let markers = $derived(markersQuery.data?.markers ?? [] as { t: number; label: string; source: string }[]);
+  type Marker = { t: number; label: string; source: string };
+  let hoveredMarker = $state<Marker | null>(null);
+
+  function markerClick(m: Marker) {
+    onSeek?.(m.t);
+    playerStore.update((s) => ({ ...s, pendingSeek: m.t }));
+  }
+
   let canvasEl = $state<HTMLCanvasElement | undefined>(undefined);
   let containerEl = $state<HTMLDivElement | undefined>(undefined);
   let rafId = 0;
@@ -279,6 +295,24 @@
       lastLabelEnd = labelX + labelW;
     }
 
+    // ── Marker flags (P0-6): hairline with a notch at the top, drawn under
+    // clip marks so machine candidates stay visually primary. ──
+    if (markers.length > 0) {
+      ctx.lineWidth = 1;
+      for (const m of markers) {
+        const x = Math.round(timeToX(m.t));
+        if (x < -1 || x > w + 1) continue;
+        ctx.strokeStyle = 'rgba(234, 179, 8, 0.45)'; // muted warning-gold
+        ctx.beginPath();
+        ctx.moveTo(x, 8);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+        // Notch at the flag head for click affordance.
+        ctx.fillStyle = 'rgba(234, 179, 8, 0.7)';
+        ctx.fillRect(x - 2, 4, 5, 5);
+      }
+    }
+
     // ── Clip marks ──
     for (const clip of clips) {
       const x = timeToX(clip.peakTime);
@@ -424,7 +458,7 @@
       return;
     }
 
-    // Hover detection: endpoints first, then clip marks.
+    // Hover detection: endpoints first, then clip marks, then marker flags.
     const ep = endpointAt(x);
     if (ep && containerEl) {
       containerEl.style.cursor = 'ew-resize';
@@ -436,6 +470,14 @@
       containerEl.style.cursor = clip ? 'pointer' : 'text';
     }
     hoveredClip = clip;
+    if (!clip) {
+      const MARKER_HIT_PX = 5;
+      const hit = markers.find((m) => Math.abs(timeToX(m.t) - x) <= MARKER_HIT_PX);
+      hoveredMarker = hit ?? null;
+      if (hit && containerEl) containerEl.style.cursor = 'pointer';
+    } else {
+      hoveredMarker = null;
+    }
   }
 
   function handleMouseDown(e: MouseEvent) {
@@ -450,14 +492,22 @@
       return;
     }
 
-    // 2. Clip mark click? Select it (don't seek).
+    // 2. Marker flag click? Jump to it (flags sit under clip marks).
+    const MARKER_HIT_PX = 5;
+    const marker = markers.find((m) => Math.abs(timeToX(m.t) - x) <= MARKER_HIT_PX);
+    if (marker) {
+      markerClick(marker);
+      return;
+    }
+
+    // 3. Clip mark click? Select it (don't seek).
     const clip = clipAt(t);
     if (clip) {
       onSelectClip(clip);
       return;
     }
 
-    // 3. Otherwise: seek immediately + begin scrub.
+    // 4. Otherwise: seek immediately + begin scrub.
     isScrubbing = true;
     if (onSeek) onSeek(t);
     playerStore.update((s) => ({ ...s, currentTime: t, isScrubbing: true }));
@@ -537,6 +587,10 @@
         <span class="text-accent">{hoveredClip.axis.toUpperCase()}</span>
         <span class="text-ash"> · {hoveredClip.score.toFixed(2)} · </span>
         <span class="text-ash-dim">{fmtTime(hoveredClip.peakTime)}</span>
+      {:else if hoveredMarker}
+        <span class="text-warning">⚑</span>
+        <span class="text-ash">{hoveredMarker.label || 'chapter'} · </span>
+        <span class="text-ash-dim">{fmtTime(hoveredMarker.t)}</span>
       {:else}
         <span class="text-ash">{fmtTime(xToTime(hoverX))}</span>
       {/if}

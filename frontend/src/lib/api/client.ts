@@ -153,4 +153,8 @@ export const apiClient = {
 
   patchTranscript: (streamId: string, edits: { index: number; text: string }[]) =>
     api<{ ok: boolean }>(`/streams/${streamId}/transcript`, { method: 'PATCH', body: JSON.stringify({ edits }) }),
+
+  // ── Markers (P0-6) ──
+  getMarkers: (streamId: string) =>
+    api<{ markers: { t: number; label: string; source: string }[] }>(`/streams/${streamId}/markers`),
 };
