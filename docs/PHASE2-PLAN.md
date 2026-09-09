@@ -38,15 +38,15 @@ Batch A — no-backend-needed UI work:
 - A5: key-light on candidate queue rows
 
 Batch B — backend endpoints needed:
-- B1: GET /api/streams/:id/markers + marker ingestion (P0-6/P1-8 v1: Twitch markers via GQL, no auth)
-- B2: GET /api/streams/:id/transcript (serve transcript.srt parsed) for caption edit (P0-8)
-- B3: PATCH /api/clips/:id (persist endpoint adjustments + review state — P0-11)
-- B4: GET /api/streams/:id/proxy + proxy generation during job (P0-10)
+- B1: GET /api/streams/:id/markers + marker ingestion (P0-6/P1-8 v1: Twitch markers via GQL, no auth) ✅ 397f9b4 — chapters via persisted query VideoPlayer_ChapterSelectButtonVideo (21 live markers verified); user `/marker` STREAM_MARKERs need OAuth, deferred
+- B2: GET /api/streams/:id/transcript (serve transcript.srt parsed) for caption edit (P0-8) ✅ fc5f41e — + PATCH applies edits to disk
+- B3: PATCH /api/clips/:id (persist endpoint adjustments + review state — P0-11) ✅ 45fd019
+- B4: GET /api/streams/:id/proxy + proxy generation during job (P0-10) ✅ bc8bae0 — proxy generated post-detection; video route prefers proxy.mp4, ?src=full override
 
 Batch C — export rebuild (P0-7/8/9, P1-2/3):
-- C1: presets table in DB + preset CRUD endpoints + PresetPicker
-- C2: ExportSheet → inline panel w/ crop preview + naming template + live filename preview
-- C3: caption editor (line-level text edit, word timings kept, P0-8)
+- C1: presets table in DB + preset CRUD endpoints + PresetPicker ✅ a919be8
+- C2: ExportSheet → inline panel w/ crop preview + naming template + live filename preview ✅ 8890fae — became a first-class /export screen (modals are banned by §5); naming template feeds the export filename (b6a941f)
+- C3: caption editor (line-level text edit, word timings kept, P0-8) ✅ fc5f41e + 40c990a
 
 Batch D — structure:
 - D1: split Review page into components
