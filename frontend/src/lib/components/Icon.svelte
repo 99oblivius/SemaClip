@@ -5,7 +5,8 @@
     | 'queue' | 'check' | 'alert' | 'chevron-right' | 'chevron-left' | 'close' | 'search'
     | 'grid' | 'waveform' | 'clock' | 'cpu' | 'volume' | 'volume-mute' | 'expand' | 'compress'
     | 'rewind' | 'fast-forward' | 'zoom-in' | 'zoom-out' | 'keyboard' | 'back' | 'shuffle'
-    | 'eye' | 'bookmark' | 'film' | 'arrow-left' | 'arrow-right' | 'gauge' | 'frame';
+    | 'eye' | 'bookmark' | 'film' | 'arrow-left' | 'arrow-right' | 'gauge' | 'frame'
+    | 'layers' | 'music' | 'caption' | 'image' | 'edit' | 'flag' | 'refresh' | 'folder';
 
   interface Props {
     name: IconName;
@@ -61,6 +62,14 @@
     'arrow-left': 'M19 12H5M12 19l-7-7 7-7',
     'arrow-right': 'M5 12h14M12 5l7 7-7 7',
     gauge: 'M12 4a8 8 0 100 16 8 8 0 000-16zM12 12l4-3',
+    layers: 'M12 3l9 5-9 5-9-5 9-5zM3 13l9 5 9-5M3 17l9 5 9-5',
+    music: 'M9 18a2 2 0 100 4 2 2 0 000-4zM9 20V5l10-2v13M19 16a2 2 0 100 4 2 2 0 000-4',
+    caption: 'M3 5h18v12H8l-5 4zM7 10h6M7 13h10',
+    image: 'M3 5h18v14H3zM3 15l5-5 4 4 3-3 6 6M9 9a1 1 0 100 2 1 1 0 000-2',
+    edit: 'M4 20l4-1L20 7l-3-3L5 16l-1 4zM14 6l4 4',
+    flag: 'M6 21V4m0 1h12l-3 4 3 4H6',
+    refresh: 'M21 12a9 9 0 11-2.6-6.3M21 3v6h-6',
+    folder: 'M3 6h6l2 2h10v12H3z',
   };
 </script>
 
