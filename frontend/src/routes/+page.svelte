@@ -343,10 +343,12 @@
       </section>
     {/if}
 
-    <!-- Progressive download progress (unified bar + itemized popover) -->
-    {#if streams.length > 0}
+    <!-- Download progress (unified bar + itemized popover). Filtered by the
+         selected channel; a satisfied download (fully done, playable files
+         on disk) leaves the list — the stream lives in the library rows. -->
+    {#if filteredStreams.some((s) => s.sourceUrl)}
       <section class="flex flex-col gap-2" aria-label="Download progress">
-        {#each streams.filter((s) => s.sourceUrl) as stream (stream.id)}
+        {#each filteredStreams.filter((s) => s.sourceUrl) as stream (stream.id)}
           <DownloadProgress streamId={stream.id} />
         {/each}
       </section>

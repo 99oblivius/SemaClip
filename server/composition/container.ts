@@ -196,6 +196,8 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
       downloadState: (id: string) => downloadOrchestrator.getState(id),
       cancelDownload: (id: string) => importByUrl.cancelProgressive(id),
       deleteScrub: (id: string) => mediaActions.deleteScrub(id),
+      deleteDownload: (id: string) => importByUrl.deleteDownload(id, config.cacheDir),
+      resumeDownload: (id: string) => importByUrl.resumeDownload(id),
       downloadPiece: (opts: { streamId: string; kind: "scrub" | "hq"; scrubHeightCap?: number; maxHeight?: number | null; signal?: AbortSignal | undefined }) =>
         mediaActions.downloadPiece(opts),
       metadata: metadataRepo,

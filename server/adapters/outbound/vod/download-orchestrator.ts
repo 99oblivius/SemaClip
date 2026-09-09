@@ -155,6 +155,9 @@ export class DownloadOrchestrator {
     includeScrub: boolean;
     signal?: AbortSignal;
     onPartDone?: (kind: DownloadPartKind, state: DownloadState) => void | Promise<void>;
+    /** Resume: keep the on-disk chunk prefix of each video part and download
+     *  only the missing tail (false = start over). */
+    resume?: boolean;
   }): Promise<DownloadState> {
     const existing = await this.getState(opts.streamId);
     if (existing.phase === "running") {
@@ -186,10 +189,27 @@ export class DownloadOrchestrator {
     rt.get("chat")!.weightBytes = 1;
     rt.get("markers")!.weightBytes = 1;
 
-    // ── Part 1: chat (GQL, page-by-page) ──
+    // ── Part 1: chat (GQL, page-by-page) — skipped entirely when the file
+    // already exists (resume: chat is immutable per VOD). ──
+    const chatPath = `${opts.destDir}/chat.json`;
+    if (opts.resume && await this.fileExists(chatPath)) {
+      try {
+        const parsed = JSON.parse(await Deno.readTextFile(chatPath)) as { comments?: unknown[] };
+        rt.get("chat")!.status = "done";
+        rt.get("chat")!.percent = 1;
+        state.chatPath = chatPath;
+        state.chatCount = parsed.comments?.length ?? 0;
+        await opts.onPartDone?.("chat", state);
+      } catch {
+        // corrupt file → fall through to a fresh fetch below
+        rt.get("chat")!.status = "running";
+      }
+    }
+    if (rt.get("chat")!.status !== "running") {
+      await this.persist(opts.streamId, state, rt);
+    } else {
     rt.get("chat")!.status = "running";
     try {
-      const chatPath = `${opts.destDir}/chat.json`;
       const n = await downloadChat(vodId, chatPath, {
         signal: opts.signal,
         onProgress: ({ comments }) => {
@@ -216,6 +236,7 @@ export class DownloadOrchestrator {
       }
       // Chat failure doesn't block video — the stream can still be reviewed.
       this.fail(rt.get("chat")!, err);
+    }
     }
     await this.persist(opts.streamId, state, rt);
 
@@ -246,9 +267,15 @@ export class DownloadOrchestrator {
       if (target) {
         const tsPath = `${opts.destDir}/scrub.ts`;
         const lastMux = { t: 0 };
+        // Resume from the previous run's frontier when the .ts survives —
+        // chunk-complete prefix is kept, only the tail re-downloads.
+        const resumeSec = opts.resume && await this.fileSeconds(tsPath).then((s) => s > 0).catch(() => false)
+          ? Math.floor(await this.fileSeconds(tsPath))
+          : 0;
         try {
           await downloadProgressive(target.playlistUrl, tsPath, {
             signal: opts.signal ?? undefined,
+            resumeSec,
             onProgress: (p) => {
               const part = rt.get("scrub")!;
               this.noteVideoProgress(part, p, target);
@@ -283,9 +310,13 @@ export class DownloadOrchestrator {
     rt.get("scrub")!.status = "running";
     const scrubTs = `${opts.destDir}/scrub.ts`;
     const lastMuxScrub = { t: 0 };
+    const scrubResume = opts.resume
+      ? Math.floor(await this.fileSeconds(scrubTs))
+      : 0;
     try {
       await downloadProgressive(scrub.playlistUrl, scrubTs, {
         signal: opts.signal ?? undefined,
+        resumeSec: scrubResume,
         onProgress: (p) => {
           const part = rt.get("scrub")!;
           this.noteVideoProgress(part, p, scrub);
@@ -328,10 +359,14 @@ export class DownloadOrchestrator {
       rt.get("hq")!.status = "running";
       const hqTs = `${opts.destDir}/hq.ts`;
       const lastMuxHq = { t: 0 };
+      const hqResume = opts.resume
+        ? Math.floor(await this.fileSeconds(hqTs))
+        : 0;
       try {
         await downloadProgressive(hq.playlistUrl, hqTs, {
           signal: opts.signal ?? undefined,
           lookahead: 4,
+          resumeSec: hqResume,
           onProgress: (p) => {
             const part = rt.get("hq")!;
             this.noteVideoProgress(part, p, hq);
@@ -361,6 +396,28 @@ export class DownloadOrchestrator {
     }
 
     return this.finalize(opts.streamId, state, rt);
+  }
+
+  private async fileExists(path: string): Promise<boolean> {
+    return await Deno.stat(path).then(() => true).catch(() => false);
+  }
+
+  /** Actual media seconds on disk (ffprobe) — the resume base. 0 on any
+   *  failure (missing/corrupt file → fresh download). */
+  private async fileSeconds(path: string): Promise<number> {
+    const cmd = new Deno.Command("ffprobe", {
+      args: ["-v", "quiet", "-print_format", "json", "-show_format", path],
+      stdout: "piped", stderr: "null",
+    });
+    const out = await cmd.output();
+    if (!out.success) return 0;
+    try {
+      const info = JSON.parse(new TextDecoder().decode(out.stdout));
+      const d = parseFloat(info.format?.duration ?? "0");
+      return Number.isFinite(d) && d > 0 ? d : 0;
+    } catch {
+      return 0;
+    }
   }
 
   /**
@@ -426,14 +483,18 @@ export class DownloadOrchestrator {
     const snapshot = this.snapshot(rt);
     state.parts = snapshot.parts;
     state.overall = snapshot.overall;
-    state.phase =
-      snapshot.parts.every((p) => p.status === "done" || p.status === "skipped")
+    // "done" must mean the video bytes are actually complete on disk — a
+    // chat/markers-only finish (video skipped by an abort) is NOT done; the
+    // user reported a download showing complete with an aborted scrub file.
+    const videoOk = state.scrubPath !== null && state.scrubMp4 !== null
+      && (state.hqPath === state.scrubPath || state.hqPath !== null);
+    state.phase = snapshot.parts.some((p) => p.status === "running")
+      ? "running"
+      : (videoOk && snapshot.parts.every((p) => p.status === "done" || p.status === "skipped"))
         ? "done"
-        : snapshot.parts.some((p) => p.status === "running")
-          ? "running"
-          : snapshot.parts.some((p) => p.status === "failed")
-            ? "failed"
-            : "idle";
+        : snapshot.parts.some((p) => p.status === "failed")
+          ? "failed"
+          : "idle";
     await this.setState(streamId, state);
     return state;
   }

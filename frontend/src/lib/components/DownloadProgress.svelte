@@ -14,14 +14,24 @@
   const stateQuery = createQuery(() => ({
     queryKey: ['download', streamId],
     queryFn: () => apiClient.getDownloadState(streamId),
-    refetchInterval: 1000, // 1 Hz; cheap — the state is a tiny JSON blob
+    refetchInterval: (q) => (q.state.data?.phase === 'running' ? 1000 : 5000),
   }));
 
   const dlState = $derived(stateQuery.data);
   let detailOpen = $state(false);
 
-  const cancelMutation = createMutation(() => ({
-    mutationFn: () => apiClient.cancelDownload(streamId),
+  // Delete download: abort in-flight + remove artifacts + clear state.
+  const deleteMutation = createMutation(() => ({
+    mutationFn: () => apiClient.deleteDownload(streamId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['download', streamId] });
+      queryClient.invalidateQueries({ queryKey: ['streams'] });
+    },
+  }));
+
+  // Resume: picks up from the on-disk chunk prefix; only the tail re-fetches.
+  const resumeMutation = createMutation(() => ({
+    mutationFn: () => apiClient.resumeDownload(streamId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['download', streamId] }),
   }));
 
@@ -45,14 +55,22 @@
       case 'done': return 'download complete';
       case 'failed': {
         const failed = dlState.parts.filter((p) => p.status === 'failed');
-        return `download issue: ${failed.map((f) => PART_LABELS[f.kind]).join(', ')}`;
+        return `download interrupted: ${failed.map((f) => PART_LABELS[f.kind]).join(', ')}`;
       }
       default: return '';
     }
   });
+
+  // A download that finished honestly (video bytes complete) leaves the
+  // list — the stream itself is already in the library rows. A "done" phase
+  // with no playable twin is NOT complete (aborted scrub); it stays with
+  // resume/delete actions.
+  const satisfied = $derived(Boolean(
+    dlState?.phase === 'done' && (dlState.scrubMp4 || dlState.hqMp4) && dlState.scrubFrontierSec > 0,
+  ));
 </script>
 
-{#if dlState && dlState.phase !== 'idle'}
+{#if dlState && dlState.phase !== 'idle' && !satisfied}
   <div class="rounded-md border border-border bg-surface px-3 py-2" role="status">
     <!-- Single unified bar: click for the itemized popover -->
     <button
@@ -62,9 +80,9 @@
       aria-controls="download-detail"
     >
       <Icon
-        name={dlState.phase === 'done' ? 'check' : dlState.phase === 'failed' ? 'alert' : 'download'}
+        name={dlState.phase === 'failed' ? 'alert' : 'download'}
         size={14}
-        class={dlState.phase === 'done' ? 'text-success' : dlState.phase === 'failed' ? 'text-error' : 'text-accent'}
+        class={dlState.phase === 'failed' ? 'text-error' : 'text-accent'}
       />
       <div class="min-w-0 flex-1">
         <div class="flex items-center justify-between gap-2 font-mono text-[10px]">
@@ -79,7 +97,7 @@
         </div>
         <div class="mt-1 h-1 overflow-hidden rounded-full bg-surface-3">
           <div
-            class="h-full transition-all {dlState.phase === 'failed' ? 'bg-error' : dlState.phase === 'done' ? 'bg-success' : 'bg-accent'}"
+            class="h-full transition-all {dlState.phase === 'failed' ? 'bg-error' : 'bg-accent'}"
             style="width: {dlState.overall.percent * 100}%"
           ></div>
         </div>
@@ -116,14 +134,26 @@
             <p class="pl-28 font-mono text-[10px] text-error/80">{part.error}</p>
           {/if}
         {/each}
-        {#if dlState.phase === 'running'}
+        <div class="mt-1 flex items-center justify-end gap-2">
+          {#if dlState.phase === 'failed'}
+            <button
+              class="rounded border border-border px-2 py-0.5 text-[10px] text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
+              onclick={() => resumeMutation.mutate()}
+              disabled={resumeMutation.isPending}
+              title="Keep the already-downloaded prefix; fetch only what's missing"
+            >
+              Resume download
+            </button>
+          {/if}
           <button
-            class="mt-1 self-end rounded border border-border px-2 py-0.5 text-[10px] text-ash transition-colors hover:border-error hover:text-error"
-            onclick={() => cancelMutation.mutate()}
+            class="rounded border border-border px-2 py-0.5 text-[10px] text-ash transition-colors hover:border-error hover:text-error"
+            onclick={() => deleteMutation.mutate()}
+            disabled={deleteMutation.isPending}
+            title="Abort the download and delete its files"
           >
-            Cancel download
+            Delete download
           </button>
-        {/if}
+        </div>
       </div>
     {/if}
   </div>

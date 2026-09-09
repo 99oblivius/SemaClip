@@ -50,6 +50,8 @@ export interface HttpDeps {
   downloadState: (streamId: string) => Promise<DownloadStateType>;
   cancelDownload: (streamId: string) => boolean;
   deleteScrub: (streamId: string) => Promise<{ deleted: boolean }>;
+  deleteDownload: (streamId: string) => Promise<boolean>;
+  resumeDownload: (streamId: string) => Promise<void>;
   downloadPiece: (opts: { streamId: string; kind: "scrub" | "hq"; scrubHeightCap?: number; maxHeight?: number | null; signal?: AbortSignal | undefined }) => Promise<{ started: boolean; quality: string | null }>
   metadata: StreamMetadataRepository;
   storage: StreamStorage;
@@ -126,11 +128,28 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     return c.json(state);
   });
 
-  // Cancel an in-flight progressive download.
+  // Delete a download: abort any in-flight run, remove its artifacts, reset
+  // the state to idle (also clears stuck/orphaned states — the old "cancel"
+  // was a no-op for those).
   app.delete("/api/streams/:id/download", async (c) => {
     const streamId = c.req.param("id");
-    const cancelled = deps.cancelDownload(streamId);
-    return c.json({ ok: cancelled }, cancelled ? 200 : 409);
+    try {
+      await deps.deleteDownload(streamId);
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  // Resume an interrupted download from the best on-disk point.
+  app.post("/api/streams/:id/download/resume", async (c) => {
+    const streamId = c.req.param("id");
+    try {
+      await deps.resumeDownload(streamId);
+      return c.json({ ok: true }, 202);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 409);
+    }
   });
 
   // Stream-config media actions (download-pipeline scope).

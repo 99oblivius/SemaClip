@@ -20,6 +20,9 @@ export interface DownloadState {
   scrubFrontierSec: number;
   scrubPath: string | null;
   hqPath: string | null;
+  /** Playable mp4 twins of the .ts files (Chromium can't demux raw TS). */
+  scrubMp4: string | null;
+  hqMp4: string | null;
   qualities: { name: string; width: number; height: number }[];
   startedAt: string | null;
 }

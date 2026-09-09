@@ -220,6 +220,11 @@ export async function downloadProgressive(
     signal?: AbortSignal | undefined;
     /** Fetch-ahead window size (default 3). */
     lookahead?: number;
+    /** Resume: seconds already on disk from a previous run. Chunks fully
+     *  below this point are skipped (not re-fetched); the file opens for
+     *  append and onProgress reports cumulative seconds (existing + new) so
+     *  the frontier never regresses. Default 0 = fresh download. */
+    resumeSec?: number;
   },
 ): Promise<void> {
   const playlist = await fetchPlaylist(playlistUrl);
@@ -228,13 +233,26 @@ export async function downloadProgressive(
 
   const totalSec = chunks.reduce((s, c) => s + c.durationSec, 0);
   const lookahead = Math.max(1, opts.lookahead ?? 3);
-  const dest = await Deno.open(destPath, { write: true, create: true, truncate: true });
+  const resumeSec = Math.max(0, opts.resumeSec ?? 0);
+  // First chunk index not fully covered by the on-disk prefix. A chunk
+  // straddling resumeSec is re-fetched — TS is append-friendly, so that's
+  // safe and keeps the logic simple.
+  let skippedSec = 0;
+  let firstIndex = 0;
+  while (firstIndex < chunks.length && skippedSec + chunks[firstIndex]!.durationSec <= resumeSec + 1e-6) {
+    skippedSec += chunks[firstIndex]!.durationSec;
+    firstIndex++;
+  }
+  const resuming = firstIndex > 0;
+  const dest = await Deno.open(destPath, {
+    write: true, create: true, append: resuming, truncate: !resuming,
+  });
   let bytes = 0;
-  let downloadedSec = 0;
+  let downloadedSec = skippedSec;
 
   try {
-    let nextFetchIndex = 0;
-    let nextWriteIndex = 0;
+    let nextFetchIndex = firstIndex;
+    let nextWriteIndex = firstIndex;
     const inFlight = new Map<number, Promise<{ index: number; data: Uint8Array }>>();
     const reorderBuffer = new Map<number, { index: number; data: Uint8Array }>();
 

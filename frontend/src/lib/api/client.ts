@@ -66,8 +66,11 @@ export const apiClient = {
   getDownloadState: (streamId: string) =>
     api<DownloadState>(`/streams/${streamId}/download`),
 
-  cancelDownload: (streamId: string) =>
+  deleteDownload: (streamId: string) =>
     api<{ ok: boolean }>(`/streams/${streamId}/download`, { method: 'DELETE' }),
+
+  resumeDownload: (streamId: string) =>
+    api<{ ok: boolean }>(`/streams/${streamId}/download/resume`, { method: 'POST' }),
 
   deleteScrub: (streamId: string) =>
     api<{ deleted: boolean }>(`/streams/${streamId}/scrub`, { method: 'DELETE' }),
