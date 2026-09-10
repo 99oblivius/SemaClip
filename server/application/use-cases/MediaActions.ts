@@ -67,6 +67,38 @@ export class MediaActionsUseCase {
   }
 
   /** Deletes the LQ proxy file if it exists; idempotent. */
+  /** Delete the HQ video only (hq.ts/.mp4 + chunk map). Proxy, chat and
+   *  the stream record's chat path are untouched. */
+  async deleteVideo(streamId: string): Promise<{ deleted: boolean }> {
+    const dir = await this.artifactDir(streamId);
+    if (!dir) return { deleted: false };
+    const targets = ["hq.ts", "hq.mp4", "hq.chunks", "video.mp4"];
+    let removed = false;
+    for (const name of targets) {
+      const path = `${dir}/${name}`;
+      if (await this.fs.exists(path)) {
+        await this.fs.remove(path);
+        removed = true;
+      }
+    }
+    // Legacy single-file imports: vodPath may point at a video in this dir.
+    const stream = await this.streams.findById(streamId);
+    if (stream && stream.vodPath && stream.vodPath.startsWith(`${dir}/`)) {
+      await this.fs.remove(stream.vodPath).catch(() => {});
+      removed = true;
+      await this.streams.update({ ...stream, vodPath: "" });
+    }
+    const state = await this.orchestrator.getState(streamId);
+    if (state.hqPath || state.hqMp4) {
+      state.hqPath = null;
+      state.hqMp4 = null;
+      const part = state.parts.find((x) => x.kind === "hq");
+      if (part && part.status === "done") part.status = "pending";
+      await this.orchestrator.setState(streamId, state);
+    }
+    return { deleted: removed };
+  }
+
   async deleteProxy(streamId: string): Promise<{ deleted: boolean }> {
     const dir = await this.artifactDir(streamId);
     if (!dir) return { deleted: false };
@@ -78,9 +110,11 @@ export class MediaActionsUseCase {
     const tsPath = target;
     await this.fs.remove(tsPath);
     // The mp4 twin is the playable form — leaving it would keep dead video
-    // on the video route's twin preference.
+    // on the video route's twin preference. The chunk map dies with it.
     await this.fs.remove(`${dir}/proxy.mp4`).catch(() => {});
     await this.fs.remove(`${dir}/scrub.mp4`).catch(() => {});
+    await this.fs.remove(`${dir}/proxy.chunks`).catch(() => {});
+    await this.fs.remove(`${dir}/scrub.chunks`).catch(() => {});
     // State note: proxyPath/proxyFrontierSec in the download state describe
     // what WAS downloaded; clearing them keeps the UI honest (review now
     // proxys the HQ file or falls back to source).
@@ -318,6 +352,7 @@ export class MediaActionsUseCase {
             part.percent = part.percent === 0 ? 0.01 : Math.min(0.99, part.percent + 0.01);
             part.downloadedSec = p.comments;
             part.totalSec = p.pages;
+            part.downloadedBytes = p.comments * 180; // rough per-comment bytes for the size label
           }
           const now = performance.now();
           if (now - lastWrite > 1000) {

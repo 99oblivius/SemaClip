@@ -102,8 +102,14 @@
 
   function fmtPieceTime(sec: number): string {
     const h = Math.floor(sec / 3600);
-    const m = Math.floor((sec % 60) / 60);
+    const m = Math.floor((sec % 3600) / 60);
     return h > 0 ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m`;
+  }
+
+  function fmtBytes(bytes: number): string {
+    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)}GB`;
+    if (bytes >= 1024 ** 2) return `${Math.round(bytes / 1024 ** 2)}MB`;
+    return `${Math.round(bytes / 1024)}KB`;
   }
 
   // Clear the pending marker when the piece reaches a terminal status.
@@ -140,14 +146,15 @@
     },
   }));
 
-  // HQ trash: clear the stream's video path (the file itself is deleted with
-  // the whole-download action; this detaches the record like Delete Project
-  // minus the project). Uses the download delete for URL streams.
+  // HQ trash: deletes ONLY the video (hq.ts/.mp4 + chunk map). Proxy and
+  // chat stay untouched (deleteDownload nukes everything — that's the
+  // Download-section Delete, not this row's trash).
   const deleteHqMutation = createMutation(() => ({
-    mutationFn: () => apiClient.deleteDownload(stream.id),
+    mutationFn: () => apiClient.deleteVideo(stream.id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['download', stream.id] });
       queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
+      vodPath = '';
     },
   }));
 
@@ -279,43 +286,58 @@
           </div>
 
           {#each [
-              { key: 'hq', label: 'Video (HQ)', has: hasHq, running: pendingPiece === 'hq', progress: pieceProgress?.kind === 'hq' ? pieceProgress.percent : null },
-              { key: 'proxy', label: 'Proxy video', has: hasProxy, running: pendingPiece === 'proxy', progress: pieceProgress?.kind === 'proxy' ? pieceProgress.percent : null },
-              { key: 'chat', label: 'Chat', has: hasChat, running: pendingPiece === 'chat', progress: null },
+              { key: 'hq', label: 'Video (HQ)', has: hasHq, running: pendingPiece === 'hq', part: dlState?.parts.find((p) => p.kind === 'hq') },
+              { key: 'proxy', label: 'Proxy video', has: hasProxy, running: pendingPiece === 'proxy', part: dlState?.parts.find((p) => p.kind === 'proxy') },
+              { key: 'chat', label: 'Chat', has: hasChat, running: pendingPiece === 'chat', part: dlState?.parts.find((p) => p.kind === 'chat') },
             ] as row (row.key)}
-            <div class="flex items-center gap-2">
-              <span class="w-24 shrink-0 font-mono text-xs text-ash">{row.label}</span>
-              {#if row.running}
-                <button
-                  class="flex items-center gap-1 rounded-md border border-accent px-2 py-1 text-xs text-accent transition-colors hover:border-error hover:text-error"
-                  onclick={() => { pendingPiece = null; apiClient.deleteDownload(stream.id); }}
-                  title="Cancel this download"
-                >
-                  <Icon name="close" size={11} /> Cancel{row.progress !== null ? ` ${Math.round((row.progress ?? 0) * 100)}%` : ''}
-                </button>
-              {:else if row.has}
-                <span class="flex items-center gap-1 font-mono text-[11px] text-success" title="On disk">
-                  <Icon name="check" size={11} /> on disk
-                </span>
-              {:else}
-                <button
-                  class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
-                  onclick={() => startPiece(row.key as 'proxy' | 'hq' | 'chat')}
-                  disabled={mediaBusy || pieceMutation.isPending || !streamLink.trim()}
-                  title={streamLink.trim() ? 'Download from the stream link' : 'Set the stream link first'}
-                >
-                  <Icon name="download" size={11} /> Download
-                </button>
-              {/if}
-              <span class="flex-1"></span>
-              {#if row.has}
-                <button
-                  class="flex h-6 w-6 items-center justify-center rounded text-ash-dim transition-colors hover:text-error"
-                  onclick={() => (trashTarget = row.key as TrashTarget)}
-                  aria-label={`Delete ${row.label}`}
-                >
-                  <Icon name="trash" size={12} />
-                </button>
+            <div class="flex flex-col gap-0.5">
+              <div class="flex items-center gap-2">
+                <span class="w-24 shrink-0 font-mono text-xs text-ash">{row.label}</span>
+                {#if row.running}
+                  <button
+                    class="flex items-center gap-1 rounded-md border border-accent px-2 py-1 text-xs text-accent transition-colors hover:border-error hover:text-error"
+                    onclick={() => { pendingPiece = null; apiClient.deleteDownload(stream.id); }}
+                    title="Cancel this download"
+                  >
+                    <Icon name="close" size={11} /> Cancel
+                  </button>
+                {:else if row.has}
+                  <span class="flex items-center gap-1 font-mono text-[11px] text-success" title="On disk">
+                    <Icon name="check" size={11} /> on disk
+                  </span>
+                {:else}
+                  <button
+                    class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
+                    onclick={() => startPiece(row.key as 'proxy' | 'hq' | 'chat')}
+                    disabled={mediaBusy || pieceMutation.isPending || !streamLink.trim()}
+                    title={streamLink.trim() ? 'Download from the stream link' : 'Set the stream link first'}
+                  >
+                    <Icon name="download" size={11} /> Download
+                  </button>
+                {/if}
+                {#if row.has && row.part && row.part.downloadedBytes > 0}
+                  <span class="font-mono text-[10px] text-ash-dim">{fmtBytes(row.part.downloadedBytes)}</span>
+                {/if}
+                <span class="flex-1"></span>
+                {#if row.has}
+                  <button
+                    class="flex h-6 w-6 items-center justify-center rounded text-ash-dim transition-colors hover:text-error"
+                    onclick={() => (trashTarget = row.key as TrashTarget)}
+                    aria-label={`Delete ${row.label}`}
+                  >
+                    <Icon name="trash" size={12} />
+                  </button>
+                {/if}
+              </div>
+              {#if row.running && row.part && row.part.status === 'running'}
+                <div class="flex items-center gap-2 pl-[6.5rem]">
+                  <div class="h-1 flex-1 overflow-hidden rounded-full bg-surface-3">
+                    <div class="h-full bg-accent transition-all" style="width: {row.part.percent * 100}%"></div>
+                  </div>
+                  <span class="font-mono text-[10px] text-ash-dim">
+                    {row.part.downloadedBytes > 0 ? `${fmtBytes(row.part.downloadedBytes)} · ` : ''}{Math.round(row.part.percent * 100)}%
+                  </span>
+                </div>
               {/if}
             </div>
           {/each}

@@ -55,6 +55,7 @@ export interface HttpDeps {
   vod: VodDownloadPort;
   downloadState: (streamId: string) => Promise<DownloadStateType>;
   cancelDownload: (streamId: string) => boolean;
+  deleteVideo: (streamId: string) => Promise<{ deleted: boolean }>;
   deleteProxy: (streamId: string) => Promise<{ deleted: boolean }>;
   deleteChat: (streamId: string) => Promise<{ deleted: boolean }>;
   downloadChatPiece: (opts: { streamId: string }) => Promise<{ started: boolean; count: number }>;
@@ -162,6 +163,11 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   });
 
   // Stream-config media actions (download-pipeline scope).
+  app.delete("/api/streams/:id/video", async (c) => {
+    const result = await deps.deleteVideo(c.req.param("id"));
+    return c.json(result);
+  });
+
   app.delete("/api/streams/:id/proxy", async (c) => {
     const result = await deps.deleteProxy(c.req.param("id"));
     return c.json(result);
@@ -576,7 +582,23 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
 
         try {
           const stream = await deps.getStream.execute(streamId);
-          if (!stream || !stream.vodPath) {
+          if (!stream) {
+            send({ error: "Video not available" });
+            close();
+            return;
+          }
+          // The waveform decodes whatever media the player uses — the mp4
+          // twin when present (same bytes the video route serves), else the
+          // source vodPath. Without this, a mid-download stream has no
+          // vodPath yet and the spectrum stays empty while video plays.
+          const dl = await deps.downloadState(streamId);
+          let mediaPath = stream.vodPath ?? "";
+          const statOk = (p: string) => Deno.stat(p).then(() => true).catch(() => false);
+          if (!mediaPath || !(await statOk(mediaPath))) {
+            const twin = dl.proxyMp4 ?? dl.hqMp4;
+            mediaPath = twin && await statOk(twin) ? twin : "";
+          }
+          if (!mediaPath) {
             send({ error: "Video not available" });
             close();
             return;
@@ -612,7 +634,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
           // ── Cache miss: compute from ffmpeg. ──
           // 1. Get duration.
           const probe = new Deno.Command("ffprobe", {
-            args: ["-v", "quiet", "-print_format", "json", "-show_format", stream.vodPath],
+            args: ["-v", "quiet", "-print_format", "json", "-show_format", mediaPath],
             stdout: "piped", stderr: "piped",
           });
           const probeOut = await probe.output();
@@ -636,7 +658,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
 
           // 3. Stream priority region (from aroundIndex to end) first.
           for await (const batch of streamPeaks(
-            stream.vodPath,
+            mediaPath,
             aroundIndex * peakTime,
             null,
             aroundIndex,
@@ -652,7 +674,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
           // 4. Then stream the beginning (0 to aroundIndex), filling the gap.
           if (!closed && aroundIndex > 0) {
             for await (const batch of streamPeaks(
-              stream.vodPath,
+              mediaPath,
               0,
               aroundIndex * peakTime,
               0,
@@ -805,6 +827,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
       : mediaPath.endsWith(".webm") ? "video/webm"
       : "application/octet-stream";
     c.header("Content-Type", mime);
+    c.header("Cache-Control", "no-store");
     if (!mediaPath) {
       return c.json({ error: "Video not available yet" }, 404);
     }

@@ -316,7 +316,7 @@ async function fetchPlaylist(url: string): Promise<string> {
   return res.text();
 }
 
-async function fetchWithRetry(url: string, signal?: AbortSignal, attempts = 3): Promise<Response> {
+async function fetchWithRetry(url: string, signal?: AbortSignal, attempts = 6): Promise<Response> {
   let lastErr: unknown = null;
   for (let i = 0; i < attempts; i++) {
     try {
@@ -326,7 +326,9 @@ async function fetchWithRetry(url: string, signal?: AbortSignal, attempts = 3): 
     } catch (err) {
       if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
       lastErr = err;
-      await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+      // Long backoff: transient CDN throttles (user-reported 3-attempt
+      // failure mid-download killed the whole part) deserve patience.
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** i));
     }
   }
   throw new Error(`chunk failed after ${attempts} attempts: ${url} (${lastErr})`);

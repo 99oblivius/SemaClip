@@ -233,7 +233,10 @@ export class ImportStreamByUrlUseCase {
     await new Promise((r) => setTimeout(r, 300));
 
     const dir = `${cacheDir}/vods/${streamId}`;
-    for (const name of ["proxy.ts", "proxy.mp4", "hq.ts", "hq.mp4", "chat.json"]) {
+    for (const name of [
+      "proxy.ts", "proxy.mp4", "proxy.chunks", "scrub.ts", "scrub.mp4", "scrub.chunks",
+      "hq.ts", "hq.mp4", "hq.chunks", "video.mp4", "chat.json",
+    ]) {
       try {
         await Deno.remove(`${dir}/${name}`);
       } catch {

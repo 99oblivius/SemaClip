@@ -9,6 +9,8 @@ export interface DownloadPart {
   percent: number;
   downloadedSec: number;
   totalSec: number;
+  /** Bytes of the artifact on disk so far (chat: comments fetched). */
+  downloadedBytes: number;
   etaSec: number | null;
   error?: string;
 }

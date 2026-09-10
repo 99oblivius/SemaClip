@@ -212,6 +212,7 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
         const main = importByUrl.cancelProgressive(id);
         return piece || main;
       },
+      deleteVideo: (id: string) => mediaActions.deleteVideo(id),
       deleteProxy: (id: string) => mediaActions.deleteProxy(id),
       deleteChat: (id: string) => mediaActions.deleteChat(id),
       downloadChatPiece: (opts: { streamId: string }) => mediaActions.downloadChatPiece(opts),

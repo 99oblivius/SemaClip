@@ -36,6 +36,8 @@ export interface DownloadPart {
   /** Seconds of video downloaded (video parts). */
   downloadedSec: number;
   totalSec: number;
+  /** Bytes of the artifact on disk so far (chat: comments fetched). */
+  downloadedBytes: number;
   etaSec: number | null;
   error?: string;
 }
@@ -63,6 +65,8 @@ interface PartRuntime {
   percent: number;
   downloadedSec: number;
   totalSec: number;
+  /** Bytes of the artifact so far (chat: comments fetched). */
+  downloadedBytes: number;
   /** Byte weight for the overall mean. */
   weightBytes: number;
   /** Rolling throughput samples: [timestampMs, cumulativeBytes]. */
@@ -80,6 +84,7 @@ function newPart(): PartRuntime {
     percent: 0,
     downloadedSec: 0,
     totalSec: 0,
+    downloadedBytes: 0,
     weightBytes: 0,
     samples: [],
     etaSec: null,
@@ -230,9 +235,11 @@ export class DownloadOrchestrator {
         rt.get("chat")!.status = "running";
       }
     }
-    if (rt.get("chat")!.status !== "running") {
-      await this.persist(opts.streamId, state, rt);
-    } else {
+    // Fetch unless chat is already handled (done via resume skip, or
+    // running from a corrupt-file fallthrough). A fresh import lands here
+    // with status "pending" — the old `!== "running"` guard skipped the
+    // fetch entirely and chat stayed pending (user-reported).
+    if (rt.get("chat")!.status === "pending" || rt.get("chat")!.status === "running") {
     rt.get("chat")!.status = "running";
     try {
       const n = await downloadChat(vodId, chatPath, {
@@ -242,6 +249,7 @@ export class DownloadOrchestrator {
           // Percent unknown until done — show pages as pseudo-percent via
           // log scale (chat pages are tiny; the bar mainly proves liveness).
           part.percent = Math.min(0.95, Math.log10(1 + comments) / 4);
+          part.downloadedBytes = comments * 180;
           void this.persist(opts.streamId, state, rt);
         },
       });
@@ -532,6 +540,7 @@ export class DownloadOrchestrator {
       part.weightBytes = quality.bandwidth * p.totalSec;
     }
     part.percent = p.percent;
+    part.downloadedBytes = p.bytes;
     updateEta(part, p.bytes);
   }
 
@@ -574,6 +583,7 @@ export class DownloadOrchestrator {
       percent: p.percent,
       downloadedSec: p.downloadedSec,
       totalSec: p.totalSec,
+      downloadedBytes: p.downloadedBytes,
       etaSec: p.etaSec,
       ...(p.error ? { error: p.error } : {}),
     }));

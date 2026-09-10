@@ -72,6 +72,9 @@ export const apiClient = {
   resumeDownload: (streamId: string) =>
     api<{ ok: boolean }>(`/streams/${streamId}/download/resume`, { method: 'POST' }),
 
+  deleteVideo: (streamId: string) =>
+    api<{ deleted: boolean }>(`/streams/${streamId}/video`, { method: 'DELETE' }),
+
   deleteProxy: (streamId: string) =>
     api<{ deleted: boolean }>(`/streams/${streamId}/proxy`, { method: 'DELETE' }),
 
