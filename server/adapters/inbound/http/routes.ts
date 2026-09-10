@@ -291,6 +291,9 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     const stream = await deps.getStream.execute(c.req.param("id"));
     if (!stream || !stream.chatPath) return c.json({ error: "Chat not available" }, 404);
     try {
+      if (!(await Deno.stat(stream.chatPath).then(() => true).catch(() => false))) {
+        return c.json({ error: "Chat file not on disk" }, 404);
+      }
       const msgs = await loadChat(stream.chatPath);
       const duration = stream.duration ?? Math.max(0, ...msgs.map((m) => m.t));
       const bucketCount = Math.max(1, Math.ceil(duration));
@@ -746,6 +749,8 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
 
     // Proxy preference: explicit ?src=full override, else proxy if it exists.
     const wantFull = c.req.query("src") === "full";
+    // Download state is the primary source of truth for playable media —
+    // a mid-download stream has no vodPath yet but its scrub twin exists.
     let mediaPath = stream.vodPath ?? "";
     if (!wantFull) {
       // mp4 twins first — Chromium can't demux raw MPEG-TS, so a .ts vodPath
@@ -779,6 +784,9 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
       : mediaPath.endsWith(".webm") ? "video/webm"
       : "application/octet-stream";
     c.header("Content-Type", mime);
+    if (!mediaPath) {
+      return c.json({ error: "Video not available yet" }, 404);
+    }
     try {
       const stat = await Deno.stat(mediaPath);
       const range = c.req.header("range");
@@ -825,13 +833,16 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     if (!q) return c.json({ error: "No qualities available" }, 404);
 
     const playlistText = await (await fetch(q.playlistUrl)).text();
-    const origin = new URL(c.req.url).origin;
-    // Chunk index = ordinal position among non-comment, non-tag lines.
+    // RELATIVE chunk URLs — hls.js resolves them against the manifest URL,
+    // so they ride the same origin as the page (vite dev proxy on 5173,
+    // same-origin static serving in production). Absolute origins broke the
+    // dev setup with CORS errors (user-reported: requests from 5173 to the
+    // absolute 5174 chunk URLs were blocked).
     let index = 0;
     const out = playlistText.split("\n").map((line) => {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith("#")) return line;
-      return `${origin}/api/streams/${stream.id}/hls-chunk/${track}/${index++}`;
+      return `/api/streams/${stream.id}/hls-chunk/${track}/${index++}`;
     });
     return c.body(out.join("\n"), 200, { "Content-Type": "application/vnd.apple.mpegurl" });
   });
