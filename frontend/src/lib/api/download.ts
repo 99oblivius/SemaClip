@@ -15,6 +15,12 @@ export interface DownloadPart {
   error?: string;
 }
 
+export interface Artifact {
+  onDisk: boolean;
+  bytes: number;
+  path: string | null;
+}
+
 export interface DownloadState {
   phase: 'idle' | 'running' | 'done' | 'failed';
   parts: DownloadPart[];
@@ -27,6 +33,8 @@ export interface DownloadState {
   hqMp4: string | null;
   qualities: { name: string; width: number; height: number }[];
   startedAt: string | null;
+  /** Disk truth per artifact — computed fresh on every read server-side. */
+  presence?: Partial<Record<'proxy' | 'hq' | 'chat', Artifact>>;
 }
 
 export interface QualityInfo {
@@ -49,6 +57,6 @@ export function fmtEta(sec: number | null): string {
 export const PART_LABELS: Record<DownloadPartKind, string> = {
   chat: 'Chat',
   markers: 'Markers',
-  proxy: 'Proxy (540p)',
+  proxy: 'Proxy',
   hq: 'High quality',
 };

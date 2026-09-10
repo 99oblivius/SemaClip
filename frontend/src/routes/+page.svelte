@@ -281,7 +281,7 @@
     {#if filteredStreams.some((s) => s.sourceUrl)}
       <section class="flex flex-col gap-2" aria-label="Download progress">
         {#each filteredStreams.filter((s) => s.sourceUrl) as stream (stream.id)}
-          <DownloadProgress streamId={stream.id} />
+          <DownloadProgress streamId={stream.id} title={stream.title ?? stream.streamer ?? stream.id.slice(0, 8)} />
         {/each}
       </section>
     {/if}

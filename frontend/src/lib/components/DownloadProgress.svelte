@@ -6,9 +6,12 @@
 
   interface Props {
     streamId: string;
+    /** Project title for the container label (user-reported: the Library
+     *  container had no information about which project it belongs to). */
+    title?: string;
   }
 
-  let { streamId }: Props = $props();
+  let { streamId, title = '' }: Props = $props();
   const queryClient = useQueryClient();
 
   const stateQuery = createQuery(() => ({
@@ -19,6 +22,12 @@
 
   const dlState = $derived(stateQuery.data);
   let detailOpen = $state(false);
+  // Auto-expand the itemized view when something is in flight or failed —
+  // "what am I resuming?" must be visible without a click.
+  $effect(() => {
+    const phase = stateQuery.data?.phase;
+    if (phase === 'running' || phase === 'failed') detailOpen = true;
+  });
 
   // Delete download: abort in-flight + remove artifacts + clear state.
   const deleteMutation = createMutation(() => ({
@@ -84,6 +93,9 @@
         size={14}
         class={dlState.phase === 'failed' ? 'text-error' : 'text-accent'}
       />
+      {#if title}
+        <span class="max-w-40 shrink-0 truncate font-mono text-[10px] text-ash-dim" title={title}>{title}</span>
+      {/if}
       <div class="min-w-0 flex-1">
         <div class="flex items-center justify-between gap-2 font-mono text-[10px]">
           <span class="truncate {dlState.phase === 'failed' ? 'text-error' : 'text-ash'}">{phaseText}</span>

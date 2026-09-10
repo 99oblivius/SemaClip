@@ -237,6 +237,11 @@ export async function downloadProgressive(
   if (chunks.length === 0) throw new Error("Media playlist has no chunks");
 
   const totalSec = chunks.reduce((s, c) => s + c.durationSec, 0);
+  // Emit the total immediately — the UI gets real bar denominators from
+  // the first poll instead of 0/0 pending rows (user-reported empty bars).
+  if (opts.resumeSec) {
+    opts.onProgress({ downloadedSec: opts.resumeSec, totalSec, bytes: 0, percent: opts.resumeSec / totalSec });
+  }
   const lookahead = Math.max(1, opts.lookahead ?? 3);
   const resumeSec = Math.max(0, opts.resumeSec ?? 0);
   // First chunk index not fully covered by the on-disk prefix. A chunk

@@ -74,9 +74,20 @@
 
   // Per-artifact presence: proxy + HQ come from the download state, chat
   // from the stream record (present for file imports too).
-  const hasHq = $derived(Boolean(dlState?.hqPath) || Boolean(vodPath));
-  const hasProxy = $derived(Boolean(dlState?.proxyPath));
-  const hasChat = $derived(Boolean(chatPath));
+  // Presence = disk truth from the server (stat-based), never state paths.
+  const hasHq = $derived(Boolean(dlState?.presence?.hq?.onDisk) || Boolean(vodPath));
+  const hasProxy = $derived(Boolean(dlState?.presence?.proxy?.onDisk));
+  const hasChat = $derived(Boolean(dlState?.presence?.chat?.onDisk) || Boolean(chatPath));
+  // Size labels from real stat bytes; while a part runs, the growing size
+  // comes from the part's own byte tracking (files mid-write stat too).
+  const presenceBytes = $derived.by(() => {
+    const p = dlState?.presence;
+    return {
+      hq: p?.hq?.onDisk ? p.hq.bytes : 0,
+      proxy: p?.proxy?.onDisk ? p.proxy.bytes : 0,
+      chat: p?.chat?.onDisk ? p.chat.bytes : 0,
+    };
+  });
 
   const pieceMutation = createMutation(() => ({
     mutationFn: (kind: 'proxy' | 'hq' | 'chat') => apiClient.downloadPiece(stream.id, kind),
@@ -315,7 +326,9 @@
                     <Icon name="download" size={11} /> Download
                   </button>
                 {/if}
-                {#if row.has && row.part && row.part.downloadedBytes > 0}
+                {#if row.key === 'chat' && hasChat && presenceBytes.chat > 0}
+                  <span class="font-mono text-[10px] text-ash-dim">{fmtBytes(presenceBytes.chat)}</span>
+                {:else if row.key !== 'chat' && row.has && row.part && row.part.downloadedBytes > 0}
                   <span class="font-mono text-[10px] text-ash-dim">{fmtBytes(row.part.downloadedBytes)}</span>
                 {/if}
                 <span class="flex-1"></span>

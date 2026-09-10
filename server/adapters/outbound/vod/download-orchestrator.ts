@@ -58,6 +58,16 @@ export interface DownloadState {
   chatCount: number;
   qualities: { name: string; width: number; height: number }[];
   startedAt: string | null;
+  /** Disk truth per artifact, computed fresh on every read — never
+   *  persisted (this field is the "on disk / size" source of truth). */
+  presence?: Partial<Record<"proxy" | "hq" | "chat", Artifact>>;
+}
+
+/** One artifact: the primary file (.ts or the playable mp4) it represents. */
+export interface Artifact {
+  onDisk: boolean;
+  bytes: number;
+  path: string | null;
 }
 
 interface PartRuntime {
@@ -142,7 +152,9 @@ export class DownloadOrchestrator {
       delete (state as unknown as Record<string, unknown>).scrubPath;
       delete (state as unknown as Record<string, unknown>).scrubMp4;
       delete (state as unknown as Record<string, unknown>).scrubFrontierSec;
-      return await this.reconcile(streamId, state);
+      const reconciled = await this.reconcile(streamId, state);
+      reconciled.presence = await this.presence(reconciled);
+      return reconciled;
     } catch {
       return this.idle();
     }
@@ -201,6 +213,30 @@ export class DownloadOrchestrator {
 
     if (changed) await this.setState(streamId, state);
     return state;
+  }
+
+  /** Disk truth per artifact: primary file = the playable mp4 when
+   *  present, else the raw .ts; bytes from stat, never from the state. */
+  private async presence(state: DownloadState): Promise<NonNullable<DownloadState["presence"]>> {
+    const statOne = async (p: string | null): Promise<Artifact> => {
+      if (!p) return { onDisk: false, bytes: 0, path: null };
+      try {
+        const st = await Deno.stat(p);
+        return { onDisk: true, bytes: st.size, path: p };
+      } catch {
+        return { onDisk: false, bytes: 0, path: p };
+      }
+    };
+    // Prefer the playable mp4 twin as the artifact identity — that's what
+    // "on disk" means for playback; the .ts is its source.
+    const pick = (ts: string | null, mp4: string | null): Promise<Artifact> =>
+      mp4 ? statOne(mp4) : statOne(ts);
+    const chatPath = state.chatPath;
+    return {
+      proxy: await pick(state.proxyPath, state.proxyMp4),
+      hq: await pick(state.hqPath, state.hqMp4),
+      chat: await statOne(chatPath),
+    };
   }
 
   private idle(): DownloadState {
