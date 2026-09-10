@@ -215,7 +215,7 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
       deleteVideo: (id: string) => mediaActions.deleteVideo(id),
       deleteProxy: (id: string) => mediaActions.deleteProxy(id),
       deleteChat: (id: string) => mediaActions.deleteChat(id),
-      downloadChatPiece: (opts: { streamId: string }) => mediaActions.downloadChatPiece(opts),
+      downloadChatPiece: (opts: { streamId: string }) => mediaActions.downloadPiece({ ...opts, kind: "chat" }),
       openFolder: (id: string) => mediaActions.openFolder(id),
       deleteDownload: (id: string) => importByUrl.deleteDownload(id, config.cacheDir),
       resumeDownload: (id: string) => importByUrl.resumeDownload(id),

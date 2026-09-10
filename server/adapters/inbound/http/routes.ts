@@ -58,7 +58,7 @@ export interface HttpDeps {
   deleteVideo: (streamId: string) => Promise<{ deleted: boolean }>;
   deleteProxy: (streamId: string) => Promise<{ deleted: boolean }>;
   deleteChat: (streamId: string) => Promise<{ deleted: boolean }>;
-  downloadChatPiece: (opts: { streamId: string }) => Promise<{ started: boolean; count: number }>;
+  downloadChatPiece: (opts: { streamId: string }) => Promise<{ started: boolean; quality: string | null }>;
   openFolder: (streamId: string) => Promise<{ opened: boolean; dir: string | null }>;
   deleteDownload: (streamId: string) => Promise<boolean>;
   resumeDownload: (streamId: string) => Promise<void>;

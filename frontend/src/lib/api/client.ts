@@ -78,10 +78,18 @@ export const apiClient = {
   deleteProxy: (streamId: string) =>
     api<{ deleted: boolean }>(`/streams/${streamId}/proxy`, { method: 'DELETE' }),
 
-  downloadPiece: (streamId: string, kind: 'proxy' | 'hq' | 'chat', maxHeight?: number | null) =>
+  downloadPiece: (
+    streamId: string,
+    kind: 'proxy' | 'hq' | 'chat',
+    opts?: { maxHeight?: number | null; proxyHeightCap?: number | null },
+  ) =>
     api<{ started: boolean; quality: string | null; count?: number }>(`/streams/${streamId}/download-piece`, {
       method: 'POST',
-      body: JSON.stringify({ kind, maxHeight: maxHeight ?? null }),
+      body: JSON.stringify({
+        kind,
+        maxHeight: opts?.maxHeight ?? null,
+        proxyHeightCap: opts?.proxyHeightCap ?? null,
+      }),
     }),
 
   deleteChat: (streamId: string) =>

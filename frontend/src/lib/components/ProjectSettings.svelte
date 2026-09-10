@@ -5,7 +5,7 @@
   import ConfirmModal from './ConfirmModal.svelte';
   import DeleteConfirmModal from './DeleteConfirmModal.svelte';
   import type { Stream } from '$shared/types';
-  import type { DownloadState } from '$lib/api/download';
+  import type { DownloadState, QualityInfo } from '$lib/api/download';
 
   interface Props {
     stream: Stream;
@@ -89,8 +89,18 @@
     };
   });
 
+  // Per-piece quality selection: proxy defaults 540, HQ defaults source max.
+  // Resolved from the download state's quality list; fetched lazily when the
+  // settings open on a URL stream that hasn't resolved qualities yet.
+  let proxyHeight = $state<number | null>(540);
+  let hqHeight = $state<number | null>(null);
+  let qualityList = $state<QualityInfo[]>([]);
   const pieceMutation = createMutation(() => ({
-    mutationFn: (kind: 'proxy' | 'hq' | 'chat') => apiClient.downloadPiece(stream.id, kind),
+    mutationFn: (input: { kind: 'proxy' | 'hq' | 'chat'; maxHeight?: number | null; proxyHeightCap?: number | null }) =>
+      apiClient.downloadPiece(stream.id, input.kind, {
+        maxHeight: input.maxHeight ?? null,
+        proxyHeightCap: input.proxyHeightCap ?? null,
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['download', stream.id] });
       queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
@@ -99,8 +109,24 @@
   let pendingPiece = $state<'proxy' | 'hq' | 'chat' | null>(null);
   function startPiece(kind: 'proxy' | 'hq' | 'chat') {
     pendingPiece = kind;
-    pieceMutation.mutate(kind);
+    pieceMutation.mutate(
+      kind === 'proxy'
+        ? { kind, proxyHeightCap: proxyHeight ?? 540 }
+        : { kind, maxHeight: hqHeight },
+    );
   }
+  // Fetch the quality list once when the modal opens on a URL stream.
+  $effect(() => {
+    if (!open || !stream.sourceUrl || qualityList.length > 0 || (stream as { game?: string }).game === undefined) return;
+    apiClient.listQualities(stream.sourceUrl)
+      .then((d) => {
+        qualityList = d.qualities;
+        const heights = d.qualities.map((q) => q.height);
+        if (proxyHeight === null) proxyHeight = heights.includes(540) ? 540 : (heights.find((h) => h >= 360) ?? heights[0] ?? 540);
+        if (hqHeight === null) hqHeight = heights.length > 0 ? Math.max(...heights) : null;
+      })
+      .catch(() => {});
+  });
   // Piece live progress from the polled download state (1s refresh).
   const pieceProgress = $derived.by(() => {
     if (!dlState) return null;
@@ -317,6 +343,27 @@
                     <Icon name="check" size={11} /> on disk
                   </span>
                 {:else}
+                  {#if row.key === 'proxy' && !row.has && qualityList.length > 0}
+                    <select
+                      bind:value={proxyHeight}
+                      class="rounded border border-border bg-surface-2 px-1.5 py-1 text-[10px] text-ink focus:border-accent focus:outline-none"
+                      aria-label="Proxy resolution"
+                    >
+                      {#each qualityList as q (q.name)}
+                        <option value={q.height}>{q.name}</option>
+                      {/each}
+                    </select>
+                  {:else if row.key === 'hq' && !row.has && qualityList.length > 0}
+                    <select
+                      bind:value={hqHeight}
+                      class="rounded border border-border bg-surface-2 px-1.5 py-1 text-[10px] text-ink focus:border-accent focus:outline-none"
+                      aria-label="HQ resolution"
+                    >
+                      {#each qualityList as q (q.name)}
+                        <option value={q.height}>{q.name}</option>
+                      {/each}
+                    </select>
+                  {/if}
                   <button
                     class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
                     onclick={() => startPiece(row.key as 'proxy' | 'hq' | 'chat')}

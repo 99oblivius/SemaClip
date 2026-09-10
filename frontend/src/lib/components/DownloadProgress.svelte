@@ -22,11 +22,18 @@
 
   const dlState = $derived(stateQuery.data);
   let detailOpen = $state(false);
-  // Auto-expand the itemized view when something is in flight or failed —
-  // "what am I resuming?" must be visible without a click.
+  // Auto-expand ONCE on transition into running/failed — "what am I
+  // resuming?" surfaces itself, but the user can still collapse it (the
+  // previous version re-forced it open on every 1s poll).
+  let lastPhase = $state<string | null>(null);
   $effect(() => {
-    const phase = stateQuery.data?.phase;
-    if (phase === 'running' || phase === 'failed') detailOpen = true;
+    const phase = stateQuery.data?.phase ?? null;
+    if (phase !== lastPhase) {
+      if ((phase === 'running' || phase === 'failed') && lastPhase !== 'running' && lastPhase !== 'failed') {
+        detailOpen = true;
+      }
+      lastPhase = phase;
+    }
   });
 
   // Delete download: abort in-flight + remove artifacts + clear state.

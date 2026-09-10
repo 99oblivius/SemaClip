@@ -239,6 +239,183 @@ export class DownloadOrchestrator {
     };
   }
 
+
+  /**
+   * Start a single-part download (manual piece) — the manager's public API
+   * for targeted re-downloads from project settings. Video pieces carry an
+   * explicit quality; chat pieces fetch GQL page-by-page. Live-run marked,
+   * abortable, throttled-persisted, twin-remuxed — identical plumbing to
+   * run()'s passes, without duplicating it in use-cases.
+   */
+  async startPiece(opts: {
+    streamId: string;
+    destDir: string;
+    kind: "proxy" | "hq" | "chat";
+    vodId: string;
+    quality?: HlsQuality | undefined;   // video pieces
+    signal?: AbortSignal | undefined;
+  }): Promise<void> {
+    const live = this.liveRuns.has(opts.streamId);
+    if (live) throw new Error("A download is already running for this stream");
+    this.markRunLive(opts.streamId, true);
+    if (opts.kind === "chat") {
+      await this.runChatPiece({ streamId: opts.streamId, destDir: opts.destDir, vodId: opts.vodId, signal: opts.signal });
+    } else {
+      await this.runVideoPiece({
+        streamId: opts.streamId,
+        destDir: opts.destDir,
+        kind: opts.kind,
+        quality: opts.quality!,
+        signal: opts.signal,
+      });
+    }
+  }
+
+  /** Canonical 4-part skeleton — every state write carries all parts so UI
+   *  rows never depend on a parts array that may be empty after reconcile. */
+  private ensureParts(state: DownloadState): Map<DownloadPartKind, PartRuntime> {
+    const rt = new Map<DownloadPartKind, PartRuntime>();
+    for (const kind of ["chat", "markers", "proxy", "hq"] as const) {
+      const persisted = state.parts.find((p) => p.kind === kind);
+      const part = persisted
+        ? { ...newPart(), ...persisted }
+        : newPart();
+      rt.set(kind, part);
+    }
+    rt.get("chat")!.weightBytes = 1;
+    rt.get("markers")!.weightBytes = 1;
+    return rt;
+  }
+
+  /** Generic single-part video executor: chunk map + throttled persist +
+   *  periodic twin remux + honest completion. One body for proxy and HQ. */
+  private async runVideoPiece(opts: {
+    streamId: string;
+    destDir: string;
+    kind: "proxy" | "hq";
+    quality: HlsQuality;
+    signal?: AbortSignal | undefined;
+  }): Promise<void> {
+    const { kind } = opts;
+    const tsPath = `${opts.destDir}/${kind}.ts`;
+    const controller = new AbortController();
+    if (opts.signal) opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
+
+    const started = await this.getState(opts.streamId);
+    const rt = this.ensureParts(started);
+    const part = rt.get(kind)!;
+    part.status = "running";
+    part.percent = 0;
+    delete (part as Partial<PartRuntime>).error;
+    await this.persist(opts.streamId, started, rt);
+
+    const mapPath = `${opts.destDir}/${kind}.chunks`;
+    const mapFile = await Deno.open(mapPath, { write: true, create: true, append: false });
+    const lastMux = { t: 0 };
+    let lastWrite = 0;
+    try {
+      await downloadProgressive(opts.quality.playlistUrl, tsPath, {
+        signal: controller.signal,
+        lookahead: kind === "proxy" ? 3 : 4,
+        onChunk: (index, offset, len) => {
+          void mapFile.write(new TextEncoder().encode(`${index} ${offset} ${len}\n`));
+        },
+        onProgress: (p) => {
+          this.noteVideoProgress(part, p, opts.quality);
+          if (kind === "proxy") {
+            started.proxyFrontierSec = p.downloadedSec;
+            started.proxyPath = tsPath;
+          } else {
+            started.hqPath = tsPath;
+          }
+          void this.remuxTwin(tsPath, started, lastMux).then((mp4) => {
+            if (kind === "proxy") started.proxyMp4 = mp4;
+            else started.hqMp4 = mp4;
+            void this.persist(opts.streamId, started, rt);
+          });
+          const now = performance.now();
+          if (now - lastWrite > 1000) {
+            lastWrite = now;
+            void this.persist(opts.streamId, started, rt);
+          }
+        },
+      });
+      part.status = "done";
+      part.percent = 1;
+      if (kind === "proxy") started.proxyPath = tsPath;
+      else started.hqPath = tsPath;
+      const mp4 = await remuxToMp4(tsPath, mp4Twin(tsPath));
+      if (kind === "proxy") started.proxyMp4 = mp4 ? mp4Twin(tsPath) : null;
+      else started.hqMp4 = mp4 ? mp4Twin(tsPath) : null;
+      started.phase = "done";
+      await this.persist(opts.streamId, started, rt);
+    } catch (err) {
+      part.status = controller.signal.aborted ? "skipped" : "failed";
+      part.error = err instanceof Error ? err.message : String(err);
+      started.phase = "failed";
+      started.overall.etaSec = null;
+      await this.persist(opts.streamId, started, rt);
+      throw err;
+    } finally {
+      try {
+        await mapFile.close();
+      } catch {
+        // already closed
+      }
+      this.markRunLive(opts.streamId, false);
+    }
+  }
+
+  /** Chat-only executor: page-by-page GQL fetch with an indeterminate part. */
+  private async runChatPiece(opts: {
+    streamId: string;
+    destDir: string;
+    vodId: string;
+    signal?: AbortSignal | undefined;
+  }): Promise<void> {
+    const chatPath = `${opts.destDir}/chat.json`;
+    const controller = new AbortController();
+    if (opts.signal) opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
+
+    const started = await this.getState(opts.streamId);
+    const rt = this.ensureParts(started);
+    const part = rt.get("chat")!;
+    part.status = "running";
+    part.percent = 0;
+    delete (part as Partial<PartRuntime>).error;
+    await this.persist(opts.streamId, started, rt);
+
+    try {
+      let lastWrite = 0;
+      const count = await downloadChat(opts.vodId, chatPath, {
+        signal: controller.signal,
+        onProgress: ({ comments }) => {
+          part.percent = Math.min(0.95, Math.log10(1 + comments) / 4);
+          part.downloadedBytes = comments * 180;
+          const now = performance.now();
+          if (now - lastWrite > 1000) {
+            lastWrite = now;
+            void this.persist(opts.streamId, started, rt);
+          }
+        },
+      });
+      part.status = "done";
+      part.percent = 1;
+      started.chatPath = chatPath;
+      started.chatCount = count;
+      started.phase = (started.proxyPath || started.hqPath) ? "done" : "idle";
+      await this.persist(opts.streamId, started, rt);
+    } catch (err) {
+      part.status = controller.signal.aborted ? "skipped" : "failed";
+      part.error = err instanceof Error ? err.message : String(err);
+      started.phase = (started.proxyPath || started.hqPath) ? "done" : "idle";
+      await this.persist(opts.streamId, started, rt);
+      throw err;
+    } finally {
+      this.markRunLive(opts.streamId, false);
+    }
+  }
+
   private idle(): DownloadState {
     return {
       phase: "idle",

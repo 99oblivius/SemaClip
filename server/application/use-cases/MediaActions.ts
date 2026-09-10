@@ -1,19 +1,16 @@
 /**
- * Media management actions (user-directed, download-pipeline scope):
- * - Delete the LQ proxy file (review falls back to full-res proxybing).
- * - Re-download a missing proxy or an HQ file at a different resolution
- *   (progressive orchestrator re-run, scoped to the missing part).
+ * Media management actions (user-directed, download-pipeline scope).
  *
- * The download state lives in stream metadata; the artifact dir is derived
- * from the transcript_srt path (same convention the engine and video route
- * use). Streams without an artifact dir can't have these actions applied.
+ * Thin delegation layer: the DownloadOrchestrator owns ALL download state
+ * (phases, parts, presence, reconcile, piece execution). This use-case only
+ * resolves stream-specific context (source URL, artifact dir, quality
+ * picks) and delegates artifact deletion/open actions. One owner, one
+ * truth — no parallel state machines.
  */
 
 import type { StreamRepository, StreamMetadataRepository, FileSystemPort } from "@/application/ports/outbound.ts";
 import { DownloadOrchestrator, type DownloadState } from "@/adapters/outbound/vod/download-orchestrator.ts";
-import { resolveQualities, pickProxyQuality, pickBestQuality, downloadProgressive, extractVodId } from "@/adapters/outbound/vod/hls.ts";
-import { remuxToMp4, mp4Twin } from "@/adapters/outbound/vod/remux.ts";
-import { downloadChat } from "@/adapters/outbound/vod/chat-fetch.ts";
+import { resolveQualities, pickProxyQuality, pickBestQuality, extractVodId, type HlsQuality } from "@/adapters/outbound/vod/hls.ts";
 
 export class MediaActionsUseCase {
   /** Live piece downloads by stream — DELETE /download aborts these too. */
@@ -66,7 +63,6 @@ export class MediaActionsUseCase {
     return this.orchestrator.getState(streamId);
   }
 
-  /** Deletes the LQ proxy file if it exists; idempotent. */
   /** Delete the HQ video only (hq.ts/.mp4 + chunk map). Proxy, chat and
    *  the stream record's chat path are untouched. */
   async deleteVideo(streamId: string): Promise<{ deleted: boolean }> {
@@ -115,9 +111,6 @@ export class MediaActionsUseCase {
     await this.fs.remove(`${dir}/scrub.mp4`).catch(() => {});
     await this.fs.remove(`${dir}/proxy.chunks`).catch(() => {});
     await this.fs.remove(`${dir}/scrub.chunks`).catch(() => {});
-    // State note: proxyPath/proxyFrontierSec in the download state describe
-    // what WAS downloaded; clearing them keeps the UI honest (review now
-    // proxys the HQ file or falls back to source).
     const state = await this.orchestrator.getState(streamId);
     if (state.proxyPath === tsPath) {
       state.proxyPath = null;
@@ -164,13 +157,12 @@ export class MediaActionsUseCase {
   /**
    * Downloads a single missing piece at an explicit quality height:
    * kind="proxy" → the highest ≤ cap (defaults 540), kind="hq" → the
-   * highest ≤ maxHeight (null = source). Fails honestly when the stream
-   * has no source URL (local files have nothing to re-fetch) or a download
-   * is already running.
+   * highest ≤ maxHeight (null = source). Delegates execution to the
+   * orchestrator's startPiece — the manager owns state and plumbing.
    */
   async downloadPiece(opts: {
     streamId: string;
-    kind: "proxy" | "hq";
+    kind: "proxy" | "hq" | "chat";
     proxyHeightCap?: number;
     maxHeight?: number | null;
     signal?: AbortSignal | undefined;
@@ -182,11 +174,6 @@ export class MediaActionsUseCase {
     const vodId = extractVodId(stream.sourceUrl);
     if (!vodId) throw new Error(`Unparseable source URL: ${stream.sourceUrl}`);
 
-    const existing = await this.orchestrator.getState(opts.streamId);
-    if (existing.phase === "running") {
-      throw new Error("A download is already running for this stream");
-    }
-
     let dir = await this.artifactDir(opts.streamId);
     if (!dir) {
       // Fresh progressive import with no downloaded media yet — create the
@@ -197,202 +184,30 @@ export class MediaActionsUseCase {
     }
     await this.fs.ensureDir(dir);
 
-    const qualities = await resolveQualities(vodId);
-    const quality = opts.kind === "proxy"
-      ? pickProxyQuality(qualities, opts.proxyHeightCap ?? 540)
-      : pickBestQuality(qualities, opts.maxHeight ?? null);
-    if (!quality) throw new Error("No qualities available for this VOD");
-
-    const destPath = opts.kind === "proxy" ? `${dir}/proxy.ts` : `${dir}/hq.ts`;
-    // Single-part run: mark the other video part done/skipped so the state
-    // stays coherent (this is a targeted re-download, not a full pipeline).
-    await this.orchestrator.setState(opts.streamId, {
-      ...existing,
-      phase: "running",
-      startedAt: new Date().toISOString(),
-      parts: existing.parts.map((p) => {
-        if (p.kind === opts.kind) {
-          const { error: _drop, ...rest } = p;
-          return { ...rest, status: "running" as const, percent: 0 };
-        }
-        if (p.status === "running") {
-          return { ...p, status: "skipped" as const };
-        }
-        return p;
-      }),
-      overall: { percent: 0, etaSec: null },
-    });
-
-    const wasProxy = opts.kind === "proxy";
-    // Own the abort: DELETE /download must be able to cancel piece runs.
-    const controller = new AbortController();
-    this.pieceAborts.set(opts.streamId, controller);
-    this.orchestrator.markRunLive(opts.streamId, true);
-    const clearLive = () => this.orchestrator.markRunLive(opts.streamId, false);
-    if (opts.signal) opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
-    const pieceSignal = controller.signal;
-    // Piece progress: maintained locally then written wholesale — the
-    // fire-and-forget get/set chain here raced itself and dropped updates
-    // (the user-visible frozen progress bar).
-    let lastWrite = 0;
-    const liveState = await this.orchestrator.getState(opts.streamId);
-    try {
-      await downloadProgressive(quality.playlistUrl, destPath, {
-        signal: pieceSignal,
-        lookahead: wasProxy ? 3 : 4,
-        onChunk: (index, offset, len) => {
-          void Deno.writeTextFile(
-            `${dir}/${opts.kind}.chunks`,
-            `${index} ${offset} ${len}\n`,
-            { append: true },
-          ).catch(() => {});
-        },
-        onProgress: (p) => {
-          if (wasProxy) liveState.proxyFrontierSec = p.downloadedSec;
-          const part = liveState.parts.find((x) => x.kind === opts.kind);
-          if (part) {
-            part.percent = p.percent;
-            part.downloadedSec = p.downloadedSec;
-            part.totalSec = p.totalSec;
-          }
-          liveState.overall.percent = p.percent;
-          // Throttle writes to ~2 Hz — every chunk would thrash SQLite.
-          const now = performance.now();
-          if (now - lastWrite > 1000) {
-            lastWrite = now;
-            void this.orchestrator.setState(opts.streamId, liveState);
-          }
-        },
-      });
-      // Final write + playable mp4 twin (raw TS is unplayable in Chromium).
-      if (wasProxy) liveState.proxyFrontierSec = Number.MAX_SAFE_INTEGER;
-      const twin = await remuxToMp4(destPath, mp4Twin(destPath));
-      if (wasProxy) {
-        liveState.proxyMp4 = twin ? mp4Twin(destPath) : null;
-      } else {
-        liveState.hqMp4 = twin ? mp4Twin(destPath) : null;
-      }
-      await this.orchestrator.setState(opts.streamId, liveState);
-    } catch (err) {
-      this.pieceAborts.delete(opts.streamId);
-      clearLive();
-      const state = await this.orchestrator.getState(opts.streamId);
-      const part = state.parts.find((x) => x.kind === opts.kind);
-      if (part) {
-        part.status = controller.signal.aborted ? "skipped" : "failed";
-        part.error = err instanceof Error ? err.message : String(err);
-      }
-      state.phase = "failed";
-      state.overall.etaSec = null;
-      await this.orchestrator.setState(opts.streamId, state);
-      throw err;
+    let quality: HlsQuality | null = null;
+    if (opts.kind !== "chat") {
+      const qualities = await resolveQualities(vodId);
+      quality = opts.kind === "proxy"
+        ? pickProxyQuality(qualities, opts.proxyHeightCap ?? 540)
+        : pickBestQuality(qualities, opts.maxHeight ?? null);
+      if (!quality) throw new Error("No qualities available for this VOD");
     }
-
-    const part = liveState.parts.find((x) => x.kind === opts.kind);
-    if (part) {
-      part.status = "done";
-      part.percent = 1;
-    }
-    if (wasProxy) {
-      liveState.proxyPath = destPath;
-    } else {
-      liveState.hqPath = destPath;
-    }
-    this.pieceAborts.delete(opts.streamId);
-    clearLive();
-    // Done only when BOTH video parts have playable files (a piece run can
-    // complete while the other piece never landed).
-    // A piece is a re-download, not the pipeline: any video artifact on
-    // disk means it succeeded; reconcile() keeps the phase honest against
-    // the files afterwards.
-    liveState.phase = (liveState.proxyPath !== null || liveState.hqPath !== null) ? "done" : "idle";
-    await this.orchestrator.setState(opts.streamId, liveState);
-    return { started: true, quality: quality.name };
-  }
-
-  /** Chat-only piece: GQL page-by-page fetch into the artifact dir. */
-  async downloadChatPiece(opts: {
-    streamId: string;
-    signal?: AbortSignal | undefined;
-  }): Promise<{ started: boolean; count: number }> {
-    const stream = await this.streams.findById(opts.streamId);
-    if (!stream?.sourceUrl) {
-      throw new Error("Stream has no source URL — nothing to download from");
-    }
-    const vodId = extractVodId(stream.sourceUrl);
-    if (!vodId) throw new Error(`Unparseable source URL: ${stream.sourceUrl}`);
-
-    const existing = await this.orchestrator.getState(opts.streamId);
-    if (existing.phase === "running") {
-      throw new Error("A download is already running for this stream");
-    }
-    let dir = await this.artifactDir(opts.streamId);
-    if (!dir) {
-      const fresh = `${this.cacheDir}/vods/${opts.streamId}`;
-      await this.fs.ensureDir(fresh);
-      dir = fresh;
-    }
-
-    await this.orchestrator.setState(opts.streamId, {
-      ...existing,
-      phase: "running",
-      startedAt: existing.startedAt ?? new Date().toISOString(),
-      parts: existing.parts.map((p) =>
-        p.kind === "chat" ? { ...p, status: "running" as const, percent: 0 } : p,
-      ),
-    });
 
     const controller = new AbortController();
     this.pieceAborts.set(opts.streamId, controller);
     if (opts.signal) opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
-    this.orchestrator.markRunLive(opts.streamId, true);
-    const liveState = await this.orchestrator.getState(opts.streamId);
     try {
-      let lastWrite = 0;
-      const count = await downloadChat(vodId, `${dir}/chat.json`, {
+      await this.orchestrator.startPiece({
+        streamId: opts.streamId,
+        destDir: dir,
+        kind: opts.kind,
+        vodId,
+        quality: quality ?? undefined,
         signal: controller.signal,
-        onProgress: (p) => {
-          const part = liveState.parts.find((x) => x.kind === "chat");
-          if (part) {
-            // GQL chat gives no total page count — track pages fetched.
-            part.percent = part.percent === 0 ? 0.01 : Math.min(0.99, part.percent + 0.01);
-            part.downloadedSec = p.comments;
-            part.totalSec = p.pages;
-            part.downloadedBytes = p.comments * 180; // rough per-comment bytes for the size label
-          }
-          const now = performance.now();
-          if (now - lastWrite > 1000) {
-            lastWrite = now;
-            void this.orchestrator.setState(opts.streamId, liveState);
-          }
-        },
       });
-      const part = liveState.parts.find((x) => x.kind === "chat");
-      if (part) {
-        part.status = "done";
-        part.percent = 1;
-      }
-      liveState.chatPath = `${dir}/chat.json`;
-      liveState.chatCount = count;
-      // Restore an honest phase — the piece set running; a video artifact
-      // on disk means the download is complete, else back to idle.
-      liveState.phase = (liveState.proxyPath || liveState.hqPath) ? "done" : "idle";
-      await this.orchestrator.setState(opts.streamId, liveState);
-      const fresh = await this.streams.findById(opts.streamId);
-      if (fresh) await this.streams.update({ ...fresh, chatPath: `${dir}/chat.json` });
-      return { started: true, count };
-    } catch (err) {
-      const state = await this.orchestrator.getState(opts.streamId);
-      const part = state.parts.find((x) => x.kind === "chat");
-      if (part) {
-        part.status = controller.signal.aborted ? "skipped" : "failed";
-        part.error = err instanceof Error ? err.message : String(err);
-      }
-      await this.orchestrator.setState(opts.streamId, state);
-      throw err;
+      return { started: true, quality: quality?.name ?? null };
     } finally {
       this.pieceAborts.delete(opts.streamId);
-      this.orchestrator.markRunLive(opts.streamId, false);
     }
   }
 }
