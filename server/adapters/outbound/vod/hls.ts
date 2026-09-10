@@ -5,7 +5,7 @@
  * master playlist (token MUST be URL-encoded, path is `.m3u8` — `.json`
  * returns 400 "malformed vod id") → media playlist with ~10s `.ts` chunks.
  * Chunks are appended in timeline order so the growing file is immediately
- * scrubable.
+ * proxyable.
  */
 
 const GQL_URL = "https://gql.twitch.tv/gql";
@@ -150,15 +150,15 @@ export function parseMasterPlaylist(text: string): HlsQuality[] {
 }
 
 /**
- * Scrub-quality picker: the highest quality with height ≤ cap. Ties break
+ * Proxy-quality picker: the highest quality with height ≤ cap. Ties break
  * toward higher fps then bandwidth. If every quality exceeds the cap, the
- * lowest available becomes the scrub (the "no true scrub" case — the caller
- * treats the single download as both scrub and HQ).
+ * lowest available becomes the proxy (the "no true proxy" case — the caller
+ * treats the single download as both proxy and HQ).
  */
-export function pickScrubQuality(qualities: HlsQuality[], scrubHeightCap: number): HlsQuality | null {
+export function pickProxyQuality(qualities: HlsQuality[], proxyHeightCap: number): HlsQuality | null {
   if (qualities.length === 0) return null;
   const byHeightAsc = [...qualities].sort((a, b) => a.height - b.height || a.bandwidth - b.bandwidth);
-  const candidates = byHeightAsc.filter((q) => q.height <= scrubHeightCap);
+  const candidates = byHeightAsc.filter((q) => q.height <= proxyHeightCap);
   if (candidates.length === 0) return byHeightAsc[0] ?? null;
   return candidates.sort((a, b) => b.height - a.height || b.fps - a.fps)[0] ?? null;
 }
@@ -206,10 +206,10 @@ export interface ProgressiveProgress {
 
 /**
  * Downloads a media playlist's chunks in timeline order, appending to one
- * growing .ts file — the scrub media. A lookahead window keeps throughput up
+ * growing .ts file — the proxy media. A lookahead window keeps throughput up
  * while appends stay strictly in order; a small reorder buffer absorbs
  * out-of-order chunk arrivals. Chunk failures retry 3× then abort with the
- * failing URL — a silent gap would corrupt the scrub timeline from that
+ * failing URL — a silent gap would corrupt the proxy timeline from that
  * point on, so failing loudly is the honest behavior.
  */
 export async function downloadProgressive(

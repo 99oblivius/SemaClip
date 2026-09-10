@@ -211,14 +211,14 @@ export class DetectionEngineAdapter {
       });
     }
 
-    // ── Proxy generation (P0-10): scrub media, generated post-detection so
+    // ── Proxy generation (P0-10): proxy media, generated post-detection so
     // it never delays candidate discovery. Failure is non-fatal — the video
     // route falls back to the source VOD. ──
     // Proxy can take minutes on a 5.8h VOD with zero events otherwise — the
     // 300s job watchdog killed a healthy run here (2026-09-09). Heartbeat
     // keeps the watchdog fed while ffmpeg churns.
     const heartbeat = setInterval(() => {
-      this.emit({ type: "progress", jobId, phase: "proxy_generation", percent: 0.5, message: "Generating scrub proxy…" });
+      this.emit({ type: "progress", jobId, phase: "proxy_generation", percent: 0.5, message: "Generating proxy proxy…" });
     }, 30_000);
     try {
       const proxyPath = `${command.artifactDir}/proxy.mp4`;

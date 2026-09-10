@@ -50,6 +50,14 @@ class DenoFileSystem implements FileSystemPort {
       return false;
     }
   }
+  /** Immediate children (files only), names sorted. Folder import scan. */
+  async listFiles(dir: string): Promise<string[]> {
+    const names: string[] = [];
+    for await (const entry of Deno.readDir(dir)) {
+      if (entry.isFile) names.push(entry.name);
+    }
+    return names.sort();
+  }
   async ensureDir(path: string): Promise<void> {
     await Deno.mkdir(path, { recursive: true });
   }
@@ -78,6 +86,11 @@ export interface AppContainer {
 }
 
 export async function buildContainer(config: AppConfig): Promise<AppContainer> {
+  // The data dir (and cache/export) must exist before SQLite opens the DB —
+  // a fresh platform-default location (~/.local/share/SemaClip) starts empty.
+  for (const dir of [config.dataDir, config.cacheDir, config.exportDir]) {
+    await Deno.mkdir(dir, { recursive: true });
+  }
   const db = createDb(config.dbPath);
   const bus = new InProcessEventBus();
   const fs = new DenoFileSystem();
@@ -199,10 +212,13 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
         const main = importByUrl.cancelProgressive(id);
         return piece || main;
       },
-      deleteScrub: (id: string) => mediaActions.deleteScrub(id),
+      deleteProxy: (id: string) => mediaActions.deleteProxy(id),
+      deleteChat: (id: string) => mediaActions.deleteChat(id),
+      downloadChatPiece: (opts: { streamId: string }) => mediaActions.downloadChatPiece(opts),
+      openFolder: (id: string) => mediaActions.openFolder(id),
       deleteDownload: (id: string) => importByUrl.deleteDownload(id, config.cacheDir),
       resumeDownload: (id: string) => importByUrl.resumeDownload(id),
-      downloadPiece: (opts: { streamId: string; kind: "scrub" | "hq"; scrubHeightCap?: number; maxHeight?: number | null; signal?: AbortSignal | undefined }) =>
+      downloadPiece: (opts: { streamId: string; kind: "proxy" | "hq"; proxyHeightCap?: number; maxHeight?: number | null; signal?: AbortSignal | undefined }) =>
         mediaActions.downloadPiece(opts),
       metadata: metadataRepo,
       storage: streamStorage,

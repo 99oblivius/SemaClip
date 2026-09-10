@@ -57,7 +57,7 @@
     playerStore.update((s) => ({ ...s, pendingSeek: m.t }));
   }
 
-  // ── Scrub frontier (P0-10 progressive): time beyond the downloaded extent
+  // ── Proxy frontier (P0-10 progressive): time beyond the downloaded extent
   // renders as void — the video genuinely doesn't exist there yet. Polled at
   // 1 Hz only while a download is running. ──
   const downloadQuery = createQuery(() => ({
@@ -66,11 +66,11 @@
     refetchInterval: 1000,
     staleTime: 900,
   }));
-  const scrubFrontier = $derived.by(() => {
+  const proxyFrontier = $derived.by(() => {
     const d = downloadQuery.data;
     if (!d || d.phase === 'idle') return Infinity; // fully downloaded or legacy import
     if (d.phase === 'done') return Infinity;
-    return d.scrubFrontierSec;
+    return d.proxyFrontierSec;
   });
 
   let canvasEl = $state<HTMLCanvasElement | undefined>(undefined);
@@ -78,7 +78,7 @@
   let rafId = 0;
   let hoveredClip = $state<Clip | null>(null);
   let hoverX = $state(-1);           // -1 = not hovering
-  let isScrubbing = $state(false);
+  let isProxybing = $state(false);
   let isDraggingEndpoint = $state(false);
   let draggingEndpoint: 'start' | 'end' | null = null;
 
@@ -229,11 +229,11 @@
 
     const midY = h / 2;
 
-    // ── Scrub frontier void (progressive download): everything past the
+    // ── Proxy frontier void (progressive download): everything past the
     // downloaded extent is not-yet-media — black it out under everything
     // else so the void is unambiguous at any zoom. ──
-    if (Number.isFinite(scrubFrontier) && viewEnd > scrubFrontier) {
-      const fx = timeToX(scrubFrontier);
+    if (Number.isFinite(proxyFrontier) && viewEnd > proxyFrontier) {
+      const fx = timeToX(proxyFrontier);
       if (fx < w) {
         ctx.fillStyle = 'rgba(11, 11, 16, 0.85)'; // foundation color, near-opaque
         ctx.fillRect(Math.max(0, fx), 0, w - Math.max(0, fx), h);
@@ -504,7 +504,7 @@
   });
 
   // ── Unified mouse handling ──
-  // Default: seek/scrub. Click clip mark: select. Hover endpoint handle: drag.
+  // Default: seek/proxy. Click clip mark: select. Hover endpoint handle: drag.
 
   function getMouseX(e: MouseEvent): number {
     if (!containerEl) return 0;
@@ -516,10 +516,10 @@
     hoverX = x;
     const t = xToTime(x);
 
-    if (isScrubbing) {
+    if (isProxybing) {
       // Live-seek while dragging — immediate feedback.
       if (onSeek) onSeek(t);
-      playerStore.update((s) => ({ ...s, currentTime: t, isScrubbing: true }));
+      playerStore.update((s) => ({ ...s, currentTime: t, isProxybing: true }));
       return;
     }
 
@@ -581,17 +581,17 @@
       return;
     }
 
-    // 4. Otherwise: seek immediately + begin scrub.
-    isScrubbing = true;
+    // 4. Otherwise: seek immediately + begin proxy.
+    isProxybing = true;
     if (onSeek) onSeek(t);
-    playerStore.update((s) => ({ ...s, currentTime: t, isScrubbing: true }));
+    playerStore.update((s) => ({ ...s, currentTime: t, isProxybing: true }));
   }
 
   function handleMouseUp() {
-    isScrubbing = false;
+    isProxybing = false;
     isDraggingEndpoint = false;
     draggingEndpoint = null;
-    playerStore.update((s) => ({ ...s, isScrubbing: false }));
+    playerStore.update((s) => ({ ...s, isProxybing: false }));
   }
 
   function handleMouseLeave() {

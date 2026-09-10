@@ -19,13 +19,19 @@ export class ImportStreamByFileUseCase {
   ) {}
 
   async execute(input: ImportByFileInput): Promise<ImportResult> {
-    if (!(await this.fs.exists(input.vodPath))) {
-      throw new Error(`VOD file not found: ${input.vodPath}`);
+    // Folder import: the first video file is the HQ video; any proxy
+    // artifact (proxy.ts/.mp4 or a legacy scrub.ts) and chat.json alongside
+    // it are picked up automatically.
+    const resolved = input.folderPath
+      ? await this.resolveFolder(input.folderPath)
+      : { vodPath: input.vodPath, proxyPath: null as string | null, chatPath: null as string | null };
+    if (!(await this.fs.exists(resolved.vodPath))) {
+      throw new Error(`VOD file not found: ${resolved.vodPath}`);
     }
-    const duration = await this.probe.probeDuration(input.vodPath);
+    const duration = await this.probe.probeDuration(resolved.vodPath);
     const stream = createStream({
-      vodPath: input.vodPath,
-      chatPath: input.chatPath ?? null,
+      vodPath: resolved.vodPath,
+      chatPath: input.chatPath ?? resolved.chatPath,
       sourceUrl: input.sourceUrl ?? null,
       title: input.title,
       streamer: input.streamer,
@@ -33,6 +39,26 @@ export class ImportStreamByFileUseCase {
     });
     await this.streams.save(stream);
     return { stream, downloadJobId: null };
+  }
+
+  private async resolveFolder(folder: string): Promise<{ vodPath: string; proxyPath: string | null; chatPath: string | null }> {
+    if (!(await this.fs.exists(folder))) throw new Error(`Folder not found: ${folder}`);
+    const names = await this.fs.listFiles(folder);
+    const VIDEO_EXT = [".mp4", ".mkv", ".webm", ".mov", ".avi", ".ts"];
+    const isVideo = (n: string) => VIDEO_EXT.some((e) => n.toLowerCase().endsWith(e));
+    const isProxy = (n: string) => ["proxy.ts", "proxy.mp4", "scrub.ts"].some((s) => n.toLowerCase() === s);
+    // HQ preference: a full-quality container over a raw TS, and the largest
+    // candidate wins when several exist (proxy.ts is also .ts — excluded
+    // from HQ by the proxy check before the video check).
+    const videos = names.filter((n) => isVideo(n) && !isProxy(n));
+    if (videos.length === 0) throw new Error(`No video file found in folder: ${folder}`);
+    const hq = videos.find((n) => !n.toLowerCase().endsWith(".ts")) ?? videos[0]!;
+    const proxyName = names.find((n) => isProxy(n)) ?? null;
+    return {
+      vodPath: this.fs.joinPath(folder, hq),
+      proxyPath: proxyName ? this.fs.joinPath(folder, proxyName) : null,
+      chatPath: names.includes("chat.json") ? this.fs.joinPath(folder, "chat.json") : null,
+    };
   }
 }
 
@@ -73,9 +99,9 @@ export class ImportStreamByUrlUseCase {
     await this.streams.save(stream);
 
     // URL imports always use the chunked/live HLS orchestrator — chunks are
-    // scrubbable as they land regardless of the scrub-first toggle (the
+    // proxybable as they land regardless of the proxy-first toggle (the
     // directive's "opted out" case: single download at max quality, still
-    // live). includeScrub picks one file (max quality) or two (540p first).
+    // live). includeProxy picks one file (max quality) or two (540p first).
     // The twitch-dl legacy path is gone: it was a /tmp venv dependency and
     // delivered no live-chunk behavior.
     const controller = new AbortController();
@@ -101,25 +127,25 @@ export class ImportStreamByUrlUseCase {
       streamId,
       sourceUrl: input.url,
       destDir,
-      scrubHeightCap: input.scrubHeightCap ?? 540,
+      proxyHeightCap: input.proxyHeightCap ?? 540,
       maxQualityHeight: input.maxQualityHeight ?? null,
-      // Scrub-first (two files: 540p then HQ) is the opt-in — default is a
+      // Proxy-first (two files: 540p then HQ) is the opt-in — default is a
       // single download at max quality, still chunk-live.
-      includeScrub: input.includeScrub ?? false,
+      includeProxy: input.includeProxy ?? false,
       resume,
       signal: controller.signal,
       // Attach each artifact to the stream record the moment its part
-      // completes — review can start on scrub while HQ still downloads,
+      // completes — review can start on proxy while HQ still downloads,
       // and chat lands even if a later video pass fails.
       onPartDone: (kind, state) => this.attachPart(streamId, kind, state),
     });
     this.aborts.delete(streamId);
 
     // Point the stream at the best downloaded media: HQ if present, else
-    // the scrub file (single-download case), plus the fetched chat.
+    // the proxy file (single-download case), plus the fetched chat.
     const existing = await this.streams.findById(streamId);
     if (!existing) return;
-    const best = result.hqPath ?? result.scrubPath;
+    const best = result.hqPath ?? result.proxyPath;
     if (best || result.chatPath) {
       await this.streams.update({
         ...existing,
@@ -132,15 +158,15 @@ export class ImportStreamByUrlUseCase {
   /** Point the stream at each artifact as its part completes. */
   private async attachPart(
     streamId: string,
-    kind: "chat" | "markers" | "scrub" | "hq",
-    state: { chatPath: string | null; scrubPath: string | null; hqPath: string | null },
+    kind: "chat" | "markers" | "proxy" | "hq",
+    state: { chatPath: string | null; proxyPath: string | null; hqPath: string | null },
   ): Promise<void> {
     const existing = await this.streams.findById(streamId);
     if (!existing) return;
     const patch: Partial<Stream> = {};
     if (kind === "chat" && state.chatPath) patch.chatPath = state.chatPath;
-    if (kind === "scrub" && state.scrubPath && !existing.vodPath.includes("/scrub.ts")) {
-      patch.vodPath = state.scrubPath;
+    if (kind === "proxy" && state.proxyPath && !existing.vodPath.includes("/proxy.ts")) {
+      patch.vodPath = state.proxyPath;
     }
     if (kind === "hq" && state.hqPath) patch.vodPath = state.hqPath;
     if (Object.keys(patch).length === 0) return;
@@ -175,10 +201,10 @@ export class ImportStreamByUrlUseCase {
     this.runProgressive(streamId, {
       url: stream.sourceUrl,
       progressive: true,
-      scrubHeightCap: (existing.qualities.length > 0 ? undefined : 540) ?? 540,
+      proxyHeightCap: (existing.qualities.length > 0 ? undefined : 540) ?? 540,
       maxQualityHeight: null,
-      includeScrub: existing.parts.some((p) => p.kind === "hq" && p.status !== "skipped") &&
-        existing.scrubPath !== existing.hqPath,
+      includeProxy: existing.parts.some((p) => p.kind === "hq" && p.status !== "skipped") &&
+        existing.proxyPath !== existing.hqPath,
     } as ImportByUrlInput, { title: stream.title ?? "" }, destDir, controller, true).catch((err) => {
       console.error(`Resume download failed for ${streamId}:`, err);
     });
@@ -207,7 +233,7 @@ export class ImportStreamByUrlUseCase {
     await new Promise((r) => setTimeout(r, 300));
 
     const dir = `${cacheDir}/vods/${streamId}`;
-    for (const name of ["scrub.ts", "scrub.mp4", "hq.ts", "hq.mp4", "chat.json"]) {
+    for (const name of ["proxy.ts", "proxy.mp4", "hq.ts", "hq.mp4", "chat.json"]) {
       try {
         await Deno.remove(`${dir}/${name}`);
       } catch {
@@ -220,10 +246,10 @@ export class ImportStreamByUrlUseCase {
       idle.phase = "idle";
       idle.parts = [];
       idle.overall = { percent: 0, etaSec: null };
-      idle.scrubFrontierSec = 0;
-      idle.scrubPath = null;
+      idle.proxyFrontierSec = 0;
+      idle.proxyPath = null;
       idle.hqPath = null;
-      idle.scrubMp4 = null;
+      idle.proxyMp4 = null;
       idle.hqMp4 = null;
       idle.chatPath = null;
       idle.chatCount = 0;

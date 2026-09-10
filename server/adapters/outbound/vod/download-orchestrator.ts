@@ -1,6 +1,6 @@
 /**
  * Download orchestrator — runs the import pipeline
- *   chat → markers → scrub (progressive, live) → HQ (capped)
+ *   chat → markers → proxy (progressive, live) → HQ (capped)
  * and publishes one unified state for the UI via
  *   GET /api/streams/:id/download
  *
@@ -10,7 +10,7 @@
  * - Per-part ETA from a rolling 10s throughput window — total/elapsed lies
  *   badly at the start and after stalls.
  * - Parts fail independently; remaining parts still run. The stream becomes
- *   reviewable as soon as the scrub is complete; waiting for HQ is never
+ *   reviewable as soon as the proxy is complete; waiting for HQ is never
  *   required for review.
  */
 
@@ -18,7 +18,7 @@ import type { StreamMetadataRepository } from "@/application/ports/outbound.ts";
 import {
   extractVodId,
   resolveQualities,
-  pickScrubQuality,
+  pickProxyQuality,
   pickBestQuality,
   downloadProgressive,
   type HlsQuality,
@@ -26,7 +26,7 @@ import {
 import { downloadChat } from "./chat-fetch.ts";
 import { remuxToMp4, mp4Twin } from "./remux.ts";
 
-export type DownloadPartKind = "chat" | "markers" | "scrub" | "hq";
+export type DownloadPartKind = "chat" | "markers" | "proxy" | "hq";
 export type DownloadPartStatus = "pending" | "running" | "done" | "failed" | "skipped";
 
 export interface DownloadPart {
@@ -44,12 +44,12 @@ export interface DownloadState {
   phase: "idle" | "running" | "done" | "failed";
   parts: DownloadPart[];
   overall: { percent: number; etaSec: number | null };
-  /** Seconds of scrub media playable so far. */
-  scrubFrontierSec: number;
-  scrubPath: string | null;
+  /** Seconds of proxy media playable so far. */
+  proxyFrontierSec: number;
+  proxyPath: string | null;
   hqPath: string | null;
   /** Playable mp4 twins of the .ts files (Chromium can't demux raw TS). */
-  scrubMp4: string | null;
+  proxyMp4: string | null;
   hqMp4: string | null;
   /** Path of the fetched chat JSON (progressive part 1). */
   chatPath: string | null;
@@ -111,7 +111,23 @@ export class DownloadOrchestrator {
     const raw = await this.metadata.get(streamId, "download_state");
     if (!raw) return this.idle();
     try {
-      return JSON.parse(raw) as DownloadState;
+      const parsed = JSON.parse(raw) as DownloadState & {
+        scrubPath?: string | null;
+        scrubMp4?: string | null;
+        scrubFrontierSec?: number;
+      };
+      // Pre-rename states stored scrub* keys and scrub.ts artifacts — map
+      // them onto the proxy names so existing projects keep playing.
+      const state: DownloadState = {
+        ...parsed,
+        proxyPath: parsed.proxyPath ?? parsed.scrubPath ?? null,
+        proxyMp4: parsed.proxyMp4 ?? parsed.scrubMp4 ?? null,
+        proxyFrontierSec: parsed.proxyFrontierSec ?? parsed.scrubFrontierSec ?? 0,
+      };
+      delete (state as unknown as Record<string, unknown>).scrubPath;
+      delete (state as unknown as Record<string, unknown>).scrubMp4;
+      delete (state as unknown as Record<string, unknown>).scrubFrontierSec;
+      return state;
     } catch {
       return this.idle();
     }
@@ -122,10 +138,10 @@ export class DownloadOrchestrator {
       phase: "idle",
       parts: [],
       overall: { percent: 0, etaSec: null },
-      scrubFrontierSec: 0,
-      scrubPath: null,
+      proxyFrontierSec: 0,
+      proxyPath: null,
       hqPath: null,
-      scrubMp4: null,
+      proxyMp4: null,
       hqMp4: null,
       chatPath: null,
       chatCount: 0,
@@ -134,8 +150,17 @@ export class DownloadOrchestrator {
     };
   }
 
+  /** Serialized state writes — concurrent SQLite writes surface as
+   *  "disk I/O error" (SQLITE_BUSY) under the throttled fire-and-forget
+   *  progress writes; a per-stream queue keeps them ordered. */
+  private writeQueues = new Map<string, Promise<void>>();
+
   async setState(streamId: string, state: DownloadState): Promise<void> {
-    await this.metadata.set(streamId, "download_state", JSON.stringify(state));
+    const prev = this.writeQueues.get(streamId) ?? Promise.resolve();
+    const next = prev.then(() => this.metadata.set(streamId, "download_state", JSON.stringify(state)));
+    // Queue survives a failed write; the error surfaces to this caller only.
+    this.writeQueues.set(streamId, next.catch(() => {}));
+    await next;
   }
 
   /**
@@ -149,10 +174,10 @@ export class DownloadOrchestrator {
     streamId: string;
     sourceUrl: string;
     destDir: string;
-    /** Quality picks are resolved here; includeScrub=false → single download. */
-    scrubHeightCap: number;
+    /** Quality picks are resolved here; includeProxy=false → single download. */
+    proxyHeightCap: number;
     maxQualityHeight: number | null;
-    includeScrub: boolean;
+    includeProxy: boolean;
     signal?: AbortSignal;
     onPartDone?: (kind: DownloadPartKind, state: DownloadState) => void | Promise<void>;
     /** Resume: keep the on-disk chunk prefix of each video part and download
@@ -171,10 +196,10 @@ export class DownloadOrchestrator {
       phase: "running",
       parts: [],
       overall: { percent: 0, etaSec: null },
-      scrubFrontierSec: 0,
-      scrubPath: null,
+      proxyFrontierSec: 0,
+      proxyPath: null,
       hqPath: null,
-      scrubMp4: null,
+      proxyMp4: null,
       hqMp4: null,
       chatPath: null,
       chatCount: 0,
@@ -182,7 +207,7 @@ export class DownloadOrchestrator {
       startedAt: new Date().toISOString(),
     };
     const rt = new Map<DownloadPartKind, PartRuntime>();
-    for (const kind of ["chat", "markers", "scrub", "hq"] as const) {
+    for (const kind of ["chat", "markers", "proxy", "hq"] as const) {
       rt.set(kind, newPart());
     }
     // Chat/markers are near-instant next to video; tiny fixed weights.
@@ -230,7 +255,7 @@ export class DownloadOrchestrator {
         rt.get("chat")!.status = "failed";
         rt.get("chat")!.error = "aborted";
         rt.get("markers")!.status = "skipped";
-        rt.get("scrub")!.status = "skipped";
+        rt.get("proxy")!.status = "skipped";
         rt.get("hq")!.status = "skipped";
         return this.finalize(opts.streamId, state, rt);
       }
@@ -250,22 +275,22 @@ export class DownloadOrchestrator {
       qualities = await resolveQualities(vodId);
       if (qualities.length === 0) throw new Error("usher returned no qualities");
     } catch (err) {
-      this.fail(rt.get("scrub")!, err);
+      this.fail(rt.get("proxy")!, err);
       this.fail(rt.get("hq")!, err);
       state.qualities = [];
       return this.finalize(opts.streamId, state, rt);
     }
     state.qualities = qualities.map((q) => ({ name: q.name, width: q.width, height: q.height }));
 
-    const scrub = pickScrubQuality(qualities, opts.scrubHeightCap);
+    const proxy = pickProxyQuality(qualities, opts.proxyHeightCap);
     const hq = pickBestQuality(qualities, opts.maxQualityHeight);
 
-    // ── Single-download case: no scrub opt-in, no scrub pick, or scrub IS
+    // ── Single-download case: no proxy opt-in, no proxy pick, or proxy IS
     // already the max quality — one download serves both roles. ──
-    if (!opts.includeScrub || !scrub || scrub === hq) {
-      const target = scrub ?? hq;
+    if (!opts.includeProxy || !proxy || proxy === hq) {
+      const target = proxy ?? hq;
       if (target) {
-        const tsPath = `${opts.destDir}/scrub.ts`;
+        const tsPath = `${opts.destDir}/proxy.ts`;
         const lastMux = { t: 0 };
         // Resume from the previous run's frontier when the .ts survives —
         // chunk-complete prefix is kept, only the tail re-downloads.
@@ -273,7 +298,7 @@ export class DownloadOrchestrator {
           ? Math.floor(await this.fileSeconds(tsPath))
           : 0;
         try {
-          const mapPath = `${opts.destDir}/scrub.chunks`;
+          const mapPath = `${opts.destDir}/proxy.chunks`;
           const mapFile = await Deno.open(mapPath, { write: true, create: true, append: resumeSec > 0, truncate: resumeSec === 0 });
           try {
             await downloadProgressive(target.playlistUrl, tsPath, {
@@ -283,85 +308,98 @@ export class DownloadOrchestrator {
                 void mapFile.write(new TextEncoder().encode(`${index} ${offset} ${len}\n`));
               },
               onProgress: (p) => {
-              const part = rt.get("scrub")!;
+              const part = rt.get("proxy")!;
               this.noteVideoProgress(part, p, target);
-              state.scrubFrontierSec = p.downloadedSec;
-              state.scrubPath = tsPath;
+              state.proxyFrontierSec = p.downloadedSec;
+              state.proxyPath = tsPath;
               state.hqPath = tsPath;
               void this.remuxTwin(tsPath, state, lastMux).then((mp4) => {
-                state.scrubMp4 = mp4;
+                state.proxyMp4 = mp4;
                 state.hqMp4 = mp4;
                 void this.persist(opts.streamId, state, rt);
               });
               void this.persist(opts.streamId, state, rt);
             },
           });
-          rt.get("scrub")!.status = "done";
-          rt.get("scrub")!.percent = 1;
+          rt.get("proxy")!.status = "done";
+          rt.get("proxy")!.percent = 1;
           rt.get("hq")!.status = "done"; // same file serves HQ
           rt.get("hq")!.percent = 1;
           // Final remux (not throttled) so the complete file is playable.
           const mp4 = await remuxToMp4(tsPath, mp4Twin(tsPath));
-          state.scrubMp4 = state.hqMp4 = mp4 ? mp4Twin(tsPath) : null;
+          state.proxyMp4 = state.hqMp4 = mp4 ? mp4Twin(tsPath) : null;
           void this.persist(opts.streamId, state, rt);
           } finally {
             await mapFile.close();
           }
         } catch (err) {
-          this.fail(rt.get("scrub")!, err);
+          this.fail(rt.get("proxy")!, err);
           this.fail(rt.get("hq")!, err);
         }
       }
       return this.finalize(opts.streamId, state, rt);
     }
 
-    // ── Scrub pass (live, reviewable the moment it completes) ──
-    rt.get("scrub")!.status = "running";
-    const scrubTs = `${opts.destDir}/scrub.ts`;
-    const lastMuxScrub = { t: 0 };
-    const scrubResume = opts.resume
-      ? Math.floor(await this.fileSeconds(scrubTs))
+    // ── Proxy pass (live, reviewable the moment it completes) ──
+    // One-time legacy migration: pre-rename runs stored artifacts as
+    // scrub.ts/scrub.chunks — carry them onto the proxy names so resume
+    // keeps the on-disk prefix instead of re-downloading from zero.
+    if (opts.resume) {
+      const legacyTs = `${opts.destDir}/scrub.ts`;
+      if (!(await this.fileExists(`${opts.destDir}/proxy.ts`)) && (await this.fileExists(legacyTs))) {
+        await Deno.rename(legacyTs, `${opts.destDir}/proxy.ts`);
+        const legacyMap = `${opts.destDir}/scrub.chunks`;
+        if (await this.fileExists(legacyMap)) {
+          await Deno.rename(legacyMap, `${opts.destDir}/proxy.chunks`).catch(() => {});
+        }
+      }
+    }
+    rt.get("proxy")!.status = "running";
+    const proxyTs = `${opts.destDir}/proxy.ts`;
+    const lastMuxProxy = { t: 0 };
+    const proxyResume = opts.resume
+      ? Math.floor(await this.fileSeconds(proxyTs))
       : 0;
-    const scrubMapPath = `${opts.destDir}/scrub.chunks`;
-    const scrubMapFile = await Deno.open(scrubMapPath, { write: true, create: true, append: scrubResume > 0, truncate: scrubResume === 0 });
+    const proxyMapPath = `${opts.destDir}/proxy.chunks`;
+    const proxyMapFile = await Deno.open(proxyMapPath, { write: true, create: true, append: proxyResume > 0, truncate: proxyResume === 0 });
     try {
-      await downloadProgressive(scrub.playlistUrl, scrubTs, {
+      await downloadProgressive(proxy.playlistUrl, proxyTs, {
         signal: opts.signal ?? undefined,
-        resumeSec: scrubResume,
+        resumeSec: proxyResume,
         onChunk: (index, offset, len) => {
-          void scrubMapFile.write(new TextEncoder().encode(`${index} ${offset} ${len}\n`));
+          void proxyMapFile.write(new TextEncoder().encode(`${index} ${offset} ${len}\n`));
         },
         onProgress: (p) => {
-          const part = rt.get("scrub")!;
-          this.noteVideoProgress(part, p, scrub);
-          state.scrubFrontierSec = p.downloadedSec;
-          state.scrubPath = scrubTs;
-          void this.remuxTwin(scrubTs, state, lastMuxScrub).then((mp4) => {
-            state.scrubMp4 = mp4;
+          const part = rt.get("proxy")!;
+          this.noteVideoProgress(part, p, proxy);
+          state.proxyFrontierSec = p.downloadedSec;
+          state.proxyPath = proxyTs;
+          void this.remuxTwin(proxyTs, state, lastMuxProxy).then((mp4) => {
+            state.proxyMp4 = mp4;
             void this.persist(opts.streamId, state, rt);
           });
           void this.persist(opts.streamId, state, rt);
         },
       });
-      rt.get("scrub")!.status = "done";
-      rt.get("scrub")!.percent = 1;
-      state.scrubPath = scrubTs;
-      const scrubMp4 = await remuxToMp4(scrubTs, mp4Twin(scrubTs));
-      state.scrubMp4 = scrubMp4 ? mp4Twin(scrubTs) : null;
+      rt.get("proxy")!.status = "done";
+      rt.get("proxy")!.percent = 1;
+      state.proxyPath = proxyTs;
+      const proxyMp4 = await remuxToMp4(proxyTs, mp4Twin(proxyTs));
+      state.proxyMp4 = proxyMp4 ? mp4Twin(proxyTs) : null;
       void this.persist(opts.streamId, state, rt);
-      await scrubMapFile.close();
-      await opts.onPartDone?.("scrub", state);
+      await proxyMapFile.close();
+      await opts.onPartDone?.("proxy", state);
     } catch (err) {
       if (opts.signal?.aborted) {
-        rt.get("scrub")!.status = "failed";
-        rt.get("scrub")!.error = "aborted";
+        rt.get("proxy")!.status = "failed";
+        rt.get("proxy")!.error = "aborted";
         rt.get("hq")!.status = "skipped"; // cancelled before starting
-        await scrubMapFile.close();
+        await proxyMapFile.close();
         await this.persist(opts.streamId, state, rt);
         return this.finalize(opts.streamId, state, rt);
       }
-      this.fail(rt.get("scrub")!, err);
-      state.scrubPath = null;
+      this.fail(rt.get("proxy")!, err);
+      state.proxyPath = null;
     }
     await this.persist(opts.streamId, state, rt);
 
@@ -371,7 +409,7 @@ export class DownloadOrchestrator {
       await this.persist(opts.streamId, state, rt);
       return this.finalize(opts.streamId, state, rt);
     }
-    if (hq && hq.name !== scrub.name) {
+    if (hq && hq.name !== proxy.name) {
       rt.get("hq")!.status = "running";
       const hqTs = `${opts.destDir}/hq.ts`;
       const lastMuxHq = { t: 0 };
@@ -415,11 +453,11 @@ export class DownloadOrchestrator {
         }
       }
     } else {
-      // Same quality — scrub file is the HQ file.
+      // Same quality — proxy file is the HQ file.
       rt.get("hq")!.status = "done";
       rt.get("hq")!.percent = 1;
-      state.hqPath = state.scrubPath;
-      state.hqMp4 = state.scrubMp4;
+      state.hqPath = state.proxyPath;
+      state.hqMp4 = state.proxyMp4;
     }
 
     return this.finalize(opts.streamId, state, rt);
@@ -455,11 +493,11 @@ export class DownloadOrchestrator {
    */
   private async remuxTwin(
     tsPath: string,
-    state: { scrubMp4: string | null; hqMp4: string | null },
+    state: { proxyMp4: string | null; hqMp4: string | null },
     lastMuxAt: { t: number },
   ): Promise<string | null> {
     const now = performance.now();
-    if (now - lastMuxAt.t < 20_000) return state.scrubMp4 ?? state.hqMp4;
+    if (now - lastMuxAt.t < 20_000) return state.proxyMp4 ?? state.hqMp4;
     lastMuxAt.t = now;
     const mp4 = mp4Twin(tsPath);
     const ok = await remuxToMp4(tsPath, mp4);
@@ -512,9 +550,9 @@ export class DownloadOrchestrator {
     state.overall = snapshot.overall;
     // "done" must mean the video bytes are actually complete on disk — a
     // chat/markers-only finish (video skipped by an abort) is NOT done; the
-    // user reported a download showing complete with an aborted scrub file.
-    const videoOk = state.scrubPath !== null && state.scrubMp4 !== null
-      && (state.hqPath === state.scrubPath || state.hqPath !== null);
+    // user reported a download showing complete with an aborted proxy file.
+    const videoOk = state.proxyPath !== null && state.proxyMp4 !== null
+      && (state.hqPath === state.proxyPath || state.hqPath !== null);
     state.phase = snapshot.parts.some((p) => p.status === "running")
       ? "running"
       : (videoOk && snapshot.parts.every((p) => p.status === "done" || p.status === "skipped"))

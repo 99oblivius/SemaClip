@@ -1,6 +1,6 @@
 /** Client-side mirror of the server's download state (download-orchestrator.ts). */
 
-export type DownloadPartKind = 'chat' | 'markers' | 'scrub' | 'hq';
+export type DownloadPartKind = 'chat' | 'markers' | 'proxy' | 'hq';
 export type DownloadPartStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
 
 export interface DownloadPart {
@@ -17,11 +17,11 @@ export interface DownloadState {
   phase: 'idle' | 'running' | 'done' | 'failed';
   parts: DownloadPart[];
   overall: { percent: number; etaSec: number | null };
-  scrubFrontierSec: number;
-  scrubPath: string | null;
+  proxyFrontierSec: number;
+  proxyPath: string | null;
   hqPath: string | null;
   /** Playable mp4 twins of the .ts files (Chromium can't demux raw TS). */
-  scrubMp4: string | null;
+  proxyMp4: string | null;
   hqMp4: string | null;
   qualities: { name: string; width: number; height: number }[];
   startedAt: string | null;
@@ -47,6 +47,6 @@ export function fmtEta(sec: number | null): string {
 export const PART_LABELS: Record<DownloadPartKind, string> = {
   chat: 'Chat',
   markers: 'Markers',
-  scrub: 'Scrub (540p)',
+  proxy: 'Proxy (540p)',
   hq: 'High quality',
 };

@@ -2,7 +2,11 @@ import { createApp } from "@/adapters/inbound/http/routes.ts";
 import { buildContainer } from "@/composition/container.ts";
 import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
 const PORT = parseInt(Deno.env.get("PORT") ?? "5174", 10);
-const DATA_DIR = Deno.env.get("SEMACLIP_DATA") ?? `${Deno.env.get("HOME")}/.semaclip`;
+/** Platform app-data default; SEMACLIP_DATA overrides (isolated test runs). */
+const DATA_DIR = Deno.env.get("SEMACLIP_DATA")
+  ?? (Deno.build.os === "windows"
+    ? `${Deno.env.get("APPDATA") ?? `${Deno.env.get("USERPROFILE") ?? ""}/AppData/Roaming`}/SemaClip`
+    : `${Deno.env.get("XDG_DATA_HOME") ?? `${Deno.env.get("HOME")}/.local/share`}/SemaClip`);
 const DB_PATH = Deno.env.get("SEMACLIP_DB") ?? `${DATA_DIR}/semaclip.db`;
 const CACHE_DIR = Deno.env.get("SEMACLIP_CACHE") ?? `${DATA_DIR}/cache`;
 const EXPORT_DIR = Deno.env.get("SEMACLIP_EXPORT") ?? `${DATA_DIR}/exports`;

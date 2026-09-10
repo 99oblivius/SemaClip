@@ -29,7 +29,7 @@ import { probeGpuEncoder } from "@/adapters/outbound/ffmpeg/gpu-probe.ts";
 import {
   extractVodId,
   resolveQualities,
-  pickScrubQuality,
+  pickProxyQuality,
   pickBestQuality,
 } from "@/adapters/outbound/vod/hls.ts";
 
@@ -55,10 +55,13 @@ export interface HttpDeps {
   vod: VodDownloadPort;
   downloadState: (streamId: string) => Promise<DownloadStateType>;
   cancelDownload: (streamId: string) => boolean;
-  deleteScrub: (streamId: string) => Promise<{ deleted: boolean }>;
+  deleteProxy: (streamId: string) => Promise<{ deleted: boolean }>;
+  deleteChat: (streamId: string) => Promise<{ deleted: boolean }>;
+  downloadChatPiece: (opts: { streamId: string }) => Promise<{ started: boolean; count: number }>;
+  openFolder: (streamId: string) => Promise<{ opened: boolean; dir: string | null }>;
   deleteDownload: (streamId: string) => Promise<boolean>;
   resumeDownload: (streamId: string) => Promise<void>;
-  downloadPiece: (opts: { streamId: string; kind: "scrub" | "hq"; scrubHeightCap?: number; maxHeight?: number | null; signal?: AbortSignal | undefined }) => Promise<{ started: boolean; quality: string | null }>
+  downloadPiece: (opts: { streamId: string; kind: "proxy" | "hq"; proxyHeightCap?: number; maxHeight?: number | null; signal?: AbortSignal | undefined }) => Promise<{ started: boolean; quality: string | null }>
   metadata: StreamMetadataRepository;
   storage: StreamStorage;
 }
@@ -159,21 +162,39 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   });
 
   // Stream-config media actions (download-pipeline scope).
-  app.delete("/api/streams/:id/scrub", async (c) => {
-    const result = await deps.deleteScrub(c.req.param("id"));
+  app.delete("/api/streams/:id/proxy", async (c) => {
+    const result = await deps.deleteProxy(c.req.param("id"));
+    return c.json(result);
+  });
+
+  app.get("/api/streams/:id/folder", async (c) => {
+    const result = await deps.openFolder(c.req.param("id"));
+    return c.json(result);
+  });
+
+  app.delete("/api/streams/:id/chat", async (c) => {
+    const result = await deps.deleteChat(c.req.param("id"));
     return c.json(result);
   });
 
   app.post("/api/streams/:id/download-piece", async (c) => {
-    const body = await c.req.json() as { kind?: string; maxHeight?: number | null };
-    if (body.kind !== "scrub" && body.kind !== "hq") {
-      return c.json({ error: "kind must be 'scrub' or 'hq'" }, 400);
+    const body = await c.req.json() as { kind?: string; maxHeight?: number | null; proxyHeightCap?: number | null };
+    if (body.kind === "chat") {
+      try {
+        const result = await deps.downloadChatPiece({ streamId: c.req.param("id") });
+        return c.json(result, 202);
+      } catch (err) {
+        return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+      }
+    }
+    if (body.kind !== "proxy" && body.kind !== "hq") {
+      return c.json({ error: "kind must be 'proxy', 'hq' or 'chat'" }, 400);
     }
     try {
       const result = await deps.downloadPiece({
         streamId: c.req.param("id"),
         kind: body.kind,
-        scrubHeightCap: 540,
+        proxyHeightCap: body.proxyHeightCap ?? 540,
         maxHeight: body.maxHeight ?? null,
       });
       return c.json(result, 202);
@@ -741,7 +762,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   });
 
   // ── Video file serving (range requests for <video>) ──
-  // Video streaming — prefers the scrub proxy (P0-10) when one was generated
+  // Video streaming — prefers the proxy proxy (P0-10) when one was generated
   // during processing; falls back to the source VOD.
   app.get("/api/video/:streamId", async (c) => {
     const stream = await deps.getStream.execute(c.req.param("streamId"));
@@ -750,14 +771,14 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     // Proxy preference: explicit ?src=full override, else proxy if it exists.
     const wantFull = c.req.query("src") === "full";
     // Download state is the primary source of truth for playable media —
-    // a mid-download stream has no vodPath yet but its scrub twin exists.
+    // a mid-download stream has no vodPath yet but its proxy twin exists.
     let mediaPath = stream.vodPath ?? "";
     if (!wantFull) {
       // mp4 twins first — Chromium can't demux raw MPEG-TS, so a .ts vodPath
       // is unplayable; its .mp4 twin (kept in the download state) is the
       // playable form of the same bytes.
       const dl = await deps.downloadState(c.req.param("streamId"));
-      const playableTwin = dl.scrubMp4 ?? dl.hqMp4;
+      const playableTwin = dl.proxyMp4 ?? dl.hqMp4;
       if (playableTwin && await Deno.stat(playableTwin).then(() => true).catch(() => false)) {
         mediaPath = playableTwin;
       } else {
@@ -777,7 +798,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     }
 
     // MIME by extension — browsers refuse extensionless/unknown responses
-    // for <video> (the progressive .ts scrub files played as nothing without
+    // for <video> (the progressive .ts proxy files played as nothing without
     // this; raw MPEG-TS is video/mp2t in Chromium).
     const mime = mediaPath.endsWith(".mp4") ? "video/mp4"
       : mediaPath.endsWith(".ts") ? "video/mp2t"
@@ -825,11 +846,11 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     const vodId = extractVodId(stream.sourceUrl);
     if (!vodId) return c.json({ error: "Not a Twitch VOD URL" }, 400);
 
-    const track = c.req.query("track") === "hq" ? "hq" : "scrub";
+    const track = c.req.query("track") === "hq" ? "hq" : "proxy";
     const qualities = await resolveQualities(vodId);
     const q = track === "hq"
       ? pickBestQuality(qualities, null)
-      : (pickScrubQuality(qualities, 540) ?? pickBestQuality(qualities, null));
+      : (pickProxyQuality(qualities, 540) ?? pickBestQuality(qualities, null));
     if (!q) return c.json({ error: "No qualities available" }, 404);
 
     const playlistText = await (await fetch(q.playlistUrl)).text();
@@ -854,14 +875,14 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     if (!stream?.sourceUrl) return c.json({ error: "No source URL" }, 404);
     const vodId = extractVodId(stream.sourceUrl);
     if (!vodId) return c.json({ error: "Not a Twitch VOD URL" }, 400);
-    const track = c.req.param("track") === "hq" ? "hq" : "scrub";
+    const track = c.req.param("track") === "hq" ? "hq" : "proxy";
     const index = parseInt(c.req.param("index"), 10);
     if (!Number.isFinite(index) || index < 0) return c.json({ error: "Bad index" }, 400);
 
     // Chunk map: "index offset len" lines, derived from the download
-    // state's .ts path ({dir}/scrub.chunks next to scrub.ts).
+    // state's .ts path ({dir}/proxy.chunks next to proxy.ts).
     const dl = await deps.downloadState(stream.id);
-    const tsPath = track === "hq" ? dl.hqPath : dl.scrubPath;
+    const tsPath = track === "hq" ? dl.hqPath : dl.proxyPath;
     const mapPath = tsPath ? `${tsPath.replace(/\.ts$/, "")}.chunks` : null;
 
     if (tsPath && mapPath) {
@@ -890,7 +911,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     const qualities = await resolveQualities(vodId);
     const q = track === "hq"
       ? pickBestQuality(qualities, null)
-      : (pickScrubQuality(qualities, 540) ?? pickBestQuality(qualities, null));
+      : (pickProxyQuality(qualities, 540) ?? pickBestQuality(qualities, null));
     if (!q) return c.json({ error: "No qualities available" }, 404);
     const playlistText = await (await fetch(q.playlistUrl)).text();
     const chunks = playlistText.split("\n").map((l) => l.trim())

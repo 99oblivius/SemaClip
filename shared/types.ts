@@ -154,7 +154,10 @@ export const PHASE_LABELS: Record<EnginePhase, string> = {
 
 // Stream import
 export interface ImportByFileInput {
+  /** Explicit video file. Mutually exclusive with folderPath. */
   vodPath: string;
+  /** Folder import: first video file found = HQ; any proxy(.ts/.mp4) or scrub.ts = proxy; chat.json = chat. */
+  folderPath?: string;
   chatPath?: string | null;
   title?: string;
   streamer?: string;
@@ -165,14 +168,14 @@ export interface ImportByUrlInput {
   url: string; // Twitch VOD URL
   title?: string;
   streamer?: string;
-  /** Scrub-first progressive download (docs/DOWNLOAD-PIPELINE.md). */
+  /** Progressive download (docs/DOWNLOAD-PIPELINE.md). */
   progressive?: boolean;
-  /** Highest quality of the scrub pass (default 540). */
-  scrubHeightCap?: number;
+  /** Highest quality of the proxy pass (default 540). */
+  proxyHeightCap?: number;
   /** Max resolution of the HQ pass / single download (null = no cap). */
   maxQualityHeight?: number | null;
   /** When false, a single download serves both scrub and HQ roles. */
-  includeScrub?: boolean;
+  includeProxy?: boolean;
 }
 export type ImportResult = { stream: Stream; downloadJobId: string | null };
 

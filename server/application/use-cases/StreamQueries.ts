@@ -51,7 +51,7 @@ export class DeleteStreamUseCase {
 /** Update a stream's editable metadata (title, streamer, game, vodPath, chatPath). */
 export class UpdateStreamUseCase {
   constructor(private readonly streams: StreamRepository) {}
-  async execute(streamId: string, patch: Partial<Pick<Stream, 'title' | 'streamer' | 'game' | 'vodPath' | 'chatPath'>>): Promise<Stream> {
+  async execute(streamId: string, patch: Partial<Pick<Stream, 'title' | 'streamer' | 'game' | 'vodPath' | 'chatPath' | 'sourceUrl'>>): Promise<Stream> {
     const stream = await this.streams.findById(streamId);
     if (!stream) throw new Error(`Stream not found: ${streamId}`);
     const updated: Stream = {
@@ -61,6 +61,7 @@ export class UpdateStreamUseCase {
       ...(patch.game !== undefined ? { game: patch.game } : {}),
       ...(patch.vodPath !== undefined ? { vodPath: patch.vodPath } : {}),
       ...(patch.chatPath !== undefined ? { chatPath: patch.chatPath } : {}),
+      ...(patch.sourceUrl !== undefined ? { sourceUrl: patch.sourceUrl } : {}),
     };
     await this.streams.update(updated);
     return updated;

@@ -96,7 +96,7 @@
     scrollToIndex(scrollIndex + dir);
   }
 
-  // ── Drag to scrub: move by message proportional to drag distance ──
+  // ── Drag to proxy: move by message proportional to drag distance ──
   let isDragging = false;
   let dragStartY = 0;
   let dragStartIndex = 0;

@@ -61,6 +61,7 @@ const fsFake: FileSystemPort = {
   async ensureDir() {},
   async remove() {},
   joinPath: (...s) => s.join("/"),
+  async listFiles() { return []; },
 };
 
 /** Scriptable engine fake: emits the scripted events, then resolves start(). */

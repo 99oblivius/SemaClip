@@ -35,10 +35,17 @@
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['jobs'] }),
   }));
 
-  // ── Download options (always visible). URL downloads are chunk-live by
-  // default; scrubFirst opts into the two-file 540p-first system. ──
-  let scrubFirst = $state(false);
+  const queueMutation = createMutation(() => ({
+    mutationFn: (action: Parameters<typeof apiClient.manageQueue>[0]) => apiClient.manageQueue(action),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['jobs'] }),
+  }));
+
+  let urlInput = $state('');
+  let pathInput = $state('');
+
+  // Download options — visible only when a valid stream URL is entered.
   let maxQualityHeight = $state<number | null>(null); // null = no cap
+  let proxyHeightCap = $state<number | null>(null); // null = none (no separate proxy file)
   const settingsForDefaults = createQuery(() => ({
     queryKey: ['settings'],
     queryFn: () => apiClient.getSettings(),
@@ -50,9 +57,15 @@
   let qualitiesLoading = $state(false);
   let lastQueriedUrl = '';
 
+  const hasStreamUrl = $derived(isTwitchVodUrl(urlInput.trim()));
+
+  function isTwitchVodUrl(url: string): boolean {
+    return /twitch\.tv\/videos\/\d+/.test(url) || /^\d{6,}$/.test(url.trim());
+  }
+
   $effect(() => {
     const url = urlInput.trim();
-    if (!url || url === lastQueriedUrl) return;
+    if (!url || !isTwitchVodUrl(url) || url === lastQueriedUrl) return;
     lastQueriedUrl = url;
     qualitiesLoading = true;
     qualitiesError = null;
@@ -61,18 +74,24 @@
         qualities = d.qualities;
         // Default the max-quality select to the settings default (if the
         // source has it), else the highest available.
-        if (d.qualities.length > 0 && maxQualityHeight === null) {
+        if (d.qualities.length > 0) {
           const def = settingsForDefaults.data?.defaultMaxQualityHeight ?? null;
           const available = d.qualities.map((q) => q.height);
-          if (def !== null && available.includes(def)) {
-            maxQualityHeight = def;
-          } else {
-            maxQualityHeight = Math.max(...available);
-          }
+          const highest = Math.max(...available);
+          maxQualityHeight = def !== null && available.includes(def) ? def : highest;
+          // Proxy choices sit below the stream's highest and below the max
+          // quality cap; defaults to none (single download).
+          proxyHeightCap = null;
         }
       })
       .catch((err: Error) => (qualitiesError = err.message))
       .finally(() => (qualitiesLoading = false));
+  });
+
+  // Proxy dropdown options: qualities strictly below the chosen max quality.
+  const proxyChoices = $derived.by(() => {
+    if (maxQualityHeight === null) return qualities.filter((q) => q.height < Math.max(...qualities.map((c) => c.height)));
+    return qualities.filter((q) => q.height < maxQualityHeight!);
   });
 
   function handleUrlImport() {
@@ -80,20 +99,16 @@
     importUrlMutation.mutate({
       url: urlInput.trim(),
       progressive: true,
-      scrubHeightCap: 540,
+      proxyHeightCap: proxyHeightCap ?? 540,
       maxQualityHeight,
-      includeScrub: scrubFirst,
+      includeProxy: proxyHeightCap !== null,
     });
     urlInput = '';
+    proxyHeightCap = null;
+    maxQualityHeight = null;
+    qualities = [];
   }
 
-  const queueMutation = createMutation(() => ({
-    mutationFn: (action: Parameters<typeof apiClient.manageQueue>[0]) => apiClient.manageQueue(action),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['jobs'] }),
-  }));
-
-  let urlInput = $state('');
-  let pathInput = $state('');
   let streams = $derived(streamsQuery.data ?? []);
   let jobs = $derived(jobsQuery.data ?? []);
   let runningJobs = $derived(jobs.filter((j) => j.status === 'running'));
@@ -129,77 +144,10 @@
     if (!pathInput.trim()) return;
     importFileMutation.mutate({
       vodPath: pathInput.trim(),
-      title: pathInput.trim().split('/').pop()?.replace(/\.[^.]+$/, ''),
+      folderPath: pathInput.trim(),
+      title: pathInput.trim().split('/').filter(Boolean).pop(),
     });
     pathInput = '';
-  }
-
-  const videoExt = ['.mp4', '.mkv', '.webm', '.mov', '.avi', '.ts'];
-  function isVideoPath(path: string): boolean {
-    return videoExt.some((ext) => path.toLowerCase().endsWith(ext));
-  }
-
-  // Drag state for the dropzone visual feedback.
-  let isDraggingVod = $state(false);
-  let dragCounter = $state(0);
-  let dropHint = $state<string | null>(null);
-
-  function handleVodDrop(e: DragEvent) {
-    e.preventDefault();
-    isDraggingVod = false;
-    dragCounter = 0;
-    const files = e.dataTransfer?.files;
-    if (!files || files.length === 0) return;
-
-    const videoFile = Array.from(files).find((f) => videoExt.some((ext) => f.name.toLowerCase().endsWith(ext)));
-    const chatFile = Array.from(files).find((f) => f.name.toLowerCase().endsWith('.json'));
-
-    if (!videoFile) return;
-    const vodPath = (videoFile as File & { path?: string }).path;
-    if (vodPath) {
-      importFileMutation.mutate({
-        vodPath,
-        title: videoFile.name.replace(/\.[^.]+$/, ''),
-        ...(chatFile && { chatPath: (chatFile as File & { path?: string }).path ?? undefined }),
-      });
-    } else {
-      pathInput = videoFile.name;
-      dropHint = `Path not available in browser dev mode. Enter the full path to "${videoFile.name}" and press Enter.`;
-    }
-  }
-
-  function handleDragEnter(e: DragEvent) {
-    e.preventDefault();
-    dragCounter++;
-    if (e.dataTransfer?.types?.includes('Files')) isDraggingVod = true;
-  }
-
-  function handleDragLeave(e: DragEvent) {
-    e.preventDefault();
-    dragCounter--;
-    if (dragCounter <= 0) { isDraggingVod = false; dragCounter = 0; }
-  }
-
-  // Pending chat file path that needs a stream to attach to.
-  let pendingChatPath = $state<string | null>(null);
-
-  function handleChatDrop(e: DragEvent) {
-    e.preventDefault();
-    const files = e.dataTransfer?.files;
-    if (!files || files.length === 0) return;
-    const chatFile = Array.from(files).find((f) => f.name.toLowerCase().endsWith('.json'));
-    if (chatFile) {
-      const path = (chatFile as File & { path?: string }).path;
-      if (path) pendingChatPath = path;
-    }
-  }
-
-  function attachChatToStream(streamId: string) {
-    if (!pendingChatPath) return;
-    apiClient.attachChat(streamId, pendingChatPath).then(() => {
-      pendingChatPath = null;
-      queryClient.invalidateQueries({ queryKey: ['streams'] });
-    });
   }
 
   function jobElapsed(startedAt: string | null): string {
@@ -215,26 +163,9 @@
 
 <div class="flex h-full flex-col overflow-y-auto p-6" use:fadeIn role="region" aria-label="Library">
   <div class="mx-auto flex w-full max-w-3xl flex-col gap-5">
-    <!-- Import bar (P0-2): dropzone + URL + path, always first -->
+    <!-- Import bar (P0-2): URL + local folder, always first -->
     <section>
-      <div
-        class="relative flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed p-6 transition-all duration-150
-        {isDraggingVod ? 'border-accent bg-accent/5 accent-glow' : 'border-border bg-surface hover:border-border-strong'}"
-        ondrop={handleVodDrop}
-        ondragover={(e) => e.preventDefault()}
-        ondragenter={handleDragEnter}
-        ondragleave={handleDragLeave}
-        role="button"
-        tabindex="0"
-        aria-label="Drop VOD and chat files here"
-      >
-        <Icon name="download" size={26} fill={false} />
-        <span class="font-display text-sm {isDraggingVod ? 'text-accent' : 'text-ink'}">
-          {isDraggingVod ? 'Drop to import' : 'Drop VOD + chat files here'}
-        </span>
-        <span class="text-xs text-ash-dim">Video (.mp4, .mkv, .webm) and chat (.json) — drop together or separately</span>
-      </div>
-      <div class="mt-2 flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 transition-colors focus-within:border-accent">
+      <div class="flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 transition-colors focus-within:border-accent">
         <Icon name="link" size={15} fill={false} />
         <input
           type="text"
@@ -247,71 +178,72 @@
         <button
           class="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
           onclick={handleUrlImport}
-          disabled={importUrlMutation.isPending || !urlInput.trim()}
+          disabled={importUrlMutation.isPending || !hasStreamUrl}
         >
           Download
         </button>
       </div>
 
-      <!-- Download options (always visible; live-chunked download is the
-           only URL path — chunks scrub as they land). The toggle chooses
-           the two-file scrub-first system (opt-in) vs a single download. -->
-      <div class="mt-2 flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface px-3 py-2.5">
-        <span class="font-mono text-xs text-ash-dim">Max quality:</span>
-        {#if qualitiesLoading}
-          <span class="font-mono text-xs text-ash-dim">resolving…</span>
-        {:else if qualitiesError}
-          <span class="font-mono text-xs text-error">{qualitiesError}</span>
-        {:else if qualities.length > 0}
-          <select
-            bind:value={maxQualityHeight}
-            class="rounded border border-border bg-surface-2 px-2 py-1 text-xs text-ink focus:border-accent focus:outline-none"
-            aria-label="Maximum download quality"
-          >
-            {#each qualities as q (q.name)}
-              <option value={q.height}>
-                {q.name} ({q.width}×{q.height})
-              </option>
-            {/each}
-            <option value={null}>No cap</option>
-          </select>
-        {:else}
-          <span class="font-mono text-xs text-ash-dim">paste a URL to list qualities</span>
-        {/if}
-        <label class="flex items-start gap-2 text-xs text-ash" title="Two files: a 540p scrub appears within seconds; the max-quality download follows in the background. Off = a single download at max quality — its chunks become scrubbable as they land.">
-          <input type="checkbox" bind:checked={scrubFirst} class="accent-accent mt-0.5" />
-          <span class="font-medium whitespace-nowrap">540p scrub-first</span>
-        </label>
-      </div>
+      {#if hasStreamUrl}
+        <!-- Download options — only for a valid stream URL. The proxy
+             dropdown picks a separate lower-quality proxy pass (none =
+             single chunk-live download whose chunks become scrubbable as
+             they land). -->
+        <div class="mt-2 flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface px-3 py-2.5">
+          <span class="font-mono text-xs text-ash-dim">Max quality:</span>
+          {#if qualitiesLoading}
+            <span class="font-mono text-xs text-ash-dim">resolving…</span>
+          {:else if qualitiesError}
+            <span class="font-mono text-xs text-error">{qualitiesError}</span>
+          {:else if qualities.length > 0}
+            <select
+              bind:value={maxQualityHeight}
+              class="rounded border border-border bg-surface-2 px-2 py-1 text-xs text-ink focus:border-accent focus:outline-none"
+              aria-label="Maximum download quality"
+            >
+              {#each qualities as q (q.name)}
+                <option value={q.height}>
+                  {q.name} ({q.width}×{q.height})
+                </option>
+              {/each}
+              <option value={null}>No cap</option>
+            </select>
+            <span class="font-mono text-xs text-ash-dim">Proxy:</span>
+            <select
+              bind:value={proxyHeightCap}
+              class="rounded border border-border bg-surface-2 px-2 py-1 text-xs text-ink focus:border-accent focus:outline-none"
+              aria-label="Proxy video quality"
+            >
+              <option value={null}>— none —</option>
+              {#each proxyChoices as q (q.name)}
+                <option value={q.height}>
+                  {q.name} ({q.width}×{q.height})
+                </option>
+              {/each}
+            </select>
+          {/if}
+        </div>
+      {/if}
       <div class="mt-2 flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 transition-colors focus-within:border-accent">
         <Icon name="folder" size={15} fill={false} />
         <input
           type="text"
           bind:value={pathInput}
           onkeydown={(e) => e.key === 'Enter' && handlePathImport()}
-          placeholder="Or enter a local file path"
+          placeholder="Or enter a local folder path"
           class="flex-1 bg-transparent text-sm text-ink placeholder:text-ash-dim focus:outline-none"
-          aria-label="Local file path"
+          aria-label="Local folder path"
         />
         <button
           class="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-ash transition-colors hover:text-ink hover:border-border-strong disabled:opacity-50"
           onclick={handlePathImport}
-          disabled={importFileMutation.isPending || !pathInput.trim() || !isVideoPath(pathInput.trim())}
+          disabled={importFileMutation.isPending || !pathInput.trim()}
         >
           Import
         </button>
       </div>
-      {#if pathInput.trim() && !isVideoPath(pathInput.trim())}
-        <p class="mt-1 px-3 text-xs text-warning">Path must end with a video extension (.mp4, .mkv, .webm, etc.)</p>
-      {/if}
-      {#if dropHint}
-        <div class="mt-2 flex items-center gap-2 rounded-md border border-warning bg-surface px-3 py-2 text-xs text-warning">
-          <Icon name="alert" size={14} fill={false} />
-          <span class="flex-1">{dropHint}</span>
-          <button class="text-ash-dim hover:text-ink" onclick={() => (dropHint = null)} aria-label="Dismiss">
-            <Icon name="close" size={13} />
-          </button>
-        </div>
+      {#if pathInput.trim()}
+        <p class="mt-1 px-3 text-xs text-ash-dim">First video file in the folder becomes the HQ video; a proxy file (proxy.ts / scrub.ts) and chat.json are picked up automatically.</p>
       {/if}
       {#if importUrlMutation.isError || importFileMutation.isError}
         <div class="mt-2 rounded-md border border-error bg-surface px-3 py-2 text-xs text-error">
@@ -379,8 +311,8 @@
     {#if filteredStreams.length === 0 && streams.length === 0}
       <div class="flex flex-col items-center justify-center gap-3 py-16 text-center">
         <Icon name="waveform" size={40} fill={false} />
-        <p class="font-display text-base text-ash">Drop a Twitch VOD to begin</p>
-        <p class="text-sm text-ash-dim">or paste a URL / file path above</p>
+        <p class="font-display text-base text-ash">Paste a Twitch VOD URL to begin</p>
+        <p class="text-sm text-ash-dim">or point at a local folder above</p>
       </div>
     {:else if filteredStreams.length === 0}
       <div class="py-12 text-center text-sm text-ash-dim">No streams for this channel.</div>
@@ -410,14 +342,6 @@
                   {/if}
                 </div>
               </button>
-              {#if pendingChatPath}
-                <button
-                  class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent"
-                  onclick={() => attachChatToStream(stream.id)}
-                >
-                  <Icon name="plus" size={11} /> Attach chat
-                </button>
-              {/if}
             </div>
           {/each}
         </div>

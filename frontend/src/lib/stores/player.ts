@@ -12,7 +12,7 @@ export interface PlayerState {
   volume: number;          // 0-1
   playbackRate: number;    // 0.25-2
   isFullscreen: boolean;
-  isScrubbing: boolean;
+  isProxybing: boolean;
 }
 export const playerStore = writable<PlayerState>({
   currentTime: 0,
@@ -26,7 +26,7 @@ export const playerStore = writable<PlayerState>({
   volume: 1,
   playbackRate: 1,
   isFullscreen: false,
-  isScrubbing: false,
+  isProxybing: false,
 });
 
 export function seek(time: number) {

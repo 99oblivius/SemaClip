@@ -2,6 +2,7 @@
   import { createMutation, useQueryClient, createQuery } from '@tanstack/svelte-query';
   import { apiClient } from '$lib/api/client';
   import Icon from './Icon.svelte';
+  import ConfirmModal from './ConfirmModal.svelte';
   import DeleteConfirmModal from './DeleteConfirmModal.svelte';
   import type { Stream } from '$shared/types';
   import type { DownloadState } from '$lib/api/download';
@@ -20,6 +21,7 @@
   let title = $state('');
   let streamer = $state('');
   let game = $state('');
+  let streamLink = $state('');
   let vodPath = $state('');
   let chatPath = $state('');
   let loaded = $state(false);
@@ -31,6 +33,7 @@
       title = stream.title ?? '';
       streamer = stream.streamer ?? '';
       game = stream.game ?? '';
+      streamLink = stream.sourceUrl ?? '';
       vodPath = stream.vodPath ?? '';
       chatPath = stream.chatPath ?? '';
       prevId = stream.id;
@@ -59,39 +62,39 @@
 
   let saved = $state(false);
 
-  // ── Media section: download state + piece actions ──
+  // ── Media section: download state + per-artifact actions ──
   const downloadQuery = createQuery(() => ({
     queryKey: ['download', stream.id],
     queryFn: () => apiClient.getDownloadState(stream.id),
     refetchInterval: 1000,
-    enabled: Boolean(stream.sourceUrl),
+    enabled: open && Boolean(stream.sourceUrl),
   }));
   const dlState = $derived(downloadQuery.data as DownloadState | undefined);
-  const hasScrub = $derived(Boolean(dlState?.scrubPath));
-  const hasHq = $derived(Boolean(dlState?.hqPath));
   const mediaBusy = $derived(dlState?.phase === 'running');
 
-  const deleteScrubMutation = createMutation(() => ({
-    mutationFn: () => apiClient.deleteScrub(stream.id),
+  // Per-artifact presence: proxy + HQ come from the download state, chat
+  // from the stream record (present for file imports too).
+  const hasHq = $derived(Boolean(dlState?.hqPath) || Boolean(vodPath));
+  const hasProxy = $derived(Boolean(dlState?.proxyPath));
+  const hasChat = $derived(Boolean(chatPath));
+
+  const pieceMutation = createMutation(() => ({
+    mutationFn: (kind: 'proxy' | 'hq' | 'chat') => apiClient.downloadPiece(stream.id, kind),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['download', stream.id] });
       queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
     },
   }));
-
-  const pieceMutation = createMutation(() => ({
-    mutationFn: (kind: 'scrub' | 'hq') => apiClient.downloadPiece(stream.id, kind),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['download', stream.id] }),
-  }));
-  let pendingPiece = $state<'scrub' | 'hq' | null>(null);
-  function startPiece(kind: 'scrub' | 'hq') {
+  let pendingPiece = $state<'proxy' | 'hq' | 'chat' | null>(null);
+  function startPiece(kind: 'proxy' | 'hq' | 'chat') {
     pendingPiece = kind;
     pieceMutation.mutate(kind);
   }
   // Piece live progress from the polled download state (1s refresh).
   const pieceProgress = $derived.by(() => {
     if (!dlState) return null;
-    const kind = pendingPiece ?? 'scrub';
+    const kind = pendingPiece;
+    if (!kind || kind === 'chat') return null;
     const part = dlState.parts.find((p) => p.kind === kind);
     if (!part || part.status !== 'running') return null;
     return { kind, percent: part.percent, frontier: part.downloadedSec ?? 0 };
@@ -99,8 +102,8 @@
 
   function fmtPieceTime(sec: number): string {
     const h = Math.floor(sec / 3600);
-    const m = Math.floor((sec % 3600) / 60);
-    return h > 0 ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m${String(Math.floor(sec % 60)).padStart(2, '0')}s`;
+    const m = Math.floor((sec % 60) / 60);
+    return h > 0 ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m`;
   }
 
   // Clear the pending marker when the piece reaches a terminal status.
@@ -108,13 +111,60 @@
     if (!pendingPiece || !dlState) return;
     const part = dlState.parts.find((p) => p.kind === pendingPiece);
     if (part && part.status !== 'running') pendingPiece = null;
+    if (!mediaBusy && pendingPiece === 'chat') pendingPiece = null;
   });
+
+  // ── Trash confirmations: one modal shared by the three artifact rows ──
+  type TrashTarget = 'hq' | 'proxy' | 'chat';
+  let trashTarget = $state<TrashTarget | null>(null);
+  const TRASH_LABELS: Record<TrashTarget, string> = {
+    hq: 'the video file',
+    proxy: 'the proxy video',
+    chat: 'the chat file',
+  };
+
+  const deleteProxyMutation = createMutation(() => ({
+    mutationFn: () => apiClient.deleteProxy(stream.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['download', stream.id] });
+      queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
+    },
+  }));
+
+  const deleteChatMutation = createMutation(() => ({
+    mutationFn: () => apiClient.deleteChat(stream.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
+      // Chat path is also a stream-record field the settings input mirrors.
+      chatPath = '';
+    },
+  }));
+
+  // HQ trash: clear the stream's video path (the file itself is deleted with
+  // the whole-download action; this detaches the record like Delete Project
+  // minus the project). Uses the download delete for URL streams.
+  const deleteHqMutation = createMutation(() => ({
+    mutationFn: () => apiClient.deleteDownload(stream.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['download', stream.id] });
+      queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
+    },
+  }));
+
+  function confirmTrash() {
+    if (!trashTarget) return;
+    if (trashTarget === 'proxy') deleteProxyMutation.mutate();
+    else if (trashTarget === 'chat') deleteChatMutation.mutate();
+    else deleteHqMutation.mutate();
+    trashTarget = null;
+  }
 
   const dirty = $derived(
     loaded && (
       title !== (stream.title ?? '') ||
       streamer !== (stream.streamer ?? '') ||
       game !== (stream.game ?? '') ||
+      streamLink !== (stream.sourceUrl ?? '') ||
       vodPath !== (stream.vodPath ?? '') ||
       chatPath !== (stream.chatPath ?? '')
     )
@@ -125,6 +175,7 @@
       title: title.trim() || null,
       streamer: streamer.trim() || null,
       game: game.trim() || null,
+      sourceUrl: streamLink.trim() || null,
       vodPath: vodPath.trim(),
       chatPath: chatPath.trim() || null,
     });
@@ -160,7 +211,7 @@
 
   {#if open}
     <div
-      class="absolute right-0 top-full z-40 mt-1 w-96 rounded-lg border border-border bg-surface shadow-xl"
+      class="absolute right-0 top-full z-40 mt-1 w-[26rem] rounded-lg border border-border bg-surface shadow-xl"
       role="dialog"
       aria-label="Project settings"
     >
@@ -182,136 +233,96 @@
               class="rounded-md border border-border bg-surface-2 px-3 py-1.5 text-sm text-ink focus:border-accent focus:outline-none"
             />
           </label>
-          <div class="flex gap-3">
-            <label class="flex flex-1 flex-col gap-1">
+          <!-- Streamer gets priority width; game shrinks but never overflows
+               the card (min-w-0 truncation + flex-basis weighting). -->
+          <div class="flex w-full min-w-0 gap-2">
+            <label class="flex min-w-0 flex-col gap-1" style="flex: 3 1 0;">
               <span class="font-mono text-xs text-ash">Streamer</span>
               <input
                 type="text"
                 bind:value={streamer}
-                class="rounded-md border border-border bg-surface-2 px-3 py-1.5 text-sm text-ink focus:border-accent focus:outline-none"
+                class="w-full min-w-0 rounded-md border border-border bg-surface-2 px-2 py-1.5 text-sm text-ink focus:border-accent focus:outline-none"
               />
             </label>
-            <label class="flex flex-1 flex-col gap-1">
+            <label class="flex min-w-0 flex-col gap-1" style="flex: 2 1 0;">
               <span class="font-mono text-xs text-ash">Game</span>
               <input
                 type="text"
                 bind:value={game}
-                class="rounded-md border border-border bg-surface-2 px-3 py-1.5 text-sm text-ink focus:border-accent focus:outline-none"
+                class="w-full min-w-0 rounded-md border border-border bg-surface-2 px-2 py-1.5 text-sm text-ink focus:border-accent focus:outline-none"
               />
             </label>
           </div>
-        </div>
-
-        <!-- File paths -->
-        <div class="flex flex-col gap-3 border-t border-border pt-3">
-          <span class="font-mono text-xs text-ash uppercase tracking-wider">File Paths</span>
           <label class="flex flex-col gap-1">
-            <span class="font-mono text-xs text-ash">Video Path</span>
+            <span class="font-mono text-xs text-ash">Stream link</span>
             <input
               type="text"
-              bind:value={vodPath}
-              class="rounded-md border border-border bg-surface-2 px-3 py-1.5 font-mono text-xs text-ink focus:border-accent focus:outline-none"
+              bind:value={streamLink}
+              placeholder="https://www.twitch.tv/videos/…"
+              class="rounded-md border border-border bg-surface-2 px-3 py-1.5 text-sm text-ink placeholder:text-ash-dim focus:border-accent focus:outline-none"
             />
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="font-mono text-xs text-ash">Chat Path</span>
-            <input
-              type="text"
-              bind:value={chatPath}
-              placeholder="No chat file"
-              class="rounded-md border border-border bg-surface-2 px-3 py-1.5 font-mono text-xs text-ink placeholder:text-ash-dim focus:border-accent focus:outline-none"
-            />
+            <span class="text-[10px] text-ash-dim">Used to (re)download video, proxy and chat</span>
           </label>
         </div>
 
-        <!-- Media (progressive downloads) -->
-        {#if stream.sourceUrl && dlState}
-          <div class="flex flex-col gap-2 border-t border-border pt-3">
-            <span class="font-mono text-xs text-ash uppercase tracking-wider">Media</span>
-            {#if dlState.qualities.length > 0}
-              <div class="flex flex-wrap gap-1.5">
-                {#each dlState.qualities as q (q.name)}
-                  <span class="rounded border border-border px-1.5 py-0.5 font-mono text-[10px] {hasHq && q.height <= 540 ? 'text-ash-dim' : 'text-ash'}">
-                    {q.name}
-                  </span>
-                {/each}
-              </div>
-            {/if}
-            <div class="flex flex-wrap items-center gap-2">
-              {#if hasScrub}
-                <button
-                  class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-error hover:text-error disabled:opacity-50"
-                  onclick={() => deleteScrubMutation.mutate()}
-                  disabled={mediaBusy || deleteScrubMutation.isPending}
-                  title="Delete the 540p scrub file — review then scrubs the full-quality file"
-                >
-                  <Icon name="trash" size={12} /> Delete LQ scrub
-                </button>
-              {:else if pieceProgress?.kind === 'scrub'}
-                <!-- In-flight: cancel button (the piece aborts + partial file is kept) -->
+        <!-- Files: per-artifact rows — presence check / download, trash -->
+        <div class="flex flex-col gap-2 border-t border-border pt-3">
+          <div class="flex items-center justify-between">
+            <span class="font-mono text-xs uppercase tracking-wider text-ash">Files</span>
+            <button
+              class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent"
+              onclick={() => { void fetch(`/api/streams/${stream.id}/folder`); }}
+              title="Open the artifact folder"
+            >
+              <Icon name="folder" size={12} /> Open folder
+            </button>
+          </div>
+
+          {#each [
+              { key: 'hq', label: 'Video (HQ)', has: hasHq, running: pendingPiece === 'hq', progress: pieceProgress?.kind === 'hq' ? pieceProgress.percent : null },
+              { key: 'proxy', label: 'Proxy video', has: hasProxy, running: pendingPiece === 'proxy', progress: pieceProgress?.kind === 'proxy' ? pieceProgress.percent : null },
+              { key: 'chat', label: 'Chat', has: hasChat, running: pendingPiece === 'chat', progress: null },
+            ] as row (row.key)}
+            <div class="flex items-center gap-2">
+              <span class="w-24 shrink-0 font-mono text-xs text-ash">{row.label}</span>
+              {#if row.running}
                 <button
                   class="flex items-center gap-1 rounded-md border border-accent px-2 py-1 text-xs text-accent transition-colors hover:border-error hover:text-error"
                   onclick={() => { pendingPiece = null; apiClient.deleteDownload(stream.id); }}
-                  title="Abort the scrub download and delete its files"
+                  title="Cancel this download"
                 >
-                  <Icon name="close" size={12} /> Cancel scrub ({Math.round((pieceProgress.percent ?? 0) * 100)}%)
+                  <Icon name="close" size={11} /> Cancel{row.progress !== null ? ` ${Math.round((row.progress ?? 0) * 100)}%` : ''}
                 </button>
+              {:else if row.has}
+                <span class="flex items-center gap-1 font-mono text-[11px] text-success" title="On disk">
+                  <Icon name="check" size={11} /> on disk
+                </span>
               {:else}
                 <button
                   class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
-                  onclick={() => startPiece('scrub')}
-                  disabled={mediaBusy || pieceMutation.isPending}
-                  title="Download a 540p scrub file for fast review"
+                  onclick={() => startPiece(row.key as 'proxy' | 'hq' | 'chat')}
+                  disabled={mediaBusy || pieceMutation.isPending || !streamLink.trim()}
+                  title={streamLink.trim() ? 'Download from the stream link' : 'Set the stream link first'}
                 >
-                  <Icon name="download" size={12} /> Download scrub
+                  <Icon name="download" size={11} /> Download
                 </button>
               {/if}
-              {#if !hasHq}
-                {#if pieceProgress?.kind === 'hq'}
-                  <button
-                    class="flex items-center gap-1 rounded-md border border-accent px-2 py-1 text-xs text-accent transition-colors hover:border-error hover:text-error"
-                    onclick={() => { pendingPiece = null; apiClient.deleteDownload(stream.id); }}
-                    title="Abort the HQ download and delete its files"
-                  >
-                    <Icon name="close" size={12} /> Cancel HQ
-                  </button>
-                {:else}
-                  <button
-                    class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
-                    onclick={() => startPiece('hq')}
-                    disabled={mediaBusy || pieceMutation.isPending}
-                    title="Download the full-quality file (capped by settings)"
-                  >
-                    <Icon name="download" size={12} /> Download HQ
-                  </button>
-                {/if}
-              {:else}
-                <span class="flex items-center gap-1 font-mono text-[10px] text-success">
-                  <Icon name="check" size={11} /> HQ on disk
-                </span>
+              <span class="flex-1"></span>
+              {#if row.has}
+                <button
+                  class="flex h-6 w-6 items-center justify-center rounded text-ash-dim transition-colors hover:text-error"
+                  onclick={() => (trashTarget = row.key as TrashTarget)}
+                  aria-label={`Delete ${row.label}`}
+                >
+                  <Icon name="trash" size={12} />
+                </button>
               {/if}
             </div>
-            {#if pieceProgress}
-              <div class="flex flex-col gap-0.5">
-                <div class="h-1 overflow-hidden rounded-full bg-surface-3">
-                  <div class="h-full bg-accent transition-all" style="width: {(pieceProgress.percent ?? 0) * 100}%"></div>
-                </div>
-                <span class="font-mono text-[10px] text-ash-dim">
-                  {pieceProgress.kind} · {fmtPieceTime(pieceProgress.frontier)} on disk
-                </span>
-              </div>
-            {:else if mediaBusy}
-              <div class="h-0.5 overflow-hidden rounded-full bg-surface-3">
-                <div class="h-full bg-accent transition-all" style="width: {dlState.overall.percent * 100}%"></div>
-              </div>
-            {/if}
-            {#if deleteScrubMutation.isError}
-              <p class="font-mono text-[10px] text-error">{deleteScrubMutation.error?.message}</p>
-            {:else if pieceMutation.isError}
-              <p class="font-mono text-[10px] text-error">{pieceMutation.error?.message}</p>
-            {/if}
-          </div>
-        {/if}
+          {/each}
+          {#if pieceMutation.isError}
+            <p class="font-mono text-[10px] text-error">{pieceMutation.error?.message}</p>
+          {/if}
+        </div>
 
         <!-- Actions -->
         <div class="flex items-center justify-between gap-2 border-t border-border pt-3">
@@ -347,5 +358,15 @@
     {stream}
     onConfirm={confirmDelete}
     onCancel={() => (showDeleteModal = false)}
+  />
+{/if}
+
+{#if trashTarget}
+  <ConfirmModal
+    title="Delete {TRASH_LABELS[trashTarget]}?"
+    body="This file will be removed from disk. This cannot be undone."
+    confirmLabel="Delete"
+    onConfirm={confirmTrash}
+    onCancel={() => (trashTarget = null)}
   />
 {/if}

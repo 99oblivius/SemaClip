@@ -72,14 +72,17 @@ export const apiClient = {
   resumeDownload: (streamId: string) =>
     api<{ ok: boolean }>(`/streams/${streamId}/download/resume`, { method: 'POST' }),
 
-  deleteScrub: (streamId: string) =>
-    api<{ deleted: boolean }>(`/streams/${streamId}/scrub`, { method: 'DELETE' }),
+  deleteProxy: (streamId: string) =>
+    api<{ deleted: boolean }>(`/streams/${streamId}/proxy`, { method: 'DELETE' }),
 
-  downloadPiece: (streamId: string, kind: 'scrub' | 'hq', maxHeight?: number | null) =>
-    api<{ started: boolean; quality: string | null }>(`/streams/${streamId}/download-piece`, {
+  downloadPiece: (streamId: string, kind: 'proxy' | 'hq' | 'chat', maxHeight?: number | null) =>
+    api<{ started: boolean; quality: string | null; count?: number }>(`/streams/${streamId}/download-piece`, {
       method: 'POST',
       body: JSON.stringify({ kind, maxHeight: maxHeight ?? null }),
     }),
+
+  deleteChat: (streamId: string) =>
+    api<{ deleted: boolean }>(`/streams/${streamId}/chat`, { method: 'DELETE' }),
 
 
 
@@ -93,7 +96,7 @@ export const apiClient = {
   deleteStream: (id: string) =>
     api<{ ok: boolean }>(`/streams/${id}`, { method: 'DELETE' }),
 
-  updateStream: (id: string, patch: Partial<Pick<Stream, 'title' | 'streamer' | 'game' | 'vodPath' | 'chatPath'>>) =>
+  updateStream: (id: string, patch: Partial<Pick<Stream, 'title' | 'streamer' | 'game' | 'vodPath' | 'chatPath' | 'sourceUrl'>>) =>
     api<Stream>(`/streams/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
 
   // ── Jobs ──
@@ -156,7 +159,7 @@ export const apiClient = {
   videoUrl: (streamId: string) =>
     `${API_BASE}/video/${streamId}`,
 
-  hlsPlaylistUrl: (streamId: string, track: 'scrub' | 'hq' = 'scrub') =>
+  hlsPlaylistUrl: (streamId: string, track: 'proxy' | 'hq' = 'proxy') =>
     `${API_BASE}/streams/${streamId}/hls.m3u8?track=${track}`,
 
   // ── Signal terrain data ──

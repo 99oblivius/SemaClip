@@ -36,7 +36,7 @@ export class FFmpegAdapter implements FFmpegExportPort, MediaProbePort {
   }
 
   /**
-   * Generates a scrub proxy (P0-10): 960×540-class H.264, hardware-accelerated
+   * Generates a proxy proxy (P0-10): 960×540-class H.264, hardware-accelerated
    * when a GPU encoder verifies (nvenc > qsv > vaapi > amf, probed once and
    * cached; cpu libx264 fallback). Hardware encode releases the CPU — the
    * measured 12-core libx264 process became ~2s of core-time on NVENC.

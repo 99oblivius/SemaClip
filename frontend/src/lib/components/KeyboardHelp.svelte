@@ -22,8 +22,8 @@
     {
       title: 'Timeline',
       keys: [
-        { key: 'Click', action: 'Seek to position (timeline is the scrub bar)' },
-        { key: 'Drag', action: 'Scrub through video' },
+        { key: 'Click', action: 'Seek to position (timeline is the proxy bar)' },
+        { key: 'Drag', action: 'Proxy through video' },
         { key: 'Hover', action: 'Preview cursor + time tooltip' },
         { key: 'Click clip mark', action: 'Select clip (does not seek)' },
         { key: 'Drag handles', action: 'Adjust clip endpoints' },

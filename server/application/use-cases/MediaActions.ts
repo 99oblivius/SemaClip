@@ -1,7 +1,7 @@
 /**
  * Media management actions (user-directed, download-pipeline scope):
- * - Delete the LQ scrub file (review falls back to full-res scrubbing).
- * - Re-download a missing scrub or an HQ file at a different resolution
+ * - Delete the LQ proxy file (review falls back to full-res proxybing).
+ * - Re-download a missing proxy or an HQ file at a different resolution
  *   (progressive orchestrator re-run, scoped to the missing part).
  *
  * The download state lives in stream metadata; the artifact dir is derived
@@ -11,8 +11,9 @@
 
 import type { StreamRepository, StreamMetadataRepository, FileSystemPort } from "@/application/ports/outbound.ts";
 import { DownloadOrchestrator, type DownloadState } from "@/adapters/outbound/vod/download-orchestrator.ts";
-import { resolveQualities, pickScrubQuality, pickBestQuality, downloadProgressive, extractVodId } from "@/adapters/outbound/vod/hls.ts";
+import { resolveQualities, pickProxyQuality, pickBestQuality, downloadProgressive, extractVodId } from "@/adapters/outbound/vod/hls.ts";
 import { remuxToMp4, mp4Twin } from "@/adapters/outbound/vod/remux.ts";
+import { downloadChat } from "@/adapters/outbound/vod/chat-fetch.ts";
 
 export class MediaActionsUseCase {
   /** Live piece downloads by stream — DELETE /download aborts these too. */
@@ -37,13 +38,13 @@ export class MediaActionsUseCase {
   }
 
   /**
-   * The artifact dir — derived from the scrubPath recorded by the download
-   * state (present from the moment the scrub download starts), falling back
+   * The artifact dir — derived from the proxyPath recorded by the download
+   * state (present from the moment the proxy download starts), falling back
    * to the transcript_srt metadata path (post-processing streams).
    */
   private async artifactDir(streamId: string): Promise<string | null> {
     const dl = await this.orchestrator.getState(streamId);
-    if (dl.scrubPath) return dl.scrubPath.replace(/\/[^/]+$/, "");
+    if (dl.proxyPath) return dl.proxyPath.replace(/\/[^/]+$/, "");
     if (dl.hqPath) return dl.hqPath.replace(/\/[^/]+$/, "");
     const raw = await this.metadata.get(streamId, "transcript_srt");
     if (raw) {
@@ -65,39 +66,78 @@ export class MediaActionsUseCase {
     return this.orchestrator.getState(streamId);
   }
 
-  /** Deletes the LQ scrub file if it exists; idempotent. */
-  async deleteScrub(streamId: string): Promise<{ deleted: boolean }> {
+  /** Deletes the LQ proxy file if it exists; idempotent. */
+  async deleteProxy(streamId: string): Promise<{ deleted: boolean }> {
     const dir = await this.artifactDir(streamId);
     if (!dir) return { deleted: false };
-    const scrubPath = `${dir}/scrub.ts`;
-    if (!(await this.fs.exists(scrubPath))) return { deleted: false };
-    await this.fs.remove(scrubPath);
+    // New runs write proxy.ts; pre-rename runs left scrub.ts — accept both.
+    const proxyPath = `${dir}/proxy.ts`;
+    const legacyPath = `${dir}/scrub.ts`;
+    const target = (await this.fs.exists(proxyPath)) ? proxyPath : legacyPath;
+    if (!(await this.fs.exists(target))) return { deleted: false };
+    const tsPath = target;
+    await this.fs.remove(tsPath);
     // The mp4 twin is the playable form — leaving it would keep dead video
     // on the video route's twin preference.
+    await this.fs.remove(`${dir}/proxy.mp4`).catch(() => {});
     await this.fs.remove(`${dir}/scrub.mp4`).catch(() => {});
-    // State note: scrubPath/scrubFrontierSec in the download state describe
+    // State note: proxyPath/proxyFrontierSec in the download state describe
     // what WAS downloaded; clearing them keeps the UI honest (review now
-    // scrubs the HQ file or falls back to source).
+    // proxys the HQ file or falls back to source).
     const state = await this.orchestrator.getState(streamId);
-    if (state.scrubPath === scrubPath) {
-      state.scrubPath = null;
-      state.scrubMp4 = null;
+    if (state.proxyPath === tsPath) {
+      state.proxyPath = null;
+      state.proxyMp4 = null;
       await this.orchestrator.setState(streamId, state);
+    }
+    return { deleted: true };
+  }
+
+  /** Open the artifact folder in the OS file manager (xdg-open / explorer). */
+  async openFolder(streamId: string): Promise<{ opened: boolean; dir: string | null }> {
+    const dir = await this.artifactDir(streamId);
+    if (!dir || !(await this.fs.exists(dir))) return { opened: false, dir: null };
+    const cmd = Deno.build.os === "windows" ? "explorer" : "xdg-open";
+    try {
+      const child = new Deno.Command(cmd, { args: [dir] });
+      child.spawn();
+      return { opened: true, dir };
+    } catch {
+      return { opened: false, dir };
+    }
+  }
+
+  /** Delete the chat JSON (chatPath in the stream record + download state). */
+  async deleteChat(streamId: string): Promise<{ deleted: boolean }> {
+    const dir = await this.artifactDir(streamId);
+    if (!dir) return { deleted: false };
+    const chatPath = `${dir}/chat.json`;
+    if (!(await this.fs.exists(chatPath))) return { deleted: false };
+    await this.fs.remove(chatPath);
+    const state = await this.orchestrator.getState(streamId);
+    state.chatPath = null;
+    state.chatCount = 0;
+    const part = state.parts.find((x) => x.kind === "chat");
+    if (part && part.status === "done") part.status = "pending";
+    await this.orchestrator.setState(streamId, state);
+    const stream = await this.streams.findById(streamId);
+    if (stream?.chatPath === chatPath) {
+      await this.streams.update({ ...stream, chatPath: null });
     }
     return { deleted: true };
   }
 
   /**
    * Downloads a single missing piece at an explicit quality height:
-   * kind="scrub" → the highest ≤ cap (defaults 540), kind="hq" → the
+   * kind="proxy" → the highest ≤ cap (defaults 540), kind="hq" → the
    * highest ≤ maxHeight (null = source). Fails honestly when the stream
    * has no source URL (local files have nothing to re-fetch) or a download
    * is already running.
    */
   async downloadPiece(opts: {
     streamId: string;
-    kind: "scrub" | "hq";
-    scrubHeightCap?: number;
+    kind: "proxy" | "hq";
+    proxyHeightCap?: number;
     maxHeight?: number | null;
     signal?: AbortSignal | undefined;
   }): Promise<{ started: boolean; quality: string | null }> {
@@ -124,12 +164,12 @@ export class MediaActionsUseCase {
     await this.fs.ensureDir(dir);
 
     const qualities = await resolveQualities(vodId);
-    const quality = opts.kind === "scrub"
-      ? pickScrubQuality(qualities, opts.scrubHeightCap ?? 540)
+    const quality = opts.kind === "proxy"
+      ? pickProxyQuality(qualities, opts.proxyHeightCap ?? 540)
       : pickBestQuality(qualities, opts.maxHeight ?? null);
     if (!quality) throw new Error("No qualities available for this VOD");
 
-    const destPath = opts.kind === "scrub" ? `${dir}/scrub.ts` : `${dir}/hq.ts`;
+    const destPath = opts.kind === "proxy" ? `${dir}/proxy.ts` : `${dir}/hq.ts`;
     // Single-part run: mark the other video part done/skipped so the state
     // stays coherent (this is a targeted re-download, not a full pipeline).
     await this.orchestrator.setState(opts.streamId, {
@@ -149,7 +189,7 @@ export class MediaActionsUseCase {
       overall: { percent: 0, etaSec: null },
     });
 
-    const wasScrub = opts.kind === "scrub";
+    const wasProxy = opts.kind === "proxy";
     // Own the abort: DELETE /download must be able to cancel piece runs.
     const controller = new AbortController();
     this.pieceAborts.set(opts.streamId, controller);
@@ -163,7 +203,7 @@ export class MediaActionsUseCase {
     try {
       await downloadProgressive(quality.playlistUrl, destPath, {
         signal: pieceSignal,
-        lookahead: wasScrub ? 3 : 4,
+        lookahead: wasProxy ? 3 : 4,
         onChunk: (index, offset, len) => {
           void Deno.writeTextFile(
             `${dir}/${opts.kind}.chunks`,
@@ -172,7 +212,7 @@ export class MediaActionsUseCase {
           ).catch(() => {});
         },
         onProgress: (p) => {
-          if (wasScrub) liveState.scrubFrontierSec = p.downloadedSec;
+          if (wasProxy) liveState.proxyFrontierSec = p.downloadedSec;
           const part = liveState.parts.find((x) => x.kind === opts.kind);
           if (part) {
             part.percent = p.percent;
@@ -189,10 +229,10 @@ export class MediaActionsUseCase {
         },
       });
       // Final write + playable mp4 twin (raw TS is unplayable in Chromium).
-      if (wasScrub) liveState.scrubFrontierSec = Number.MAX_SAFE_INTEGER;
+      if (wasProxy) liveState.proxyFrontierSec = Number.MAX_SAFE_INTEGER;
       const twin = await remuxToMp4(destPath, mp4Twin(destPath));
-      if (wasScrub) {
-        liveState.scrubMp4 = twin ? mp4Twin(destPath) : null;
+      if (wasProxy) {
+        liveState.proxyMp4 = twin ? mp4Twin(destPath) : null;
       } else {
         liveState.hqMp4 = twin ? mp4Twin(destPath) : null;
       }
@@ -216,18 +256,98 @@ export class MediaActionsUseCase {
       part.status = "done";
       part.percent = 1;
     }
-    if (wasScrub) {
-      liveState.scrubPath = destPath;
+    if (wasProxy) {
+      liveState.proxyPath = destPath;
     } else {
       liveState.hqPath = destPath;
     }
     this.pieceAborts.delete(opts.streamId);
     // Done only when BOTH video parts have playable files (a piece run can
     // complete while the other piece never landed).
-    const bothPlayable = liveState.scrubPath !== null && liveState.hqPath !== null
-      && (liveState.scrubMp4 !== null || liveState.hqMp4 !== null);
+    const bothPlayable = liveState.proxyPath !== null && liveState.hqPath !== null
+      && (liveState.proxyMp4 !== null || liveState.hqMp4 !== null);
     liveState.phase = bothPlayable ? "done" : "idle";
     await this.orchestrator.setState(opts.streamId, liveState);
     return { started: true, quality: quality.name };
+  }
+
+  /** Chat-only piece: GQL page-by-page fetch into the artifact dir. */
+  async downloadChatPiece(opts: {
+    streamId: string;
+    signal?: AbortSignal | undefined;
+  }): Promise<{ started: boolean; count: number }> {
+    const stream = await this.streams.findById(opts.streamId);
+    if (!stream?.sourceUrl) {
+      throw new Error("Stream has no source URL — nothing to download from");
+    }
+    const vodId = extractVodId(stream.sourceUrl);
+    if (!vodId) throw new Error(`Unparseable source URL: ${stream.sourceUrl}`);
+
+    const existing = await this.orchestrator.getState(opts.streamId);
+    if (existing.phase === "running") {
+      throw new Error("A download is already running for this stream");
+    }
+    let dir = await this.artifactDir(opts.streamId);
+    if (!dir) {
+      const fresh = `${this.cacheDir}/vods/${opts.streamId}`;
+      await this.fs.ensureDir(fresh);
+      dir = fresh;
+    }
+
+    await this.orchestrator.setState(opts.streamId, {
+      ...existing,
+      phase: "running",
+      startedAt: existing.startedAt ?? new Date().toISOString(),
+      parts: existing.parts.map((p) =>
+        p.kind === "chat" ? { ...p, status: "running" as const, percent: 0 } : p,
+      ),
+    });
+
+    const controller = new AbortController();
+    this.pieceAborts.set(opts.streamId, controller);
+    if (opts.signal) opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
+    const liveState = await this.orchestrator.getState(opts.streamId);
+    try {
+      let lastWrite = 0;
+      const count = await downloadChat(vodId, `${dir}/chat.json`, {
+        signal: controller.signal,
+        onProgress: (p) => {
+          const part = liveState.parts.find((x) => x.kind === "chat");
+          if (part) {
+            // GQL chat gives no total page count — track pages fetched.
+            part.percent = part.percent === 0 ? 0.01 : Math.min(0.99, part.percent + 0.01);
+            part.downloadedSec = p.comments;
+            part.totalSec = p.pages;
+          }
+          const now = performance.now();
+          if (now - lastWrite > 1000) {
+            lastWrite = now;
+            void this.orchestrator.setState(opts.streamId, liveState);
+          }
+        },
+      });
+      const part = liveState.parts.find((x) => x.kind === "chat");
+      if (part) {
+        part.status = "done";
+        part.percent = 1;
+      }
+      liveState.chatPath = `${dir}/chat.json`;
+      liveState.chatCount = count;
+      await this.orchestrator.setState(opts.streamId, liveState);
+      const fresh = await this.streams.findById(opts.streamId);
+      if (fresh) await this.streams.update({ ...fresh, chatPath: `${dir}/chat.json` });
+      return { started: true, count };
+    } catch (err) {
+      const state = await this.orchestrator.getState(opts.streamId);
+      const part = state.parts.find((x) => x.kind === "chat");
+      if (part) {
+        part.status = controller.signal.aborted ? "skipped" : "failed";
+        part.error = err instanceof Error ? err.message : String(err);
+      }
+      await this.orchestrator.setState(opts.streamId, state);
+      throw err;
+    } finally {
+      this.pieceAborts.delete(opts.streamId);
+    }
   }
 }

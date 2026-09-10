@@ -122,7 +122,7 @@ export interface FFmpegExportPort {
       backgroundOpacity: number;
     };
   }): Promise<{ exportPath: string; durationMs: number }>;
-  /** Generate a low-res scrub proxy (P0-10). Null vodPath output = reuse source dir. */
+  /** Generate a low-res proxy proxy (P0-10). Null vodPath output = reuse source dir. */
   generateProxy(input: {
     vodPath: string;
     outputPath: string;
@@ -162,4 +162,6 @@ export interface FileSystemPort {
   ensureDir(path: string): Promise<void>;
   remove(path: string): Promise<void>;
   joinPath(...segments: string[]): string;
+  /** Immediate children (files only), names sorted. Folder import scan. */
+  listFiles(dir: string): Promise<string[]>;
 }

@@ -46,9 +46,9 @@
     if (!dlState) return '';
     switch (dlState.phase) {
       case 'running': {
-        const scrub = dlState.parts.find((p) => p.kind === 'scrub');
+        const proxy = dlState.parts.find((p) => p.kind === 'proxy');
         const hq = dlState.parts.find((p) => p.kind === 'hq');
-        if (scrub?.status === 'running') return `scrub · ${fmtTime(dlState.scrubFrontierSec)} downloaded`;
+        if (proxy?.status === 'running') return `proxy · ${fmtTime(dlState.proxyFrontierSec)} downloaded`;
         if (hq?.status === 'running') return 'full quality downloading';
         return 'downloading';
       }
@@ -63,10 +63,10 @@
 
   // A download that finished honestly (video bytes complete) leaves the
   // list — the stream itself is already in the library rows. A "done" phase
-  // with no playable twin is NOT complete (aborted scrub); it stays with
+  // with no playable twin is NOT complete (aborted proxy); it stays with
   // resume/delete actions.
   const satisfied = $derived(Boolean(
-    dlState?.phase === 'done' && (dlState.scrubMp4 || dlState.hqMp4) && dlState.scrubFrontierSec > 0,
+    dlState?.phase === 'done' && (dlState.proxyMp4 || dlState.hqMp4) && dlState.proxyFrontierSec > 0,
   ));
 </script>
 

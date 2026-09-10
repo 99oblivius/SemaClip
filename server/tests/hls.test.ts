@@ -4,7 +4,7 @@ import {
   extractVodId,
   parseMasterPlaylist,
   parseMediaPlaylist,
-  pickScrubQuality,
+  pickProxyQuality,
   pickBestQuality,
 } from "@/adapters/outbound/vod/hls.ts";
 import type { HlsQuality } from "@/adapters/outbound/vod/hls.ts";
@@ -57,15 +57,15 @@ describe("parseMasterPlaylist", () => {
 describe("quality pickers", () => {
   const q = parseMasterPlaylist(MASTER);
 
-  it("scrub = highest ≤ cap", () => {
-    assert.equal(pickScrubQuality(q, 540)?.name, "480p");
-    assert.equal(pickScrubQuality(q, 720)?.name, "720p60");
-    assert.equal(pickScrubQuality(q, 1080)?.name, "1080p60");
+  it("proxy = highest ≤ cap", () => {
+    assert.equal(pickProxyQuality(q, 540)?.name, "480p");
+    assert.equal(pickProxyQuality(q, 720)?.name, "720p60");
+    assert.equal(pickProxyQuality(q, 1080)?.name, "1080p60");
   });
 
-  it("scrub falls back to lowest available when all exceed the cap", () => {
-    assert.equal(pickScrubQuality(q, 200)?.name, "480p");
-    assert.equal(pickScrubQuality([], 540), null);
+  it("proxy falls back to lowest available when all exceed the cap", () => {
+    assert.equal(pickProxyQuality(q, 200)?.name, "480p");
+    assert.equal(pickProxyQuality([], 540), null);
   });
 
   it("best = highest ≤ cap, falling back to highest overall", () => {
@@ -80,7 +80,7 @@ describe("quality pickers", () => {
       { name: "540x960", width: 540, height: 960, fps: 30, bandwidth: 3e6, playlistUrl: "b" },
     ];
     assert.equal(pickBestQuality(portrait, 1920)?.name, "1080x1920");
-    assert.equal(pickScrubQuality(portrait, 540)?.name, "540x960"); // lowest available fallback
+    assert.equal(pickProxyQuality(portrait, 540)?.name, "540x960"); // lowest available fallback
   });
 });
 
