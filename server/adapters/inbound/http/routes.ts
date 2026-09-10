@@ -55,6 +55,7 @@ export interface HttpDeps {
   vod: VodDownloadPort;
   downloadState: (streamId: string) => Promise<DownloadStateType>;
   cancelDownload: (streamId: string) => boolean;
+  cancelPiece: (streamId: string) => boolean;
   deleteVideo: (streamId: string) => Promise<{ deleted: boolean }>;
   deleteProxy: (streamId: string) => Promise<{ deleted: boolean }>;
   deleteChat: (streamId: string) => Promise<{ deleted: boolean }>;
@@ -143,6 +144,13 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   // was a no-op for those).
   app.delete("/api/streams/:id/download", async (c) => {
     const streamId = c.req.param("id");
+    // ?piece=<kind> cancels just that piece (files + state kept, phase
+    // honestly restored); without it the whole download + artifacts go.
+    const piece = c.req.query("piece");
+    if (piece === "proxy" || piece === "hq" || piece === "chat") {
+      const cancelled = deps.cancelPiece(streamId);
+      return c.json({ ok: cancelled });
+    }
     try {
       await deps.deleteDownload(streamId);
       return c.json({ ok: true });

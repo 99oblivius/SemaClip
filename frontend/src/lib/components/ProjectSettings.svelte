@@ -95,6 +95,14 @@
   let proxyHeight = $state<number | null>(540);
   let hqHeight = $state<number | null>(null);
   let qualityList = $state<QualityInfo[]>([]);
+  const cancelPieceMutation = createMutation(() => ({
+    mutationFn: (kind: 'proxy' | 'hq' | 'chat') => apiClient.cancelPiece(stream.id, kind),
+    onSuccess: () => {
+      pendingPiece = null;
+      queryClient.invalidateQueries({ queryKey: ['download', stream.id] });
+      queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
+    },
+  }));
   const pieceMutation = createMutation(() => ({
     mutationFn: (input: { kind: 'proxy' | 'hq' | 'chat'; maxHeight?: number | null; proxyHeightCap?: number | null }) =>
       apiClient.downloadPiece(stream.id, input.kind, {
@@ -333,8 +341,8 @@
                 {#if row.running}
                   <button
                     class="flex items-center gap-1 rounded-md border border-accent px-2 py-1 text-xs text-accent transition-colors hover:border-error hover:text-error"
-                    onclick={() => { pendingPiece = null; apiClient.deleteDownload(stream.id); }}
-                    title="Cancel this download"
+                    onclick={() => cancelPieceMutation.mutate(row.key as 'proxy' | 'hq' | 'chat')}
+                    title="Cancel this download (partial file is kept)"
                   >
                     <Icon name="close" size={11} /> Cancel
                   </button>

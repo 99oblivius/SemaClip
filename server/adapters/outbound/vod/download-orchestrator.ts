@@ -204,6 +204,25 @@ export class DownloadOrchestrator {
       changed = true;
     }
 
+    // Post-completion storage hygiene for states that finished before the
+    // cleanup existed: a done phase with a playable twin still referencing
+    // a .ts means the raw file + chunk map are dead weight — same drop as
+    // finalize().
+    if (state.phase === "done") {
+      for (const [tsKey, twinKey] of [["proxyPath", "proxyMp4"], ["hqPath", "hqMp4"]] as const) {
+        const tsPath = state[tsKey];
+        const twinPath = state[twinKey];
+        if (tsPath && twinPath && tsPath.endsWith(".ts") && twinPath !== tsPath
+            && await exists(twinPath)) {
+          for (const victim of [tsPath, tsPath.replace(/\.ts$/, ".chunks")]) {
+            await Deno.remove(victim).catch(() => {});
+          }
+          state = { ...state, [tsKey]: twinPath };
+          changed = true;
+        }
+      }
+    }
+
     // Nothing on disk at all → the state is a husk (blank 0% containers).
     if (!state.proxyPath && !state.hqPath && !state.proxyMp4 && !state.hqMp4 &&
         !state.chatPath && state.phase !== "running") {
@@ -229,12 +248,21 @@ export class DownloadOrchestrator {
     };
     // Prefer the playable mp4 twin as the artifact identity — that's what
     // "on disk" means for playback; the .ts is its source.
-    const pick = (ts: string | null, mp4: string | null): Promise<Artifact> =>
-      mp4 ? statOne(mp4) : statOne(ts);
+    const pick = async (ts: string | null, mp4: string | null, kind: "proxy" | "hq"): Promise<Artifact> => {
+      // A playable twin is unambiguous disk truth. A raw .ts without a twin
+      // is only "on disk" when its part is NOT running — a growing .ts is a
+      // download in progress, not a usable artifact (user-reported: manual
+      // downloads instantly reading "on disk" with a checkmark).
+      if (mp4) return statOne(mp4);
+      const art = await statOne(ts);
+      const part = state.parts.find((x) => x.kind === kind);
+      if (part?.status === "running") return { onDisk: false, bytes: art.bytes, path: art.path };
+      return art;
+    };
     const chatPath = state.chatPath;
     return {
-      proxy: await pick(state.proxyPath, state.proxyMp4),
-      hq: await pick(state.hqPath, state.hqMp4),
+      proxy: await pick(state.proxyPath, state.proxyMp4, "proxy"),
+      hq: await pick(state.hqPath, state.hqMp4, "hq"),
       chat: await statOne(chatPath),
     };
   }
@@ -328,11 +356,10 @@ export class DownloadOrchestrator {
           } else {
             started.hqPath = tsPath;
           }
-          void this.remuxTwin(tsPath, started, lastMux).then((mp4) => {
-            if (kind === "proxy") started.proxyMp4 = mp4;
-            else started.hqMp4 = mp4;
-            void this.persist(opts.streamId, started, rt);
-          });
+          // No mid-run twin remux for pieces: the previous twin may be a
+          // complete artifact from an earlier download — remuxing a partial
+          // .ts over it destroys the playable file. The completion remux
+          // below replaces it atomically.
           const now = performance.now();
           if (now - lastWrite > 1000) {
             lastWrite = now;
@@ -352,10 +379,15 @@ export class DownloadOrchestrator {
     } catch (err) {
       part.status = controller.signal.aborted ? "skipped" : "failed";
       part.error = err instanceof Error ? err.message : String(err);
-      started.phase = "failed";
+      // Cancel keeps files + state: a video artifact from an earlier
+      // download means the project is still complete; a bare failed piece
+      // is failed-with-resume. Blanket-failed here made Cancel look broken.
+      started.phase = (started.proxyPath || started.hqPath) && (started.proxyMp4 || started.hqMp4)
+        ? "done"
+        : "failed";
       started.overall.etaSec = null;
       await this.persist(opts.streamId, started, rt);
-      throw err;
+      if (!controller.signal.aborted) throw err;
     } finally {
       try {
         await mapFile.close();
@@ -847,6 +879,25 @@ export class DownloadOrchestrator {
         : snapshot.parts.some((p) => p.status === "failed")
           ? "failed"
           : "idle";
+
+    // Storage: the mp4 twin is the artifact; the raw .ts and its chunk map
+    // only exist for (a) the growing-file player and (b) resume. Both roles
+    // end at completion — drop them so one file remains per video kind
+    // (user-reported: .ts + .chunks doubling storage after downloads).
+    if (state.phase === "done") {
+      for (const [tsKey, twinKey] of [["proxyPath", "proxyMp4"], ["hqPath", "hqMp4"]] as const) {
+        const tsPath = state[tsKey];
+        const twinPath = state[twinKey];
+        if (tsPath && twinPath && tsPath.endsWith(".ts") && twinPath !== tsPath
+            && await this.fileExists(twinPath)) {
+          for (const victim of [tsPath, tsPath.replace(/\.ts$/, ".chunks")]) {
+            await Deno.remove(victim).catch(() => {});
+          }
+          // Repoint the state at the twin — reconcile() then validates it.
+          state[tsKey] = twinPath;
+        }
+      }
+    }
     await this.setState(streamId, state);
     return state;
   }
