@@ -331,12 +331,18 @@
               </div>
               {#if row.running && row.part && row.part.status === 'running'}
                 <div class="flex items-center gap-2 pl-[6.5rem]">
-                  <div class="h-1 flex-1 overflow-hidden rounded-full bg-surface-3">
-                    <div class="h-full bg-accent transition-all" style="width: {row.part.percent * 100}%"></div>
-                  </div>
-                  <span class="font-mono text-[10px] text-ash-dim">
-                    {row.part.downloadedBytes > 0 ? `${fmtBytes(row.part.downloadedBytes)} · ` : ''}{Math.round(row.part.percent * 100)}%
-                  </span>
+                  {#if row.key === 'chat'}
+                    <!-- GQL chat has no total: indeterminate pulse -->
+                    <div class="h-1 flex-1 animate-pulse overflow-hidden rounded-full bg-accent/40"></div>
+                    <span class="font-mono text-[10px] text-ash-dim">{Math.floor((row.part.downloadedSec ?? 0))} comments</span>
+                  {:else}
+                    <div class="h-1 flex-1 overflow-hidden rounded-full bg-surface-3">
+                      <div class="h-full bg-accent transition-all" style="width: {row.part.percent * 100}%"></div>
+                    </div>
+                    <span class="font-mono text-[10px] text-ash-dim">
+                      {row.part.downloadedBytes > 0 ? `${fmtBytes(row.part.downloadedBytes)} · ` : ''}{Math.round(row.part.percent * 100)}%
+                    </span>
+                  {/if}
                 </div>
               {/if}
             </div>

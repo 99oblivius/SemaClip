@@ -227,6 +227,8 @@ export class MediaActionsUseCase {
     // Own the abort: DELETE /download must be able to cancel piece runs.
     const controller = new AbortController();
     this.pieceAborts.set(opts.streamId, controller);
+    this.orchestrator.markRunLive(opts.streamId, true);
+    const clearLive = () => this.orchestrator.markRunLive(opts.streamId, false);
     if (opts.signal) opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
     const pieceSignal = controller.signal;
     // Piece progress: maintained locally then written wholesale — the
@@ -273,6 +275,7 @@ export class MediaActionsUseCase {
       await this.orchestrator.setState(opts.streamId, liveState);
     } catch (err) {
       this.pieceAborts.delete(opts.streamId);
+      clearLive();
       const state = await this.orchestrator.getState(opts.streamId);
       const part = state.parts.find((x) => x.kind === opts.kind);
       if (part) {
@@ -296,11 +299,13 @@ export class MediaActionsUseCase {
       liveState.hqPath = destPath;
     }
     this.pieceAborts.delete(opts.streamId);
+    clearLive();
     // Done only when BOTH video parts have playable files (a piece run can
     // complete while the other piece never landed).
-    const bothPlayable = liveState.proxyPath !== null && liveState.hqPath !== null
-      && (liveState.proxyMp4 !== null || liveState.hqMp4 !== null);
-    liveState.phase = bothPlayable ? "done" : "idle";
+    // A piece is a re-download, not the pipeline: any video artifact on
+    // disk means it succeeded; reconcile() keeps the phase honest against
+    // the files afterwards.
+    liveState.phase = (liveState.proxyPath !== null || liveState.hqPath !== null) ? "done" : "idle";
     await this.orchestrator.setState(opts.streamId, liveState);
     return { started: true, quality: quality.name };
   }
@@ -340,6 +345,7 @@ export class MediaActionsUseCase {
     const controller = new AbortController();
     this.pieceAborts.set(opts.streamId, controller);
     if (opts.signal) opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
+    this.orchestrator.markRunLive(opts.streamId, true);
     const liveState = await this.orchestrator.getState(opts.streamId);
     try {
       let lastWrite = 0;
@@ -368,6 +374,9 @@ export class MediaActionsUseCase {
       }
       liveState.chatPath = `${dir}/chat.json`;
       liveState.chatCount = count;
+      // Restore an honest phase — the piece set running; a video artifact
+      // on disk means the download is complete, else back to idle.
+      liveState.phase = (liveState.proxyPath || liveState.hqPath) ? "done" : "idle";
       await this.orchestrator.setState(opts.streamId, liveState);
       const fresh = await this.streams.findById(opts.streamId);
       if (fresh) await this.streams.update({ ...fresh, chatPath: `${dir}/chat.json` });
@@ -383,6 +392,7 @@ export class MediaActionsUseCase {
       throw err;
     } finally {
       this.pieceAborts.delete(opts.streamId);
+      this.orchestrator.markRunLive(opts.streamId, false);
     }
   }
 }

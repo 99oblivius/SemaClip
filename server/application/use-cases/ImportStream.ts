@@ -123,7 +123,24 @@ export class ImportStreamByUrlUseCase {
     resume = false,
   ): Promise<void> {
     if (!this.orchestrator) return;
-    const result = await this.orchestrator.run({
+    // Live-run marker: reconcile() must not flip a genuinely running
+    // download's phase to failed while the poller reads state.
+    this.orchestrator.markRunLive(streamId, true);
+    try {
+      await this.runProgressiveInner(streamId, input, destDir, controller, resume);
+    } finally {
+      this.orchestrator.markRunLive(streamId, false);
+    }
+  }
+
+  private async runProgressiveInner(
+    streamId: string,
+    input: ImportByUrlInput,
+    destDir: string,
+    controller: AbortController,
+    resume: boolean,
+  ): Promise<void> {
+    const result = await this.orchestrator!.run({
       streamId,
       sourceUrl: input.url,
       destDir,

@@ -112,6 +112,16 @@ function updateEta(part: PartRuntime, cumulativeBytes: number): void {
 export class DownloadOrchestrator {
   constructor(private readonly metadata: StreamMetadataRepository) {}
 
+  /** Streams with an orchestrator run in THIS process — reconcile() must
+   *  not touch their running phase (orphaned vs live distinction). */
+  private liveRuns = new Set<string>();
+
+  /** Mark/unmark a stream's orchestrator run as live (run()/piece runners). */
+  markRunLive(streamId: string, live: boolean): void {
+    if (live) this.liveRuns.add(streamId);
+    else this.liveRuns.delete(streamId);
+  }
+
   async getState(streamId: string): Promise<DownloadState> {
     const raw = await this.metadata.get(streamId, "download_state");
     if (!raw) return this.idle();
@@ -132,10 +142,65 @@ export class DownloadOrchestrator {
       delete (state as unknown as Record<string, unknown>).scrubPath;
       delete (state as unknown as Record<string, unknown>).scrubMp4;
       delete (state as unknown as Record<string, unknown>).scrubFrontierSec;
-      return state;
+      return await this.reconcile(streamId, state);
     } catch {
       return this.idle();
     }
+  }
+
+  /**
+   * Reconcile the persisted state against disk — the state must describe
+   * reality, never claim it (user-reported: HQ "on disk" with no file,
+   * blank 0% containers from orphaned states). Read-mostly: only a
+   * mismatch triggers a write-back.
+   */
+  private async reconcile(streamId: string, state: DownloadState): Promise<DownloadState> {
+    const exists = (p: string | null): Promise<boolean> =>
+      p ? Deno.stat(p).then(() => true).catch(() => false) : Promise.resolve(false);
+
+    let changed = false;
+    // Paths that no longer exist on disk are dropped from the state — the
+    // file may have been deleted/moved externally; the record must follow.
+    for (const key of ["proxyPath", "proxyMp4", "hqPath", "hqMp4", "chatPath"] as const) {
+      if (state[key] && !(await exists(state[key]))) {
+        state = { ...state, [key]: null };
+        changed = true;
+      }
+    }
+
+    // A "running" phase belongs to this process only — a crash/restart
+    // leaves nothing holding the run; orphaned running states become
+    // failed with resume available. A LIVE run (this process) is untouched.
+    if (state.phase === "running" && !this.liveRuns.has(streamId)) {
+      state = {
+        ...state,
+        phase: "failed",
+        parts: state.parts.map((p) =>
+          p.status === "running" ? { ...p, status: "failed", error: "interrupted (server restart)" } : p,
+        ),
+        overall: { ...state.overall, etaSec: null },
+      };
+      changed = true;
+    }
+
+    // An idle/failed state with a playable twin is a real download —
+    // hydrate the phase so the player/library reflect it.
+    if ((state.phase === "idle" || state.phase === "failed") &&
+        (state.proxyPath || state.hqPath) &&
+        (state.proxyMp4 || state.hqMp4)) {
+      state = { ...state, phase: "done" };
+      changed = true;
+    }
+
+    // Nothing on disk at all → the state is a husk (blank 0% containers).
+    if (!state.proxyPath && !state.hqPath && !state.proxyMp4 && !state.hqMp4 &&
+        !state.chatPath && state.phase !== "running") {
+      state = this.idle();
+      changed = true;
+    }
+
+    if (changed) await this.setState(streamId, state);
+    return state;
   }
 
   private idle(): DownloadState {
