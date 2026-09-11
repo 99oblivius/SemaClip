@@ -42,36 +42,6 @@
     },
   }));
 
-  // Cancel the RUNNING artifact from here too — the settings panel is not the
-  // only place a download can be stopped.
-  const cancelMutation = createMutation(() => ({
-    mutationFn: (kind: 'proxy' | 'video' | 'chat') =>
-      apiClient.cancelPiece(streamId, kind === 'video' ? 'hq' : kind),
-    onSuccess: () => {
-      markDownloadsChanged();
-      queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
-    },
-  }));
-
-  // Re-download a MISSING artifact without leaving the Library.
-  const redownloadMutation = createMutation(() => ({
-    mutationFn: (kind: 'proxy' | 'video' | 'chat') =>
-      apiClient.downloadPiece(streamId, kind === 'video' ? 'hq' : kind, {
-        maxHeight: null,
-        proxyHeightCap: 540,
-      }),
-    onSuccess: () => {
-      markDownloadsChanged();
-      queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
-    },
-  }));
-
-  /** The artifact currently downloading, if any. */
-  const runningArt = $derived(view?.artifacts.find((a) => a.status === 'running'));
-  /** Artifacts that are missing (downloadable again) once nothing is running. */
-  const missingArts = $derived(
-    (view?.artifacts ?? []).filter((a) => !a.onDisk && a.downloadable),
-  );
 
   function fmtTime(sec: number): string {
     const h = Math.floor(sec / 3600);
@@ -162,16 +132,6 @@
           <p class="pl-1 font-mono text-[10px] text-warning">preview only — the video file is missing, exports are not possible</p>
         {/if}
         <div class="mt-1 flex flex-wrap items-center justify-end gap-2">
-          {#if runningArt}
-            <button
-              class="rounded border border-accent px-2 py-0.5 text-[10px] text-accent transition-colors hover:border-error hover:text-error disabled:opacity-50"
-              onclick={() => cancelMutation.mutate(runningArt.kind)}
-              disabled={cancelMutation.isPending}
-              title="Stop this download (the partial file is kept)"
-            >
-              Cancel {runningArt.label.toLowerCase()}
-            </button>
-          {/if}
           {#if view.phase === 'failed'}
             <button
               class="rounded border border-border px-2 py-0.5 text-[10px] text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
@@ -182,27 +142,22 @@
               Resume download
             </button>
           {/if}
-          {#if !view.active}
-            {#each missingArts as art (art.kind)}
-              <button
-                class="rounded border border-border px-2 py-0.5 text-[10px] text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
-                onclick={() => redownloadMutation.mutate(art.kind)}
-                disabled={redownloadMutation.isPending}
-                title={`Download ${art.label.toLowerCase()} again`}
-              >
-                Re-download {art.label.toLowerCase()}
-              </button>
-            {/each}
-          {/if}
+          <!-- Cancel IS the delete here: it aborts the run and removes what
+               it downloaded. Re-downloading lives in project settings. -->
           <button
-            class="rounded border border-border px-2 py-0.5 text-[10px] text-ash transition-colors hover:border-error hover:text-error"
+            class="rounded border border-border px-2 py-0.5 text-[10px] text-ash transition-colors hover:border-error hover:text-error disabled:opacity-50"
             onclick={() => deleteMutation.mutate()}
             disabled={deleteMutation.isPending}
-            title="Abort the download and delete its files"
+            title="Cancel this download and delete its files"
           >
-            Delete download
+            {deleteMutation.isPending ? 'Cancelling…' : 'Cancel'}
           </button>
         </div>
+        {#if deleteMutation.isError}
+          <p class="mt-1 text-right font-mono text-[10px] text-error">
+            {deleteMutation.error?.message ?? 'Delete failed'}
+          </p>
+        {/if}
       </div>
     {/if}
   </div>

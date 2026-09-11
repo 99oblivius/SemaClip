@@ -125,14 +125,18 @@ export function isLive(view: DownloadView): boolean {
 }
 
 /**
- * True when the container should be visible: something is happening, OR the
- * project is incomplete — an artifact is missing and could be downloaded
- * again. Without this the re-download affordance is unreachable once a
- * download finishes, because the container would already have been dismissed.
+ * True when the Library should show a progress container for this project.
+ *
+ * ONLY work in flight or a failure belongs here. A project that simply has
+ * nothing downloaded yet is not "in progress" — showing it produced a latent
+ * 0%-everything container for an untouched project, and pressing its Delete
+ * could not dismiss it (delete resets to idle, which is exactly that state).
+ *
+ * Re-downloading a missing artifact is NOT offered here by design: that is
+ * project settings' job, where the per-artifact rows live.
  */
 export function needsAttention(view: DownloadView): boolean {
-  if (view.active || view.phase === 'failed') return true;
-  return view.artifacts.some((a) => !a.onDisk && a.downloadable);
+  return view.active || view.phase === 'failed';
 }
 
 /** A download finished with a playable file — the Library row can drop it. */

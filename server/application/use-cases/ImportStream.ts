@@ -256,33 +256,51 @@ export class ImportStreamByUrlUseCase {
     // Give the aborted fetches a beat to release file handles.
     await new Promise((r) => setTimeout(r, 300));
 
+    // Remove EVERY artifact this project may hold: the project-named files
+    // (the current scheme), every legacy boilerplate name, and the fragment
+    // indexes. Hardcoding the old names meant a delete silently removed
+    // nothing once artifacts were project-named — the reported "pressing
+    // delete download does nothing".
     const dir = `${cacheDir}/vods/${streamId}`;
-    for (const name of [
-      "proxy.ts", "proxy.mp4", "proxy.chunks", "scrub.ts", "scrub.mp4", "scrub.chunks",
-      "hq.ts", "hq.mp4", "hq.chunks", "video.mp4", "chat.json",
-    ]) {
+    let names: string[] = [];
+    try {
+      names = [...Deno.readDirSync(dir)].filter((e) => e.isFile).map((e) => e.name);
+    } catch {
+      // No artifact directory — nothing to remove.
+    }
+    for (const name of names) {
       try {
         await Deno.remove(`${dir}/${name}`);
       } catch {
         // absent — fine
       }
     }
-    // Reset state to idle so the Library item leaves the download list.
-    const idle = await this.orchestrator?.getState(streamId);
-    if (idle && idle.phase !== "idle") {
-      idle.phase = "idle";
-      idle.parts = [];
-      idle.overall = { percent: 0, etaSec: null };
-      idle.proxyFrontierSec = 0;
-      idle.proxyPath = null;
-      idle.hqPath = null;
-      idle.proxyMp4 = null;
-      idle.hqMp4 = null;
-      idle.chatPath = null;
-      idle.chatCount = 0;
-      idle.qualities = [];
-      idle.startedAt = null;
-      await this.orchestrator!.setState(streamId, idle);
+    // Reset the state to a TRUE idle so the Library item leaves the list.
+    // (Resetting to idle while a view still treated "incomplete" as
+    // noteworthy is what made this button look like a no-op.)
+    if (this.orchestrator) {
+      const state = await this.orchestrator.getState(streamId);
+      state.phase = "idle";
+      state.parts = [];
+      state.overall = { percent: 0, etaSec: null };
+      state.proxyFrontierSec = 0;
+      state.proxyPath = null;
+      state.hqPath = null;
+      state.proxyMp4 = null;
+      state.hqMp4 = null;
+      state.chatPath = null;
+      state.chatCount = 0;
+      state.qualities = [];
+      state.startedAt = null;
+      await this.orchestrator.setState(streamId, state);
+      // The RAM copy must go too, or the very next read serves the stale
+      // pre-delete state back to the UI.
+      this.orchestrator.markRunLive(streamId, false);
+    }
+    // The stream record must stop claiming files that no longer exist.
+    const stream = await this.streams.findById(streamId);
+    if (stream && (stream.vodPath || stream.chatPath)) {
+      await this.streams.update({ ...stream, vodPath: "", chatPath: null });
     }
     return true;
   }
