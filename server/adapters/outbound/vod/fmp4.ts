@@ -1,0 +1,168 @@
+/**
+ * Fragmented-MP4 progressive downloader.
+ *
+ * HLS chunks stream through a long-lived ffmpeg process (`-c copy`, no
+ * re-encode) into ONE growing file. Unlike the ts+mp4-twin pair this
+ * replaces, the output is playable from its first fragment: `moov` leads
+ * and each `moof`/`mdat` pair is self-contained, so a plain `<video src>`
+ * with Range requests can play a still-downloading file (verified in
+ * `references/growing-media-formats.md`).
+ *
+ * Two facts drive the implementation:
+ * - ffmpeg cannot seek on a pipe, so the fragment index is built HERE, by
+ *   parsing the muxer's own box stream as it passes through.
+ * - A Range response must never end mid-fragment — Chromium decodes the
+ *   partial `mdat` and dies with PIPELINE_ERROR_DECODE. `fragmentBoundaryAt`
+ *   is what lets the media route clamp to a complete fragment.
+ */
+
+/** One complete `moof`+`mdat` fragment in the output file. */
+export interface FragmentSpan {
+  /** Byte offset where the fragment starts (its `moof`). */
+  start: number;
+  /** Byte offset just past the fragment — a safe Range end (exclusive). */
+  end: number;
+}
+
+export interface FragmentIndex {
+  /** Byte offset just past the init segment (`ftyp` + `moov`). */
+  headEnd: number;
+  fragments: FragmentSpan[];
+}
+
+export interface Fmp4Progress {
+  /** Media seconds muxed so far (from the index's last fragment start). */
+  downloadedSec: number;
+  totalSec: number;
+  /** Bytes written to the output file. */
+  bytes: number;
+  percent: number;
+}
+
+/** Boxes with a 64-bit size field (`largesize`). */
+const LARGE_SIZE_BOXES = new Set(["mdat", "moof", "free", "skip"]);
+/** Fragment containers: their children are boxes too. */
+const CONTAINER_BOXES = new Set(["moof", "traf", "moov", "trak", "mdia", "minf", "stbl", "stsd", "edts", "mvex"]);
+
+/**
+ * Streaming box parser for an fMP4 byte stream.
+ *
+ * Fragmented MP4 is a flat sequence of ISO-BMFF boxes, so a single forward
+ * pass finds every fragment boundary. Bytes arrive in arbitrary chunks, so
+ * the parser buffers until a whole box is present, then emits it.
+ */
+export class Fmp4BoxParser {
+  private buf = new Uint8Array(0);
+  /** Byte offset in the OUTPUT FILE of the next unparsed box. */
+  private fileOffset = 0;
+  readonly index: FragmentIndex = { headEnd: 0, fragments: [] };
+  /** Called for each completed fragment boundary. */
+  onFragment?: ((span: FragmentSpan) => void) | undefined;
+
+  /** Feed newly written bytes; returns any completed fragment boundaries. */
+  push(chunk: Uint8Array): FragmentSpan[] {
+    const merged = new Uint8Array(this.buf.length + chunk.length);
+    merged.set(this.buf, 0);
+    merged.set(chunk, this.buf.length);
+    this.buf = merged;
+    const found: FragmentSpan[] = [];
+    while (true) {
+      const box = this.readBox();
+      if (!box) break;
+      if (box.type === "moov") {
+        // Init segment complete — every later byte is fragment data.
+        this.index.headEnd = box.end;
+      } else if (box.type === "moof") {
+        // Record the fragment start; its end is known when the following
+        // mdat closes. Push a pending span and finalise on the mdat.
+        this.pendingMoofStart = box.start;
+      } else if (box.type === "mdat" && this.pendingMoofStart !== null) {
+        const span: FragmentSpan = { start: this.pendingMoofStart, end: box.end };
+        this.index.fragments.push(span);
+        found.push(span);
+        this.onFragment?.(span);
+        this.pendingMoofStart = null;
+      }
+    }
+    return found;
+  }
+
+  private pendingMoofStart: number | null = null;
+
+  /** Read one whole box from the head of the buffer, or null if incomplete. */
+  private readBox(): { type: string; start: number; end: number } | null {
+    if (this.buf.length < 8) return null;
+    const dv = new DataView(this.buf.buffer, this.buf.byteOffset, this.buf.length);
+    let size = dv.getUint32(0);
+    const type = String.fromCharCode(this.buf[4]!, this.buf[5]!, this.buf[6]!, this.buf[7]!);
+    let headerLen = 8;
+    if (size === 1) {
+      if (this.buf.length < 16) return null;
+      const hi = dv.getUint32(8);
+      const lo = dv.getUint32(12);
+      size = hi * 2 ** 32 + lo;
+      headerLen = 16;
+    } else if (size === 0) {
+      // Box extends to EOF — only valid for the last box; treat the whole
+      // buffer as the box and wait for the stream to end.
+      return null;
+    }
+    if (size < headerLen) {
+      // Corrupt — drop the buffer head so the parser cannot spin.
+      this.buf = new Uint8Array(0);
+      return null;
+    }
+    if (this.buf.length < size) return null;
+    const start = this.fileOffset;
+    const end = this.fileOffset + size;
+    this.fileOffset = end;
+    this.buf = this.buf.subarray(size);
+    // `size` is validated >= headerLen above; LARGE_SIZE_BOXES is only a
+    // hint for callers, the parser handles both forms uniformly.
+    void LARGE_SIZE_BOXES;
+    void CONTAINER_BOXES;
+    return { type, start, end };
+  }
+}
+
+/**
+ * Last fragment boundary at or below `byteOffset` — a safe exclusive Range
+ * end. Falls back to the init-segment end, and to 0 when nothing is
+ * complete yet (the route should then 416 or wait rather than serve a
+ * partial fragment).
+ */
+export function fragmentBoundaryAt(index: FragmentIndex, byteOffset: number): number {
+  let best = index.headEnd;
+  for (const f of index.fragments) {
+    if (f.end <= byteOffset) best = f.end;
+    else break;
+  }
+  return best;
+}
+
+/** Serialize the index for the sidecar (`{kind}.fragments`). */
+export function serializeIndex(index: FragmentIndex): string {
+  const lines = [`head ${index.headEnd}`];
+  for (const f of index.fragments) lines.push(`${f.start} ${f.end}`);
+  return lines.join("\n") + "\n";
+}
+
+/** Parse a sidecar written by `serializeIndex` (resume). */
+export function parseIndex(text: string): FragmentIndex {
+  const index: FragmentIndex = { headEnd: 0, fragments: [] };
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    const parts = t.split(" ");
+    if (parts[0] === "head") {
+      index.headEnd = parseInt(parts[1] ?? "0", 10) || 0;
+    } else if (parts.length === 2) {
+      const start = parseInt(parts[0]!, 10);
+      const end = parseInt(parts[1]!, 10);
+      if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+        index.fragments.push({ start, end });
+      }
+    }
+  }
+  return index;
+}

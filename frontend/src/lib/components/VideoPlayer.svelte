@@ -51,6 +51,7 @@
   function handleTimeUpdate(e: Event) {
     const v = e.currentTarget as HTMLVideoElement;
     currentTime = v.currentTime;
+    lastProgressTime = performance.now();
     // Update store — externalSeek stays false so the seek effect skips
     // (the video is already at this position, no need to seek back).
     playerStore.update((s) => ({ ...s, currentTime: v.currentTime }));
@@ -80,12 +81,91 @@
     }
   });
 
-  // HLS attach: when the stream has a remote source, play through the
-  // server's chunk proxy (already-downloaded chunks served from disk, the
-  // rest proxied from Twitch — growing playback without double-fetching).
+  // ── Growing-media playback ──
+  // A downloading VOD is served as one growing fragmented MP4 read through
+  // plain <video src> + Range requests (no hls.js, no MSE). Chromium plays
+  // it happily while it grows, but it STOPS at the download frontier and
+  // never resumes on its own: the response it received had a matching
+  // Content-Length, so it believes the resource is complete (readyState
+  // stays 4). Readiness is therefore a lying signal — the download's own
+  // frontier is what drives a reload. Verified in
+  // references/growing-media-formats.md.
+  const STALL_MS = 1500;
+  /** Growth (bytes) required before a reload is worth doing. */
+  const REFRESH_MIN_GROWTH = 128 * 1024;
+  let reloadCount = $state(0);
+  let lastProgressTime = 0;
+  let frontierBytes = 0;
+  let frontierAtLastReload = 0;
+  let reloadInFlight = false;
+
+  /** Media URL; the counter busts Chromium's cache so a reload re-ranges. */
+  const videoSrc = $derived(
+    hls ? undefined : `${apiClient.videoUrl(streamId)}${reloadCount > 0 ? `?_r=${reloadCount}` : ''}`,
+  );
+
+  /** How far the download has got, in bytes — polled, not inferred. */
+  async function pollFrontier() {
+    try {
+      const dl = await apiClient.getDownloadState(streamId);
+      if (dl.phase !== 'running') {
+        // Complete: the file is fully servable, no more reloads needed.
+        frontierBytes = Number.MAX_SAFE_INTEGER;
+        return;
+      }
+      frontierBytes = dl.presence?.proxy?.bytes ?? dl.presence?.hq?.bytes ?? 0;
+    } catch {
+      // Server unreachable — leave the frontier as-is; the stall handler
+      // simply won't reload.
+    }
+  }
+
+  /** Reload the media at the current position to pick up newly written bytes. */
+  function reloadMedia() {
+    if (!videoEl || reloadInFlight) return;
+    reloadInFlight = true;
+    const resumeAt = videoEl.currentTime;
+    const wasPlaying = !videoEl.paused;
+    reloadCount++;
+    const onMeta = () => {
+      videoEl?.removeEventListener('loadedmetadata', onMeta);
+      if (!videoEl) return;
+      try {
+        videoEl.currentTime = resumeAt;
+      } catch {
+        // seek rejected on a not-yet-seekable stream; position is kept by
+        // the store and re-applied by the seek effect
+      }
+      if (wasPlaying) void videoEl.play().catch(() => {});
+      reloadInFlight = false;
+      lastProgressTime = performance.now();
+    };
+    videoEl.addEventListener('loadedmetadata', onMeta);
+  }
+
+  // Stall detector: a growing file that stops advancing needs a reload.
   $effect(() => {
     if (!hls || !videoEl) return;
-    if (!Hls.isSupported()) return; // falls back to native <video src>
+    const id = setInterval(() => {
+      const v = videoEl;
+      if (!v) return;
+      void pollFrontier();
+      if (v.paused || reloadInFlight) return;
+      if (performance.now() - lastProgressTime < STALL_MS) return;
+      // Only reload when there is genuinely new data to fetch — otherwise a
+      // finished-but-paused stream would reload forever.
+      if (frontierBytes <= frontierAtLastReload + REFRESH_MIN_GROWTH) return;
+      frontierAtLastReload = frontierBytes;
+      reloadMedia();
+    }, 500);
+    return () => clearInterval(id);
+  });
+
+  // HLS fallback: containers that cannot be streamed with plain Range
+  // (raw MPEG-TS) still play through the chunk proxy.
+  $effect(() => {
+    if (!hls || !videoEl) return;
+    if (!Hls.isSupported()) return;
     const instance = new Hls({ enableWorker: true, lowLatencyMode: false });
     hlsInstance = instance;
     instance.loadSource(apiClient.hlsPlaylistUrl(streamId));
@@ -214,7 +294,7 @@
 <div bind:this={containerEl} class="relative flex-1 overflow-hidden rounded-lg">
   <video
     bind:this={videoEl}
-    src={hls ? undefined : apiClient.videoUrl(streamId)}
+    src={videoSrc}
     class="h-full w-full"
     ontimeupdate={handleTimeUpdate}
     onloadedmetadata={(e: Event & { currentTarget: HTMLVideoElement }) => {

@@ -63,12 +63,13 @@ export class MediaActionsUseCase {
     return this.orchestrator.getState(streamId);
   }
 
-  /** Delete the HQ video only (hq.ts/.mp4 + chunk map). Proxy, chat and
-   *  the stream record's chat path are untouched. */
+  /** Delete the video artifact (the main download). Proxy, chat and the
+   *  stream record's chat path are untouched. */
   async deleteVideo(streamId: string): Promise<{ deleted: boolean }> {
     const dir = await this.artifactDir(streamId);
     if (!dir) return { deleted: false };
-    const targets = ["hq.ts", "hq.mp4", "hq.chunks", "video.mp4"];
+    const targets = ["hq.mp4", "hq.ts", "hq.chunks", "video.mp4", "video.fragments",
+                     "video.ts", "video.chunks"];
     let removed = false;
     for (const name of targets) {
       const path = `${dir}/${name}`;
@@ -98,23 +99,24 @@ export class MediaActionsUseCase {
   async deleteProxy(streamId: string): Promise<{ deleted: boolean }> {
     const dir = await this.artifactDir(streamId);
     if (!dir) return { deleted: false };
-    // New runs write proxy.ts; pre-rename runs left scrub.ts — accept both.
-    const proxyPath = `${dir}/proxy.ts`;
-    const legacyPath = `${dir}/scrub.ts`;
-    const target = (await this.fs.exists(proxyPath)) ? proxyPath : legacyPath;
-    if (!(await this.fs.exists(target))) return { deleted: false };
-    const tsPath = target;
-    await this.fs.remove(tsPath);
-    // The mp4 twin is the playable form — leaving it would keep dead video
-    // on the video route's twin preference. The chunk map dies with it.
-    await this.fs.remove(`${dir}/proxy.mp4`).catch(() => {});
-    await this.fs.remove(`${dir}/scrub.mp4`).catch(() => {});
-    await this.fs.remove(`${dir}/proxy.chunks`).catch(() => {});
-    await this.fs.remove(`${dir}/scrub.chunks`).catch(() => {});
+    // The proxy is one fragmented MP4 plus its fragment index; legacy
+    // runs may have left a .ts/.chunks pair or scrub.* names.
+    const candidates = ["proxy.mp4", "proxy.fragments", "proxy.ts", "proxy.chunks",
+                        "scrub.mp4", "scrub.ts", "scrub.chunks"];
+    let removed = false;
+    for (const name of candidates) {
+      const path = `${dir}/${name}`;
+      if (await this.fs.exists(path)) {
+        await this.fs.remove(path);
+        removed = true;
+      }
+    }
+    if (!removed) return { deleted: false };
     const state = await this.orchestrator.getState(streamId);
-    if (state.proxyPath === tsPath) {
+    if (state.proxyPath?.startsWith(`${dir}/`) || state.proxyMp4?.startsWith(`${dir}/`)) {
       state.proxyPath = null;
       state.proxyMp4 = null;
+      state.proxyFrontierSec = 0;
       await this.orchestrator.setState(streamId, state);
     }
     return { deleted: true };

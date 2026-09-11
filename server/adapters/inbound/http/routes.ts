@@ -32,6 +32,40 @@ import {
   pickProxyQuality,
   pickBestQuality,
 } from "@/adapters/outbound/vod/hls.ts";
+import { clampToServable, parseRangeHeader } from "@/adapters/inbound/http/range.ts";
+import { fragmentBoundaryAt, parseIndex } from "@/adapters/outbound/vod/fmp4.ts";
+
+/**
+ * How many bytes of `mediaPath` may be served right now.
+ *
+ * For a COMPLETE file that is its size. For a file a download is still
+ * writing it is the download's safe frontier — for a growing fragmented MP4
+ * the end of the last complete fragment, because a response ending inside an
+ * `mdat` makes Chromium fail with PIPELINE_ERROR_DECODE (verified).
+ */
+async function servableSizeFor(
+  deps: HttpDeps,
+  streamId: string,
+  mediaPath: string,
+  fileSize: number,
+): Promise<number> {
+  try {
+    const dl = await deps.downloadState(streamId);
+    if (dl.phase !== "running") return fileSize;
+    const isProxy = mediaPath === dl.proxyPath || mediaPath === dl.proxyMp4;
+    const isHq = mediaPath === dl.hqPath || mediaPath === dl.hqMp4;
+    if (!isProxy && !isHq) return fileSize;
+    const mapPath = `${mediaPath.replace(/\.(mp4|ts)$/, "")}.fragments`;
+    const text = await Deno.readTextFile(mapPath).catch(() => "");
+    if (!text) return fileSize;
+    const boundary = fragmentBoundaryAt(parseIndex(text), fileSize);
+    // Nothing complete yet (init segment only) → serve nothing rather than
+    // a partial fragment; the player retries as the download advances.
+    return Math.max(0, Math.min(boundary, fileSize));
+  } catch {
+    return fileSize;
+  }
+}
 
 export interface HttpDeps {
   importByFile: ImportStreamByFileUseCase;
@@ -841,25 +875,35 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     }
     try {
       const stat = await Deno.stat(mediaPath);
-      const range = c.req.header("range");
+      // A file still being written must never be served past its safe
+      // frontier. For a growing fragmented MP4 that frontier is the end of
+      // the last COMPLETE fragment — a response ending mid-fragment hands
+      // Chromium a partial mdat and it dies with PIPELINE_ERROR_DECODE.
+      const servable = await servableSizeFor(deps, c.req.param("streamId"), mediaPath, stat.size);
+      const range = parseRangeHeader(c.req.header("range") ?? null, servable);
+      if (range === "unsatisfiable") {
+        c.header("Content-Range", `bytes */${servable}`);
+        c.header("Accept-Ranges", "bytes");
+        return c.body(null, 416);
+      }
       if (range) {
-        const m = /bytes=(\d*)-(\d*)/.exec(range);
-        if (m) {
-          const start = m[1] ? parseInt(m[1], 10) : 0;
-          const end = m[2] ? parseInt(m[2], 10) : stat.size - 1;
-          const file = await Deno.open(mediaPath, { read: true });
+        const end = clampToServable(range.end, servable, stat.size);
+        const start = Math.min(range.start, Math.max(0, end));
+        const file = await Deno.open(mediaPath, { read: true });
+        try {
           await file.seek(start, Deno.SeekMode.Start);
           const buf = new Uint8Array(end - start + 1);
           await file.read(buf);
-          file.close();
-          c.header("Content-Range", `bytes ${start}-${end}/${stat.size}`);
+          c.header("Content-Range", `bytes ${start}-${end}/${servable}`);
           c.header("Accept-Ranges", "bytes");
           c.header("Content-Length", String(end - start + 1));
           return c.body(buf, 206);
+        } finally {
+          file.close();
         }
       }
       const file = await Deno.open(mediaPath, { read: true });
-      c.header("Content-Length", String(stat.size));
+      c.header("Content-Length", String(servable));
       c.header("Accept-Ranges", "bytes");
       return c.body(file.readable);
     } catch {

@@ -25,6 +25,7 @@ import {
 } from "./hls.ts";
 import { downloadChat } from "./chat-fetch.ts";
 import { remuxToMp4, mp4Twin } from "./remux.ts";
+import { downloadFmp4 } from "./fmp4-download.ts";
 
 export type DownloadPartKind = "chat" | "markers" | "proxy" | "hq";
 export type DownloadPartStatus = "pending" | "running" | "done" | "failed" | "skipped";
@@ -204,23 +205,22 @@ export class DownloadOrchestrator {
       changed = true;
     }
 
-    // Post-completion storage hygiene for states that finished before the
-    // cleanup existed: a done phase with a playable twin still referencing
-    // a .ts means the raw file + chunk map are dead weight — same drop as
-    // finalize().
+    // Post-completion storage hygiene: a done project keeps ONE file per
+    // video kind. States from the ts+twin era still reference proxy.ts /
+    // hq.ts — repoint them at the fMP4 and sweep the leftovers.
     if (state.phase === "done") {
-      for (const [tsKey, twinKey] of [["proxyPath", "proxyMp4"], ["hqPath", "hqMp4"]] as const) {
-        const tsPath = state[tsKey];
-        const twinPath = state[twinKey];
-        if (tsPath && twinPath && tsPath.endsWith(".ts") && twinPath !== tsPath
-            && await exists(twinPath)) {
-          for (const victim of [tsPath, tsPath.replace(/\.ts$/, ".chunks")]) {
-            await Deno.remove(victim).catch(() => {});
+      for (const [pathKey, mp4Key] of [["proxyPath", "proxyMp4"], ["hqPath", "hqMp4"]] as const) {
+        const p = state[pathKey];
+        const mp4 = state[mp4Key];
+        if (p && p.endsWith(".ts")) {
+          const candidate = mp4 && !mp4.endsWith(".ts") ? mp4 : p.replace(/\.ts$/, ".mp4");
+          if (await exists(candidate)) {
+            state = { ...state, [pathKey]: candidate, [mp4Key]: candidate };
+            changed = true;
           }
-          state = { ...state, [tsKey]: twinPath };
-          changed = true;
         }
       }
+      await this.sweepLegacyArtifacts(state);
     }
 
     // Nothing on disk at all → the state is a husk (blank 0% containers).
@@ -325,7 +325,6 @@ export class DownloadOrchestrator {
     signal?: AbortSignal | undefined;
   }): Promise<void> {
     const { kind } = opts;
-    const tsPath = `${opts.destDir}/${kind}.ts`;
     const controller = new AbortController();
     if (opts.signal) opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
 
@@ -337,29 +336,27 @@ export class DownloadOrchestrator {
     delete (part as Partial<PartRuntime>).error;
     await this.persist(opts.streamId, started, rt);
 
-    const mapPath = `${opts.destDir}/${kind}.chunks`;
-    const mapFile = await Deno.open(mapPath, { write: true, create: true, append: false });
-    const lastMux = { t: 0 };
+    // One growing fragmented MP4 per kind — no .ts, no twin, no mid-run
+    // remux (a mid-run remux used to overwrite a previous download's
+    // COMPLETE twin with a partial one and destroy the playable artifact).
+    const mp4Path = `${opts.destDir}/${kind}.mp4`;
+    const indexPath = `${opts.destDir}/${kind}.fragments`;
     let lastWrite = 0;
     try {
-      await downloadProgressive(opts.quality.playlistUrl, tsPath, {
+      await downloadFmp4(opts.quality.playlistUrl, mp4Path, {
         signal: controller.signal,
         lookahead: kind === "proxy" ? 3 : 4,
-        onChunk: (index, offset, len) => {
-          void mapFile.write(new TextEncoder().encode(`${index} ${offset} ${len}\n`));
-        },
+        indexPath,
         onProgress: (p) => {
           this.noteVideoProgress(part, p, opts.quality);
           if (kind === "proxy") {
             started.proxyFrontierSec = p.downloadedSec;
-            started.proxyPath = tsPath;
+            started.proxyPath = mp4Path;
+            started.proxyMp4 = mp4Path;
           } else {
-            started.hqPath = tsPath;
+            started.hqPath = mp4Path;
+            started.hqMp4 = mp4Path;
           }
-          // No mid-run twin remux for pieces: the previous twin may be a
-          // complete artifact from an earlier download — remuxing a partial
-          // .ts over it destroys the playable file. The completion remux
-          // below replaces it atomically.
           const now = performance.now();
           if (now - lastWrite > 1000) {
             lastWrite = now;
@@ -369,11 +366,13 @@ export class DownloadOrchestrator {
       });
       part.status = "done";
       part.percent = 1;
-      if (kind === "proxy") started.proxyPath = tsPath;
-      else started.hqPath = tsPath;
-      const mp4 = await remuxToMp4(tsPath, mp4Twin(tsPath));
-      if (kind === "proxy") started.proxyMp4 = mp4 ? mp4Twin(tsPath) : null;
-      else started.hqMp4 = mp4 ? mp4Twin(tsPath) : null;
+      if (kind === "proxy") {
+        started.proxyPath = mp4Path;
+        started.proxyMp4 = mp4Path;
+      } else {
+        started.hqPath = mp4Path;
+        started.hqMp4 = mp4Path;
+      }
       started.phase = "done";
       await this.persist(opts.streamId, started, rt);
     } catch (err) {
@@ -389,11 +388,6 @@ export class DownloadOrchestrator {
       await this.persist(opts.streamId, started, rt);
       if (!controller.signal.aborted) throw err;
     } finally {
-      try {
-        await mapFile.close();
-      } catch {
-        // already closed
-      }
       this.markRunLive(opts.streamId, false);
     }
   }
@@ -608,116 +602,102 @@ export class DownloadOrchestrator {
     if (!opts.includeProxy || !proxy || proxy === hq) {
       const target = proxy ?? hq;
       if (target) {
-        const tsPath = `${opts.destDir}/proxy.ts`;
-        const lastMux = { t: 0 };
-        // Resume from the previous run's frontier when the .ts survives —
-        // chunk-complete prefix is kept, only the tail re-downloads.
-        const resumeSec = opts.resume && await this.fileSeconds(tsPath).then((s) => s > 0).catch(() => false)
-          ? Math.floor(await this.fileSeconds(tsPath))
-          : 0;
+        // ONE growing fragmented MP4 serves the project — no .ts, no twin,
+        // no remux, and crucially no second artifact aliasing this file
+        // (the old model set hqPath = proxyPath, so the HQ row's trash
+        // deleted the proxy's media and both rows lost their bytes).
+        const videoPath = `${opts.destDir}/video.mp4`;
+        const indexPath = `${opts.destDir}/video.fragments`;
+        const resumeSec = opts.resume ? Math.floor(await this.fileSeconds(videoPath)) : 0;
+        // Mark the part running BEFORE the first chunk: a part left
+        // "pending" while bytes land makes the UI show a pending row next to
+        // a growing percentage (user-reported: bars that do not change).
+        rt.get("proxy")!.status = "running";
+        await this.persist(opts.streamId, state, rt);
         try {
-          const mapPath = `${opts.destDir}/proxy.chunks`;
-          const mapFile = await Deno.open(mapPath, { write: true, create: true, append: resumeSec > 0, truncate: resumeSec === 0 });
-          try {
-            await downloadProgressive(target.playlistUrl, tsPath, {
-              signal: opts.signal ?? undefined,
-              resumeSec,
-              onChunk: (index, offset, len) => {
-                void mapFile.write(new TextEncoder().encode(`${index} ${offset} ${len}\n`));
-              },
-              onProgress: (p) => {
+          await downloadFmp4(target.playlistUrl, videoPath, {
+            signal: opts.signal ?? undefined,
+            resumeSec,
+            indexPath,
+            onProgress: (p) => {
               const part = rt.get("proxy")!;
               this.noteVideoProgress(part, p, target);
               state.proxyFrontierSec = p.downloadedSec;
-              state.proxyPath = tsPath;
-              state.hqPath = tsPath;
-              void this.remuxTwin(tsPath, state, lastMux).then((mp4) => {
-                state.proxyMp4 = mp4;
-                state.hqMp4 = mp4;
-                void this.persist(opts.streamId, state, rt);
-              });
+              state.proxyPath = videoPath;
+              state.proxyMp4 = videoPath;
               void this.persist(opts.streamId, state, rt);
             },
           });
           rt.get("proxy")!.status = "done";
           rt.get("proxy")!.percent = 1;
-          rt.get("hq")!.status = "done"; // same file serves HQ
+          rt.get("hq")!.status = "skipped"; // one file: no separate HQ pass
           rt.get("hq")!.percent = 1;
-          // Final remux (not throttled) so the complete file is playable.
-          const mp4 = await remuxToMp4(tsPath, mp4Twin(tsPath));
-          state.proxyMp4 = state.hqMp4 = mp4 ? mp4Twin(tsPath) : null;
+          state.proxyPath = videoPath;
+          state.proxyMp4 = videoPath;
           void this.persist(opts.streamId, state, rt);
-          } finally {
-            await mapFile.close();
-          }
+          await opts.onPartDone?.("proxy", state);
         } catch (err) {
+          if (opts.signal?.aborted) {
+            rt.get("proxy")!.status = "failed";
+            rt.get("proxy")!.error = "aborted";
+            rt.get("hq")!.status = "skipped";
+            await this.persist(opts.streamId, state, rt);
+            return this.finalize(opts.streamId, state, rt);
+          }
           this.fail(rt.get("proxy")!, err);
-          this.fail(rt.get("hq")!, err);
+          state.proxyPath = null;
+          state.proxyMp4 = null;
         }
       }
       return this.finalize(opts.streamId, state, rt);
     }
 
     // ── Proxy pass (live, reviewable the moment it completes) ──
-    // One-time legacy migration: pre-rename runs stored artifacts as
-    // scrub.ts/scrub.chunks — carry them onto the proxy names so resume
-    // keeps the on-disk prefix instead of re-downloading from zero.
-    if (opts.resume) {
-      const legacyTs = `${opts.destDir}/scrub.ts`;
-      if (!(await this.fileExists(`${opts.destDir}/proxy.ts`)) && (await this.fileExists(legacyTs))) {
-        await Deno.rename(legacyTs, `${opts.destDir}/proxy.ts`);
-        const legacyMap = `${opts.destDir}/scrub.chunks`;
-        if (await this.fileExists(legacyMap)) {
-          await Deno.rename(legacyMap, `${opts.destDir}/proxy.chunks`).catch(() => {});
-        }
-      }
-    }
+    // Legacy artifacts (scrub.*/proxy.ts + .chunks twins) are removed by
+    // the post-completion sweep in finalize()/reconcile(): the fMP4 is the
+    // only file a completed project keeps.
     rt.get("proxy")!.status = "running";
-    const proxyTs = `${opts.destDir}/proxy.ts`;
-    const lastMuxProxy = { t: 0 };
-    const proxyResume = opts.resume
-      ? Math.floor(await this.fileSeconds(proxyTs))
-      : 0;
-    const proxyMapPath = `${opts.destDir}/proxy.chunks`;
-    const proxyMapFile = await Deno.open(proxyMapPath, { write: true, create: true, append: proxyResume > 0, truncate: proxyResume === 0 });
+    // ── Proxy pass: ONE growing fragmented MP4 (no .ts, no twin, no remux) ──
+    // Chunks pipe straight into ffmpeg and the muxed fragments are written
+    // to proxy.mp4; the fragment index sidecar lets the media route clamp
+    // Range responses to a complete fragment (a mid-fragment clamp makes
+    // Chromium die with PIPELINE_ERROR_DECODE).
+    const proxyMp4Path = `${opts.destDir}/proxy.mp4`;
+    const proxyIndexPath = `${opts.destDir}/proxy.fragments`;
+    const proxyResume = opts.resume ? Math.floor(await this.fileSeconds(proxyMp4Path)) : 0;
+    rt.get("proxy")!.status = "running";
+    await this.persist(opts.streamId, state, rt);
     try {
-      await downloadProgressive(proxy.playlistUrl, proxyTs, {
+      await downloadFmp4(proxy.playlistUrl, proxyMp4Path, {
         signal: opts.signal ?? undefined,
         resumeSec: proxyResume,
-        onChunk: (index, offset, len) => {
-          void proxyMapFile.write(new TextEncoder().encode(`${index} ${offset} ${len}\n`));
-        },
+        indexPath: proxyIndexPath,
         onProgress: (p) => {
           const part = rt.get("proxy")!;
           this.noteVideoProgress(part, p, proxy);
           state.proxyFrontierSec = p.downloadedSec;
-          state.proxyPath = proxyTs;
-          void this.remuxTwin(proxyTs, state, lastMuxProxy).then((mp4) => {
-            state.proxyMp4 = mp4;
-            void this.persist(opts.streamId, state, rt);
-          });
+          state.proxyPath = proxyMp4Path;
+          state.proxyMp4 = proxyMp4Path;
           void this.persist(opts.streamId, state, rt);
         },
       });
       rt.get("proxy")!.status = "done";
       rt.get("proxy")!.percent = 1;
-      state.proxyPath = proxyTs;
-      const proxyMp4 = await remuxToMp4(proxyTs, mp4Twin(proxyTs));
-      state.proxyMp4 = proxyMp4 ? mp4Twin(proxyTs) : null;
+      state.proxyPath = proxyMp4Path;
+      state.proxyMp4 = proxyMp4Path;
       void this.persist(opts.streamId, state, rt);
-      await proxyMapFile.close();
       await opts.onPartDone?.("proxy", state);
     } catch (err) {
       if (opts.signal?.aborted) {
         rt.get("proxy")!.status = "failed";
         rt.get("proxy")!.error = "aborted";
         rt.get("hq")!.status = "skipped"; // cancelled before starting
-        await proxyMapFile.close();
         await this.persist(opts.streamId, state, rt);
         return this.finalize(opts.streamId, state, rt);
       }
       this.fail(rt.get("proxy")!, err);
       state.proxyPath = null;
+      state.proxyMp4 = null;
     }
     await this.persist(opts.streamId, state, rt);
 
@@ -729,46 +709,31 @@ export class DownloadOrchestrator {
     }
     if (hq && hq.name !== proxy.name) {
       rt.get("hq")!.status = "running";
-      const hqTs = `${opts.destDir}/hq.ts`;
-      const lastMuxHq = { t: 0 };
-      const hqResume = opts.resume
-        ? Math.floor(await this.fileSeconds(hqTs))
-        : 0;
-      const hqMapPath = `${opts.destDir}/hq.chunks`;
-      const hqMapFile = await Deno.open(hqMapPath, { write: true, create: true, append: hqResume > 0, truncate: hqResume === 0 });
+      const hqMp4Path = `${opts.destDir}/hq.mp4`;
+      const hqIndexPath = `${opts.destDir}/hq.fragments`;
+      const hqResume = opts.resume ? Math.floor(await this.fileSeconds(hqMp4Path)) : 0;
       try {
-        await downloadProgressive(hq.playlistUrl, hqTs, {
+        await downloadFmp4(hq.playlistUrl, hqMp4Path, {
           signal: opts.signal ?? undefined,
           lookahead: 4,
           resumeSec: hqResume,
-          onChunk: (index, offset, len) => {
-            void hqMapFile.write(new TextEncoder().encode(`${index} ${offset} ${len}\n`));
-          },
+          indexPath: hqIndexPath,
           onProgress: (p) => {
             const part = rt.get("hq")!;
             this.noteVideoProgress(part, p, hq);
-            void this.remuxTwin(hqTs, state, lastMuxHq).then((mp4) => {
-              state.hqMp4 = mp4;
-              void this.persist(opts.streamId, state, rt);
-            });
+            state.hqPath = hqMp4Path;
+            state.hqMp4 = hqMp4Path;
             void this.persist(opts.streamId, state, rt);
           },
         });
         rt.get("hq")!.status = "done";
         rt.get("hq")!.percent = 1;
-        state.hqPath = hqTs;
-        const hqMp4 = await remuxToMp4(hqTs, mp4Twin(hqTs));
-        state.hqMp4 = hqMp4 ? mp4Twin(hqTs) : null;
+        state.hqPath = hqMp4Path;
+        state.hqMp4 = hqMp4Path;
         void this.persist(opts.streamId, state, rt);
-        await hqMapFile.close();
         await opts.onPartDone?.("hq", state);
       } catch (err) {
         this.fail(rt.get("hq")!, err);
-        try {
-          await hqMapFile.close();
-        } catch {
-          // already closed
-        }
       }
     } else {
       // Same quality — proxy file is the HQ file.
@@ -779,6 +744,32 @@ export class DownloadOrchestrator {
     }
 
     return this.finalize(opts.streamId, state, rt);
+  }
+
+  /**
+   * Remove artifacts from the ts+twin era. A completed fMP4 project keeps
+   * exactly one media file per kind; the raw `.ts`, its `.chunks` byte map,
+   * and any `scrub.*` leftovers are dead weight (they were the doubling the
+   * owner flagged). Best-effort: a failed unlink never breaks the state.
+   */
+  private async sweepLegacyArtifacts(state: DownloadState): Promise<void> {
+    const dirs = new Set<string>();
+    for (const p of [state.proxyPath, state.hqPath, state.proxyMp4, state.hqMp4]) {
+      if (p) dirs.add(p.replace(/\/[^/]+$/, ""));
+    }
+    if (dirs.size === 0) return;
+    // Only sweep when the surviving artifact is an fMP4 — otherwise the .ts
+    // may still be the playable file.
+    const keepTs = [state.proxyPath, state.hqPath].some((p) => p?.endsWith(".ts"));
+    if (keepTs) return;
+    const victims = ["proxy.ts", "hq.ts", "video.ts", "scrub.ts",
+                     "proxy.chunks", "hq.chunks", "video.chunks", "scrub.chunks",
+                     "scrub.mp4", "proxy.mp4.part"];
+    for (const dir of dirs) {
+      for (const name of victims) {
+        await Deno.remove(`${dir}/${name}`).catch(() => {});
+      }
+    }
   }
 
   private async fileExists(path: string): Promise<boolean> {
@@ -880,23 +871,12 @@ export class DownloadOrchestrator {
           ? "failed"
           : "idle";
 
-    // Storage: the mp4 twin is the artifact; the raw .ts and its chunk map
-    // only exist for (a) the growing-file player and (b) resume. Both roles
-    // end at completion — drop them so one file remains per video kind
-    // (user-reported: .ts + .chunks doubling storage after downloads).
+    // Storage: the fragmented MP4 IS the artifact — one file per video kind,
+    // playable while it grows. Legacy leftovers from the ts+twin era
+    // (proxy.ts/hq.ts, their .chunks maps, scrub.*) are swept here so a
+    // completed project never keeps two copies of the same media.
     if (state.phase === "done") {
-      for (const [tsKey, twinKey] of [["proxyPath", "proxyMp4"], ["hqPath", "hqMp4"]] as const) {
-        const tsPath = state[tsKey];
-        const twinPath = state[twinKey];
-        if (tsPath && twinPath && tsPath.endsWith(".ts") && twinPath !== tsPath
-            && await this.fileExists(twinPath)) {
-          for (const victim of [tsPath, tsPath.replace(/\.ts$/, ".chunks")]) {
-            await Deno.remove(victim).catch(() => {});
-          }
-          // Repoint the state at the twin — reconcile() then validates it.
-          state[tsKey] = twinPath;
-        }
-      }
+      await this.sweepLegacyArtifacts(state);
     }
     await this.setState(streamId, state);
     return state;
