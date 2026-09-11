@@ -139,7 +139,12 @@ Deno.test("view: absent markers render as null, not an empty row", () => {
     state: state({ phase: "idle" }),
   });
   assertEquals(view.metadata.markers, null);
-  assertEquals(view.artifacts.length, 0);
+  // A project with nothing downloaded still shows its chat and video rows —
+  // those rows are where the Download buttons live, so hiding them would
+  // remove the ability to fetch the artifact at all.
+  assertEquals(view.artifacts.map((a) => a.kind), ["chat", "video"]);
+  assertEquals(view.artifacts.every((a) => a.onDisk === false), true);
+  assertEquals(view.artifacts.every((a) => a.status === "pending"), true);
 });
 
 Deno.test("view: a project with no proxy file has NO proxy row (single-download)", () => {
@@ -157,7 +162,7 @@ Deno.test("view: a project with no proxy file has NO proxy row (single-download)
   const kinds = view.artifacts.map((a) => a.kind);
   assertEquals(kinds.includes("video"), true);
   assertEquals(kinds.filter((k) => k === "proxy").length, 0, "no phantom proxy row");
-  assertEquals(view.artifacts.length, 1, "exactly one artifact");
+  assertEquals(kinds, ["chat", "video"], "chat + video, never a phantom proxy");
 });
 
 Deno.test("view: two-file mode yields distinct proxy and video rows with no sharing", () => {
@@ -263,6 +268,58 @@ Deno.test("view: label composes from the running artifact and names failures", (
   assertEquals(composeLabel({ phase: "idle", active: false, artifacts: [] }), "");
 });
 
+Deno.test("view: a MISSING artifact keeps its row so it can be downloaded again", () => {
+  // Regression: a row-visibility rule of "only if a file, running, or failed"
+  // hid every missing artifact — and the row is where the Download button
+  // lives, so the user lost the ability to re-fetch anything.
+  const empty = projectDownloadView({ ...base, state: state({ phase: "idle" }) });
+  assertEquals(empty.artifacts.map((a) => a.kind), ["chat", "video"]);
+  for (const a of empty.artifacts) {
+    assertEquals(a.onDisk, false);
+    assertEquals(a.removable, false, "nothing to remove");
+  }
+  assertEquals(empty.artifacts.find((a) => a.kind === "video")!.downloadable, true);
+
+  // Same for a project whose video was deleted but which still has chat.
+  const deleted = projectDownloadView({
+    ...base,
+    state: state({
+      phase: "done",
+      includeProxy: true,
+      parts: [
+        part("chat", { status: "done", percent: 1 }),
+        part("proxy", { status: "done", percent: 1 }),
+        part("hq", { status: "pending" }),
+      ],
+      chatPath: "/d/chat.json",
+      presence: {
+        chat: { onDisk: true, bytes: 248_000, path: "/d/chat.json" },
+        proxy: { onDisk: true, bytes: 500, path: "/d/proxy.mp4" },
+      },
+    }),
+  });
+  const videoRow = deleted.artifacts.find((a) => a.kind === "video")!;
+  assertEquals(videoRow.onDisk, false, "the deleted video has no file");
+  assertEquals(videoRow.downloadable, true, "but offers a re-download");
+  assertEquals(deleted.media.previewOnly, true, "and the project is flagged preview-only");
+});
+
+Deno.test("view: a single-download project never grows a phantom proxy row", () => {
+  // The rule that must NOT regress: `proxy` is the only artifact that can be
+  // absent-by-design (single-download mode has no proxy file).
+  const view = projectDownloadView({
+    ...base,
+    state: state({
+      phase: "idle",
+      includeProxy: false,
+      parts: [part("proxy", { status: "pending" }), part("hq", { status: "pending" })],
+      presence: {},
+    }),
+  });
+  assertEquals(view.artifacts.map((a) => a.kind), ["chat", "video"],
+    "no proxy row when the project has no proxy file");
+});
+
 Deno.test("view: downloadable/removable gate the row actions", () => {
   const withSource = projectDownloadView({
     ...base,
@@ -283,5 +340,8 @@ Deno.test("view: downloadable/removable gate the row actions", () => {
     hasSource: false,
     state: state({ phase: "idle" }),
   });
-  assertEquals(noSource.artifacts.length, 0);
+  // The rows still render (so the missing state is visible), but the
+  // Download affordance is disabled without a stream link to fetch from.
+  assertEquals(noSource.artifacts.map((a) => a.kind), ["chat", "video"]);
+  assertEquals(noSource.artifacts.every((a) => a.downloadable === false), true);
 });

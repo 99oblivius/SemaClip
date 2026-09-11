@@ -87,8 +87,12 @@ Deno.test("delete: removing the proxy leaves the video fully functional", () => 
       presence: { hq: { onDisk: true, bytes: 2000, path: "/d/hq.mp4" } },
     }),
   });
-  assertEquals(after.artifacts.find((a) => a.kind === "proxy"), undefined,
-    "a deleted proxy has no row");
+  // The proxy row REMAINS (two-file mode expects a proxy) but reports no
+  // file — that row is how the proxy gets re-downloaded.
+  const proxyRow = after.artifacts.find((a) => a.kind === "proxy")!;
+  assertEquals(proxyRow.onDisk, false, "the deleted proxy reports no file");
+  assertEquals(proxyRow.bytes, 0);
+  assertEquals(proxyRow.downloadable, true, "and can be downloaded again");
   assertEquals(after.media.playablePath, "/d/hq.mp4");
   assertEquals(after.media.previewOnly, false, "the video is canonical — not preview-only");
   assertEquals(after.artifacts.find((a) => a.kind === "video")!.bytes, 2000);
@@ -110,9 +114,11 @@ Deno.test("delete: single-download project has one artifact, so no cross-deletio
       presence: { proxy: { onDisk: true, bytes: 500, path: "/d/video.mp4" } },
     }),
   });
-  assertEquals(view.artifacts.length, 1);
-  assertEquals(view.artifacts[0]!.kind, "video");
-  assertEquals(view.artifacts[0]!.sharedWith, [], "nothing else claims this file");
+  // chat + the single video file. Crucially there is exactly ONE video-kind
+  // artifact, so no cross-deletion is possible.
+  assertEquals(view.artifacts.map((a) => a.kind), ["chat", "video"]);
+  const video = view.artifacts.find((a) => a.kind === "video")!;
+  assertEquals(video.sharedWith, [], "nothing else claims this file");
   assertEquals(view.media.playablePath, "/d/video.mp4");
   assertEquals(view.media.previewOnly, false);
 });
