@@ -124,6 +124,17 @@ export function isLive(view: DownloadView): boolean {
   return view.active || view.phase === 'failed';
 }
 
+/**
+ * True when the container should be visible: something is happening, OR the
+ * project is incomplete — an artifact is missing and could be downloaded
+ * again. Without this the re-download affordance is unreachable once a
+ * download finishes, because the container would already have been dismissed.
+ */
+export function needsAttention(view: DownloadView): boolean {
+  if (view.active || view.phase === 'failed') return true;
+  return view.artifacts.some((a) => !a.onDisk && a.downloadable);
+}
+
 /** A download finished with a playable file — the Library row can drop it. */
 export function isSatisfied(view: DownloadView): boolean {
   return view.phase === 'done' && Boolean(view.media.playablePath) && !view.active;

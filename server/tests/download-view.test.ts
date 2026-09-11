@@ -336,6 +336,45 @@ Deno.test("view: a source-less project shows no proxy row (nothing to fetch it f
     "a local-folder project has no proxy download path");
 });
 
+Deno.test("view: a MANUAL video piece reports running (the Cancel button's source)", () => {
+  // A manual video piece runs in the `hq` part even on a project whose mode
+  // has no separate proxy. Mapping the video artifact to the (idle) `proxy`
+  // part hid the Cancel button while a download was actually running.
+  const view = projectDownloadView({
+    ...base,
+    state: state({
+      phase: "running",
+      includeProxy: false, // no separate proxy in this project
+      parts: [
+        part("chat", { status: "done", percent: 1 }),
+        part("proxy", { status: "done", percent: 1 }),
+        part("hq", { status: "running", percent: 0.4 }),
+      ],
+      presence: { proxy: { onDisk: true, bytes: 100, path: "/d/video.mp4" } },
+    }),
+  });
+  const video = view.artifacts.find((a) => a.kind === "video")!;
+  assertEquals(video.status, "running", "the running hq part must surface on the video row");
+  assertEquals(video.percent, 0.4);
+  assertEquals(view.active, true);
+});
+
+Deno.test("view: a failed video piece surfaces as failed for resume", () => {
+  const view = projectDownloadView({
+    ...base,
+    state: state({
+      phase: "failed",
+      includeProxy: false,
+      parts: [
+        part("proxy", { status: "done", percent: 1 }),
+        part("hq", { status: "failed", error: "network", percent: 0.2 }),
+      ],
+      presence: { proxy: { onDisk: true, bytes: 100, path: "/d/video.mp4" } },
+    }),
+  });
+  assertEquals(view.artifacts.find((a) => a.kind === "video")!.status, "failed");
+});
+
 Deno.test("view: downloadable/removable gate the row actions", () => {
   const withSource = projectDownloadView({
     ...base,

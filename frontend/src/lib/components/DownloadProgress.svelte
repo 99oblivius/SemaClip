@@ -2,7 +2,7 @@
   import { createMutation, useQueryClient } from '@tanstack/svelte-query';
   import { apiClient } from '$lib/api/client';
   import Icon from '$lib/components/Icon.svelte';
-  import { fmtEta, fmtBytes, isLive, isSatisfied, type DownloadView } from '$lib/api/download';
+  import { fmtEta, fmtBytes, needsAttention, type DownloadView } from '$lib/api/download';
   import { DOWNLOADS_KEY, downloadsQuery, viewFor, markDownloadsChanged } from '$lib/api/downloads';
 
   interface Props {
@@ -22,11 +22,11 @@
   // Auto-expand once on the transition into a live download, so "what am I
   // resuming?" surfaces itself without a click — but the user can collapse
   // it and it stays collapsed (a naive effect re-opened it on every poll).
-  let wasLive = $state(false);
+  let wasActive = $state(false);
   $effect(() => {
-    const live = view ? isLive(view) : false;
-    if (live && !wasLive) detailOpen = true;
-    wasLive = live;
+    const active = view?.active ?? false;
+    if (active && !wasActive) detailOpen = true;
+    wasActive = active;
   });
 
   const deleteMutation = createMutation(() => ({
@@ -36,8 +36,42 @@
 
   const resumeMutation = createMutation(() => ({
     mutationFn: () => apiClient.resumeDownload(streamId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] }),
+    onSuccess: () => {
+      markDownloadsChanged();
+      queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
+    },
   }));
+
+  // Cancel the RUNNING artifact from here too — the settings panel is not the
+  // only place a download can be stopped.
+  const cancelMutation = createMutation(() => ({
+    mutationFn: (kind: 'proxy' | 'video' | 'chat') =>
+      apiClient.cancelPiece(streamId, kind === 'video' ? 'hq' : kind),
+    onSuccess: () => {
+      markDownloadsChanged();
+      queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
+    },
+  }));
+
+  // Re-download a MISSING artifact without leaving the Library.
+  const redownloadMutation = createMutation(() => ({
+    mutationFn: (kind: 'proxy' | 'video' | 'chat') =>
+      apiClient.downloadPiece(streamId, kind === 'video' ? 'hq' : kind, {
+        maxHeight: null,
+        proxyHeightCap: 540,
+      }),
+    onSuccess: () => {
+      markDownloadsChanged();
+      queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
+    },
+  }));
+
+  /** The artifact currently downloading, if any. */
+  const runningArt = $derived(view?.artifacts.find((a) => a.status === 'running'));
+  /** Artifacts that are missing (downloadable again) once nothing is running. */
+  const missingArts = $derived(
+    (view?.artifacts ?? []).filter((a) => !a.onDisk && a.downloadable),
+  );
 
   function fmtTime(sec: number): string {
     const h = Math.floor(sec / 3600);
@@ -46,8 +80,9 @@
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   }
 
-  // A satisfied download leaves the list: the stream is in the library rows.
-  const show = $derived(Boolean(view && isLive(view) && !isSatisfied(view)));
+  // Shown while something happens, and while the project is incomplete
+  // (a missing artifact keeps its re-download affordance reachable).
+  const show = $derived(Boolean(view && needsAttention(view)));
 </script>
 
 {#if show && view}
@@ -126,7 +161,17 @@
         {#if view.media.previewOnly}
           <p class="pl-1 font-mono text-[10px] text-warning">preview only — the video file is missing, exports are not possible</p>
         {/if}
-        <div class="mt-1 flex items-center justify-end gap-2">
+        <div class="mt-1 flex flex-wrap items-center justify-end gap-2">
+          {#if runningArt}
+            <button
+              class="rounded border border-accent px-2 py-0.5 text-[10px] text-accent transition-colors hover:border-error hover:text-error disabled:opacity-50"
+              onclick={() => cancelMutation.mutate(runningArt.kind)}
+              disabled={cancelMutation.isPending}
+              title="Stop this download (the partial file is kept)"
+            >
+              Cancel {runningArt.label.toLowerCase()}
+            </button>
+          {/if}
           {#if view.phase === 'failed'}
             <button
               class="rounded border border-border px-2 py-0.5 text-[10px] text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
@@ -136,6 +181,18 @@
             >
               Resume download
             </button>
+          {/if}
+          {#if !view.active}
+            {#each missingArts as art (art.kind)}
+              <button
+                class="rounded border border-border px-2 py-0.5 text-[10px] text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
+                onclick={() => redownloadMutation.mutate(art.kind)}
+                disabled={redownloadMutation.isPending}
+                title={`Download ${art.label.toLowerCase()} again`}
+              >
+                Re-download {art.label.toLowerCase()}
+              </button>
+            {/each}
           {/if}
           <button
             class="rounded border border-border px-2 py-0.5 text-[10px] text-ash transition-colors hover:border-error hover:text-error"

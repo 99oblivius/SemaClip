@@ -101,8 +101,8 @@
   // Per-piece quality selection: proxy defaults 540, HQ defaults source max.
   // Resolved from the download state's quality list; fetched lazily when the
   // settings open on a URL stream that hasn't resolved qualities yet.
-  let proxyHeight = $state<number | null>(540);
-  let hqHeight = $state<number | null>(null);
+  let proxyHeight = $state<number | null>(null);
+  let hqHeight = $state<number | null>(null);   // — none — until chosen
   let qualityList = $state<QualityInfo[]>([]);
   const cancelPieceMutation = createMutation(() => ({
     mutationFn: (kind: 'proxy' | 'video' | 'chat') => apiClient.cancelPiece(stream.id, pieceKind(kind)),
@@ -130,6 +130,27 @@
   function pieceKind(kind: 'proxy' | 'video' | 'chat'): 'proxy' | 'hq' | 'chat' {
     return kind === 'video' ? 'hq' : kind;
   }
+  /** A piece can be downloaded only with a source AND a chosen resolution. */
+  function canDownload(kind: 'proxy' | 'video' | 'chat'): boolean {
+    if (mediaBusy || pieceMutation.isPending || !streamLink.trim()) return false;
+    if (kind === 'chat') return true;
+    if (kind === 'proxy') return proxyHeight !== null;
+    return hqHeight !== null;
+  }
+
+  function downloadTitle(kind: 'proxy' | 'video' | 'chat'): string {
+    if (!streamLink.trim()) return 'Set the stream link first';
+    if (kind !== 'chat') {
+      const chosen = kind === 'proxy' ? proxyHeight : hqHeight;
+      if (chosen === null) {
+        return kind === 'proxy' && proxyChoices.length === 0
+          ? 'No proxy resolution is available below the video quality'
+          : 'Choose a resolution first';
+      }
+    }
+    return 'Download from the stream link';
+  }
+
   function startPiece(kind: 'proxy' | 'video' | 'chat') {
     pendingPiece = kind;
     if (kind === 'proxy' && proxyHeight === null) return; // — none — selected
@@ -148,8 +169,10 @@
       .then((d) => {
         qualityList = d.qualities;
         const heights = d.qualities.map((q) => q.height);
-        if (proxyHeight === null) proxyHeight = heights.includes(540) ? 540 : (heights.find((h) => h >= 360) ?? heights[0] ?? 540);
-        if (hqHeight === null) hqHeight = heights.length > 0 ? Math.max(...heights) : null;
+        // Selections start at — none —; drop any height the source does not
+        // actually offer rather than leaving a value that cannot download.
+        if (proxyHeight !== null && !heights.includes(proxyHeight)) proxyHeight = null;
+        if (hqHeight !== null && !heights.includes(hqHeight)) hqHeight = null;
       })
       .catch(() => {});
   });
@@ -381,23 +404,32 @@
                     <Icon name="check" size={11} /> on disk
                   </span>
                 {:else}
-                  {#if art.kind === 'proxy' && proxyChoices.length > 0}
+                  <!-- The resolution picker is ALWAYS present, defaulting to
+                       — none —. With no resolution selected there is nothing
+                       to download, so the Download button is disabled (and a
+                       proxy with no available resolutions stays visible but
+                       cannot be downloaded). -->
+                  {#if art.kind === 'proxy'}
                     <select
                       bind:value={proxyHeight}
                       class="rounded border border-border bg-surface-2 px-1.5 py-1 text-[10px] text-ink focus:border-accent focus:outline-none"
                       aria-label="Proxy resolution"
+                      title={proxyChoices.length === 0
+                        ? 'No resolution is available below the video quality'
+                        : 'Proxy resolution'}
                     >
                       <option value={null}>— none —</option>
                       {#each proxyChoices as q (q.name)}
                         <option value={q.height}>{q.name}</option>
                       {/each}
                     </select>
-                  {:else if art.kind === 'video' && qualityList.length > 0}
+                  {:else if art.kind === 'video'}
                     <select
                       bind:value={hqHeight}
                       class="rounded border border-border bg-surface-2 px-1.5 py-1 text-[10px] text-ink focus:border-accent focus:outline-none"
                       aria-label="Video resolution"
                     >
+                      <option value={null}>— none —</option>
                       {#each qualityList as q (q.name)}
                         <option value={q.height}>{q.name}</option>
                       {/each}
@@ -406,8 +438,8 @@
                   <button
                     class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
                     onclick={() => startPiece(art.kind)}
-                    disabled={mediaBusy || pieceMutation.isPending || !streamLink.trim()}
-                    title={streamLink.trim() ? 'Download from the stream link' : 'Set the stream link first'}
+                    disabled={!canDownload(art.kind)}
+                    title={downloadTitle(art.kind)}
                   >
                     <Icon name="download" size={11} /> Download
                   </button>

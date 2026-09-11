@@ -4,7 +4,7 @@
   import Icon from '$lib/components/Icon.svelte';
   import DownloadProgress from '$lib/components/DownloadProgress.svelte';
   import { downloadsQuery, viewFor, markDownloadsChanged } from '$lib/api/downloads';
-  import { isLive, isSatisfied } from '$lib/api/download';
+  import { needsAttention } from '$lib/api/download';
   import { fadeIn, staggerIn, hoverLift } from '$lib/actions/gsap';
   import type { Stream, Job, ImportByUrlInput, ImportByFileInput } from '$shared/types';
   import type { QualityInfo } from '$lib/api/download';
@@ -16,8 +16,10 @@
   // not yet satisfied — so it appears the moment a download starts, without
   // a page refresh.
   const downloads = downloadsQuery();
+  // Anything that needs attention: actively downloading, failed, or
+  // incomplete (an artifact is missing and can be downloaded again).
   const liveDownloads = $derived(
-    (downloads.data?.views ?? []).filter((v) => isLive(v) && !isSatisfied(v)),
+    (downloads.data?.views ?? []).filter((v) => needsAttention(v)),
   );
 
   const streamsQuery = createQuery(() => ({

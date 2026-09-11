@@ -32,9 +32,18 @@ function partForArtifact(
 ): DownloadPart | undefined {
   if (kind === "chat") return parts.get("chat");
   if (kind === "proxy") return includeProxy ? parts.get("proxy") : undefined;
-  // The main video: `hq` when a separate proxy file exists, else the single
-  // download lives in the `proxy` part (one file, both roles).
-  return includeProxy ? parts.get("hq") : parts.get("proxy");
+  // The main video. The orchestrator records a video download in the `hq`
+  // part — including a MANUAL video piece, which can run on a project whose
+  // mode has no separate proxy. Prefer whichever part is actually carrying
+  // the video so a running download is never reported as idle (that hid the
+  // Cancel button: the row read the idle `proxy` part while `hq` ran).
+  const primary = includeProxy ? parts.get("hq") : parts.get("proxy");
+  const secondary = includeProxy ? parts.get("proxy") : parts.get("hq");
+  if (primary?.status === "running") return primary;
+  if (secondary?.status === "running") return secondary;
+  if (primary?.status === "failed") return primary;
+  if (secondary?.status === "failed") return secondary;
+  return primary ?? secondary;
 }
 
 /** Disk truth for an artifact, from the state's stat-based presence map. */
