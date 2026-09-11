@@ -11,6 +11,7 @@
 import type { StreamRepository, StreamMetadataRepository, FileSystemPort } from "@/application/ports/outbound.ts";
 import { DownloadOrchestrator, type DownloadState } from "@/adapters/outbound/vod/download-orchestrator.ts";
 import { resolveQualities, pickProxyQuality, pickBestQuality, extractVodId, type HlsQuality } from "@/adapters/outbound/vod/hls.ts";
+import { artifactName, indexPathFor, LEGACY_NAMES, streamSlug } from "@/application/use-cases/artifact-naming.ts";
 
 export class MediaActionsUseCase {
   /** Live piece downloads by stream — DELETE /download aborts these too. */
@@ -86,13 +87,32 @@ export class MediaActionsUseCase {
     // the same file in single-download mode — that is fine, it is one file).
     if (state.hqPath) videoPaths.add(state.hqPath);
     if (state.hqMp4) videoPaths.add(state.hqMp4);
-    // In two-file mode the video is `hq.*`; the proxy is never touched.
+    // In two-file mode the video is its own artifact; the proxy is never
+    // touched. Sweep every name the video may carry (project-named + all
+    // legacy boilerplate) INCLUDING the index sidecar — a leftover
+    // `.fragments` is exactly the reported "video.fragments remains".
     const dir = await this.artifactDir(streamId);
     if (dir && state.includeProxy) {
-      for (const name of ["hq.mp4", "hq.fragments", "hq.ts", "hq.chunks"]) {
+      const names = [
+        ...LEGACY_NAMES.video, ...LEGACY_NAMES["video-index"],
+      ];
+      const streamForSlug = await this.streams.findById(streamId);
+      if (streamForSlug) {
+        const slug = streamSlug({
+          id: streamId,
+          title: streamForSlug.title,
+          streamer: streamForSlug.streamer,
+        });
+        names.push(artifactName("video", slug), artifactName("video-index", slug));
+      }
+      for (const name of names) {
         const p = `${dir}/${name}`;
         if (await this.fs.exists(p)) videoPaths.add(p);
       }
+    }
+    // The index always dies with its media, whatever it was named.
+    for (const p of [...videoPaths]) {
+      if (p.endsWith(".mp4")) videoPaths.add(indexPathFor(p));
     }
     // Legacy single-file projects recorded the video as vodPath, but ONLY
     // when no separate proxy file exists.
@@ -132,8 +152,16 @@ export class MediaActionsUseCase {
     if (!dir) return { deleted: false };
     // The proxy is one fragmented MP4 plus its fragment index; legacy
     // runs may have left a .ts/.chunks pair or scrub.* names.
-    const candidates = ["proxy.mp4", "proxy.fragments", "proxy.ts", "proxy.chunks",
-                        "scrub.mp4", "scrub.ts", "scrub.chunks"];
+    const candidates = [...LEGACY_NAMES.proxy, ...LEGACY_NAMES["proxy-index"]];
+    const streamForSlug = await this.streams.findById(streamId);
+    if (streamForSlug) {
+      const slug = streamSlug({
+        id: streamId,
+        title: streamForSlug.title,
+        streamer: streamForSlug.streamer,
+      });
+      candidates.push(artifactName("proxy", slug), artifactName("proxy-index", slug));
+    }
     let removed = false;
     for (const name of candidates) {
       const path = `${dir}/${name}`;
@@ -246,9 +274,11 @@ export class MediaActionsUseCase {
     let quality: HlsQuality | null = null;
     if (opts.kind !== "chat") {
       const qualities = await resolveQualities(vodId);
+      const mainVideo = pickBestQuality(qualities, opts.maxHeight ?? null);
       quality = opts.kind === "proxy"
-        ? pickProxyQuality(qualities, opts.proxyHeightCap ?? 540)
-        : pickBestQuality(qualities, opts.maxHeight ?? null);
+        // A proxy at the video's own resolution is a duplicate, not a preview.
+        ? pickProxyQuality(qualities, opts.proxyHeightCap ?? 540, mainVideo?.height ?? null)
+        : mainVideo;
       if (!quality) throw new Error("No qualities available for this VOD");
     }
 
@@ -261,6 +291,11 @@ export class MediaActionsUseCase {
         destDir: dir,
         kind: opts.kind,
         vodId,
+        slug: streamSlug({
+          id: opts.streamId,
+          title: stream.title ?? null,
+          streamer: stream.streamer ?? null,
+        }),
         quality: quality ?? undefined,
         signal: controller.signal,
       });

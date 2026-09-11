@@ -155,11 +155,32 @@ export function parseMasterPlaylist(text: string): HlsQuality[] {
  * lowest available becomes the proxy (the "no true proxy" case — the caller
  * treats the single download as both proxy and HQ).
  */
-export function pickProxyQuality(qualities: HlsQuality[], proxyHeightCap: number): HlsQuality | null {
+export function pickProxyQuality(
+  qualities: HlsQuality[],
+  proxyHeightCap: number,
+  /** The main video's height. The proxy must be BELOW it — a proxy at the
+   *  same resolution (or higher) is a duplicate of the video, not a preview. */
+  maxHeightExclusive: number | null = null,
+): HlsQuality | null {
   if (qualities.length === 0) return null;
   const byHeightAsc = [...qualities].sort((a, b) => a.height - b.height || a.bandwidth - b.bandwidth);
-  const candidates = byHeightAsc.filter((q) => q.height <= proxyHeightCap);
-  if (candidates.length === 0) return byHeightAsc[0] ?? null;
+  let candidates = byHeightAsc.filter((q) => q.height <= proxyHeightCap);
+  if (maxHeightExclusive !== null && maxHeightExclusive > 0) {
+    const below = candidates.filter((q) => q.height < maxHeightExclusive);
+    // Only apply the exclusion when something is left: a source whose lowest
+    // quality IS the max must still yield a proxy rather than fail.
+    if (below.length > 0) candidates = below;
+  }
+  if (candidates.length === 0) {
+    // Nothing at or below the cap: the smallest available quality is the only
+    // sensible proxy, and only if it is genuinely below the video.
+    const smallest = byHeightAsc[0] ?? null;
+    if (smallest && maxHeightExclusive !== null && maxHeightExclusive > 0
+        && smallest.height >= maxHeightExclusive) {
+      return null;
+    }
+    return smallest;
+  }
   return candidates.sort((a, b) => b.height - a.height || b.fps - a.fps)[0] ?? null;
 }
 

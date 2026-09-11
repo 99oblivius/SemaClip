@@ -85,6 +85,13 @@
   const view = $derived(viewFor(downloads.data?.views, stream.id));
   const mediaBusy = $derived(Boolean(view?.active));
 
+  /** Resolutions a proxy may use: strictly BELOW the video's resolution —
+   *  a proxy at the video's own quality is a duplicate, not a preview. */
+  const proxyChoices = $derived.by(() => {
+    const videoHeight = hqHeight ?? (qualityList.length > 0 ? Math.max(...qualityList.map((q) => q.height)) : null);
+    return qualityList.filter((q) => videoHeight === null || q.height < videoHeight);
+  });
+
   /** Artifact rows in display order, straight from the view. */
   const artifacts = $derived<ArtifactView[]>(view?.artifacts ?? []);
   const chatArt = $derived(artifacts.find((a) => a.kind === 'chat'));
@@ -125,6 +132,7 @@
   }
   function startPiece(kind: 'proxy' | 'video' | 'chat') {
     pendingPiece = kind;
+    if (kind === 'proxy' && proxyHeight === null) return; // — none — selected
     pieceMutation.mutate(
       kind === 'proxy'
         ? { kind: 'proxy', proxyHeightCap: proxyHeight ?? 540 }
@@ -373,13 +381,14 @@
                     <Icon name="check" size={11} /> on disk
                   </span>
                 {:else}
-                  {#if art.kind === 'proxy' && qualityList.length > 0}
+                  {#if art.kind === 'proxy' && proxyChoices.length > 0}
                     <select
                       bind:value={proxyHeight}
                       class="rounded border border-border bg-surface-2 px-1.5 py-1 text-[10px] text-ink focus:border-accent focus:outline-none"
                       aria-label="Proxy resolution"
                     >
-                      {#each qualityList as q (q.name)}
+                      <option value={null}>— none —</option>
+                      {#each proxyChoices as q (q.name)}
                         <option value={q.height}>{q.name}</option>
                       {/each}
                     </select>

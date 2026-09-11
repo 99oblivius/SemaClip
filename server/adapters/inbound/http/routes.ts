@@ -695,6 +695,21 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
             return;
           }
 
+          // Media duration is needed both for cache staleness and for the
+          // waveform extent — probe it before deciding to trust the cache.
+          const probe = new Deno.Command("ffprobe", {
+            args: ["-v", "quiet", "-print_format", "json", "-show_format", mediaPath],
+            stdout: "piped", stderr: "piped",
+          });
+          const probeOut = await probe.output();
+          const probeInfo = JSON.parse(new TextDecoder().decode(probeOut.stdout));
+          const mediaDuration = parseFloat(probeInfo.format?.duration ?? "0");
+          if (!mediaDuration) {
+            send({ error: "Cannot determine duration" });
+            close();
+            return;
+          }
+
           // ── Cache check: if waveform was already computed, serve instantly. ──
           // Staleness: old caches had a fixed 2000 peaks. Per-second resolution
           // needs totalPeaks >= duration. If stale, fall through to recompute.
@@ -707,6 +722,11 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
               if (cachedData.totalPeaks < cachedData.duration) {
                 // Stale low-res cache — recompute at per-second resolution.
                 throw new Error("stale cache");
+              }
+              // A cache computed while the download was still running covers
+              // only part of the media; once the file is longer, recompute.
+              if ((cachedData.duration || 0) < mediaDuration) {
+                throw new Error("stale partial cache");
               }
               send({ duration: cachedData.duration, totalPeaks: cachedData.totalPeaks });
               for (let i = 0; i < cachedData.peaks.length; i += BATCH_SIZE) {
@@ -723,21 +743,22 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
           }
 
           // ── Cache miss: compute from ffmpeg. ──
-          // 1. Get duration.
-          const probe = new Deno.Command("ffprobe", {
-            args: ["-v", "quiet", "-print_format", "json", "-show_format", mediaPath],
-            stdout: "piped", stderr: "piped",
-          });
-          const probeOut = await probe.output();
-          const info = JSON.parse(new TextDecoder().decode(probeOut.stdout));
-          const duration = parseFloat(info.format?.duration ?? "0");
-          if (!duration) {
-            send({ error: "Cannot determine duration" });
-            close();
-            return;
-          }
-          const totalPeaks = Math.max(1, Math.ceil(duration * TARGET_PEAKS_PER_SEC));
-          send({ duration, totalPeaks });
+          const duration = mediaDuration;
+          // While a download is running, the file is still growing: only the
+          // bytes already written can be decoded. Report the media extent as
+          // the downloaded frontier so the waveform covers exactly what
+          // exists instead of stretching across the whole timeline (the
+          // reported "displays itself across the entire timeline").
+          const dlState = await deps.downloadState(streamId);
+          const downloading = dlState.phase === "running";
+          const frontierSec = downloading
+            ? Math.max(0, dlState.proxyFrontierSec || 0)
+            : duration;
+          const extent = downloading && frontierSec > 0
+            ? Math.min(duration, frontierSec)
+            : duration;
+          const totalPeaks = Math.max(1, Math.ceil(extent * TARGET_PEAKS_PER_SEC));
+          send({ duration, totalPeaks, extentSec: extent, downloading });
 
           // 2. Compute peaks per bucket and priority region.
           const samplesPerPeak = Math.max(1, Math.floor(SAMPLE_RATE / TARGET_PEAKS_PER_SEC));
@@ -751,7 +772,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
           for await (const batch of streamPeaks(
             mediaPath,
             aroundIndex * peakTime,
-            null,
+            downloading ? Math.max(0, extent - aroundIndex * peakTime) : null,
             aroundIndex,
             samplesPerPeak,
           )) {
@@ -781,8 +802,10 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
 
           if (!closed) send({ done: true });
 
-          // Only cache if we received all peaks (client didn't disconnect early).
-          if (!closed && allPeaks.every((v) => v >= 0)) {
+          // Cache only a COMPLETE waveform — a mid-download partial must not
+          // be cached, or it would persist after the video finished (the
+          // reported "did not regenerate when the video completed").
+          if (!closed && !downloading && allPeaks.every((v) => v >= 0)) {
             await deps.storage.ensureStreamDirs(streamId);
             const cachePath = deps.storage.artifactPath(streamId, "waveform.json");
             await Deno.writeTextFile(cachePath, JSON.stringify({ duration, totalPeaks, peaks: allPeaks }));

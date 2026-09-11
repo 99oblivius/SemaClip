@@ -10,6 +10,7 @@ import type { ImportByFileInput, ImportByUrlInput, ImportResult, Stream } from "
 import { createStream } from "@/domain/mod.ts";
 import type { DownloadOrchestrator } from "@/adapters/outbound/vod/download-orchestrator.ts";
 import { fetchVodMeta, extractVodId } from "@/adapters/outbound/vod/hls.ts";
+import { streamSlug } from "@/application/use-cases/artifact-naming.ts";
 
 export class ImportStreamByFileUseCase {
   constructor(
@@ -140,10 +141,16 @@ export class ImportStreamByUrlUseCase {
     controller: AbortController,
     resume: boolean,
   ): Promise<void> {
+    const stream = await this.streams.findById(streamId);
     const result = await this.orchestrator!.run({
       streamId,
       sourceUrl: input.url,
       destDir,
+      slug: streamSlug({
+        id: streamId,
+        title: stream?.title ?? input.title ?? null,
+        streamer: stream?.streamer ?? null,
+      }),
       proxyHeightCap: input.proxyHeightCap ?? 540,
       maxQualityHeight: input.maxQualityHeight ?? null,
       // Proxy-first (two files: 540p then HQ) is the opt-in — default is a

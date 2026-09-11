@@ -83,13 +83,40 @@
   let waveformPeaks = $state<number[]>([]);
   let waveformDuration = $state(0);
   let waveformTotalPeaks = $state(0);
+  /** Media seconds the waveform actually covers (the download frontier while
+   *  a download runs, the full duration once complete). */
+  let waveformExtent = $state(0);
+  let waveformDownloading = $state(false);
 
   // Fetch waveform once on mount. The server caches the computed peaks,
   // so there's no need to reconnect on seek — all peaks arrive in one stream.
   let readerRef: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
+  // Re-run the waveform fetch when the download's frontier advances (so the
+  // waveform GROWS as fragments land) and once more when it completes (so a
+  // partial waveform is replaced by the full one).
+  let waveformGen = $state(0);
+  let lastFrontierSec = -1;
+  let lastPhase = '';
+  $effect(() => {
+    const v = dlView;
+    if (!v) return;
+    const frontier = Math.floor(v.media.frontierSec ?? 0);
+    const phase = v.phase;
+    const grew = frontier > lastFrontierSec + 30;   // every ~30s of new media
+    const finished = phase === 'done' && lastPhase !== 'done';
+    if ((v.active && grew) || finished) {
+      lastFrontierSec = frontier;
+      lastPhase = phase;
+      waveformGen++;
+    } else if (!v.active) {
+      lastPhase = phase;
+    }
+  });
+
   $effect(() => {
     if (!streamId) return;
+    waveformGen;   // dependency: re-fetch when the generation changes
     const ctrl = new AbortController();
 
     (async () => {
@@ -123,6 +150,8 @@
               if (!line.startsWith('data: ')) continue;
               try {
                 const data = JSON.parse(line.slice(6));
+                if (data.extentSec !== undefined) waveformExtent = data.extentSec;
+                if (data.downloading !== undefined) waveformDownloading = data.downloading;
                 if (data.totalPeaks) {
                   totalPeaks = data.totalPeaks;
                   if (acc.length < totalPeaks) {
@@ -278,6 +307,10 @@
 
     if (waveform.some((v) => v >= 0)) {
       const totalPeaks = waveformTotalPeaks || waveform.length;
+      // While a download is running, the waveform only covers the downloaded
+      // extent — drawing past it would stretch partial data across the whole
+      // timeline (the reported bug).
+      const coveredSec = waveformExtent > 0 ? Math.min(waveformExtent, duration) : duration;
       // Peak i holds max amplitude of second [i, i+1). Drawn at bucket END
       // (time i+1) so the bar appears after the audio it represents.
       const peakDur = duration / totalPeaks;
@@ -289,6 +322,7 @@
       const ampH = h * 0.35;
       for (let b = 0; b < numBars; b++) {
         const barTime = viewStart + b * secPerBar;
+        if (barTime >= coveredSec) continue;   // not downloaded yet
         // Peak whose bucket ENDS at barTime: index = barTime/peakDur - 1.
         // Range of peaks whose end-time falls in [barTime, barTime+secPerBar).
         const s = Math.max(0, Math.floor(barTime / peakDur) - 1);

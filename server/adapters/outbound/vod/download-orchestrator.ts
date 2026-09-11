@@ -26,6 +26,7 @@ import {
 import { downloadChat } from "./chat-fetch.ts";
 import { remuxToMp4, mp4Twin } from "./remux.ts";
 import { downloadFmp4 } from "./fmp4-download.ts";
+import { artifactName, indexPathFor, LEGACY_NAMES } from "@/application/use-cases/artifact-naming.ts";
 
 export type DownloadPartKind = "chat" | "markers" | "proxy" | "hq";
 export type DownloadPartStatus = "pending" | "running" | "done" | "failed" | "skipped";
@@ -361,6 +362,8 @@ export class DownloadOrchestrator {
     destDir: string;
     kind: "proxy" | "hq" | "chat";
     vodId: string;
+    /** Project slug for artifact filenames. */
+    slug: string;
     quality?: HlsQuality | undefined;   // video pieces
     signal?: AbortSignal | undefined;
   }): Promise<void> {
@@ -371,12 +374,13 @@ export class DownloadOrchestrator {
     this.liveStates.set(opts.streamId, await this.getState(opts.streamId));
     this.markRunLive(opts.streamId, true);
     if (opts.kind === "chat") {
-      await this.runChatPiece({ streamId: opts.streamId, destDir: opts.destDir, vodId: opts.vodId, signal: opts.signal });
+      await this.runChatPiece({ streamId: opts.streamId, destDir: opts.destDir, vodId: opts.vodId, slug: opts.slug, signal: opts.signal });
     } else {
       await this.runVideoPiece({
         streamId: opts.streamId,
         destDir: opts.destDir,
         kind: opts.kind,
+        slug: opts.slug,
         quality: opts.quality!,
         signal: opts.signal,
       });
@@ -405,6 +409,7 @@ export class DownloadOrchestrator {
     streamId: string;
     destDir: string;
     kind: "proxy" | "hq";
+    slug: string;
     quality: HlsQuality;
     signal?: AbortSignal | undefined;
   }): Promise<void> {
@@ -420,11 +425,12 @@ export class DownloadOrchestrator {
     delete (part as Partial<PartRuntime>).error;
     await this.persist(opts.streamId, started, rt);
 
-    // One growing fragmented MP4 per kind — no .ts, no twin, no mid-run
-    // remux (a mid-run remux used to overwrite a previous download's
-    // COMPLETE twin with a partial one and destroy the playable artifact).
-    const mp4Path = `${opts.destDir}/${kind}.mp4`;
-    const indexPath = `${opts.destDir}/${kind}.fragments`;
+    // One growing fragmented MP4 per artifact role. The `hq` kind IS the
+    // main video, so it writes the video artifact's name — not "hq.mp4",
+    // which left the project with a second, differently-named video file.
+    const role = kind === "proxy" ? "proxy" : "video";
+    const mp4Path = `${opts.destDir}/${artifactName(role, opts.slug)}`;
+    const indexPath = `${opts.destDir}/${artifactName(role === "proxy" ? "proxy-index" : "video-index", opts.slug)}`;
     let lastWrite = 0;
     try {
       await downloadFmp4(opts.quality.playlistUrl, mp4Path, {
@@ -481,9 +487,10 @@ export class DownloadOrchestrator {
     streamId: string;
     destDir: string;
     vodId: string;
+    slug: string;
     signal?: AbortSignal | undefined;
   }): Promise<void> {
-    const chatPath = `${opts.destDir}/chat.json`;
+    const chatPath = `${opts.destDir}/${artifactName("chat", opts.slug)}`;
     const controller = new AbortController();
     if (opts.signal) opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
 
@@ -572,6 +579,8 @@ export class DownloadOrchestrator {
     streamId: string;
     sourceUrl: string;
     destDir: string;
+    /** Project slug for artifact filenames (see artifact-naming.ts). */
+    slug: string;
     /** Quality picks are resolved here; includeProxy=false → single download. */
     proxyHeightCap: number;
     maxQualityHeight: number | null;
@@ -619,7 +628,7 @@ export class DownloadOrchestrator {
 
     // ── Part 1: chat (GQL, page-by-page) — skipped entirely when the file
     // already exists (resume: chat is immutable per VOD). ──
-    const chatPath = `${opts.destDir}/chat.json`;
+    const chatPath = `${opts.destDir}/${artifactName("chat", opts.slug)}`;
     if (opts.resume && await this.fileExists(chatPath)) {
       try {
         const parsed = JSON.parse(await Deno.readTextFile(chatPath)) as { comments?: unknown[] };
@@ -688,8 +697,10 @@ export class DownloadOrchestrator {
     }
     state.qualities = qualities.map((q) => ({ name: q.name, width: q.width, height: q.height }));
 
-    const proxy = pickProxyQuality(qualities, opts.proxyHeightCap);
     const hq = pickBestQuality(qualities, opts.maxQualityHeight);
+    // The proxy must sit BELOW the video's resolution — a proxy at the same
+    // resolution is a duplicate of the video, not a preview.
+    const proxy = pickProxyQuality(qualities, opts.proxyHeightCap, hq?.height ?? opts.maxQualityHeight ?? null);
 
     // ── Single-download case: no proxy opt-in, no proxy pick, or proxy IS
     // already the max quality — one download serves both roles. ──
@@ -700,8 +711,8 @@ export class DownloadOrchestrator {
         // no remux, and crucially no second artifact aliasing this file
         // (the old model set hqPath = proxyPath, so the HQ row's trash
         // deleted the proxy's media and both rows lost their bytes).
-        const videoPath = `${opts.destDir}/video.mp4`;
-        const indexPath = `${opts.destDir}/video.fragments`;
+        const videoPath = `${opts.destDir}/${artifactName("video", opts.slug)}`;
+        const indexPath = `${opts.destDir}/${artifactName("video-index", opts.slug)}`;
         const resumeSec = opts.resume ? Math.floor(await this.fileSeconds(videoPath)) : 0;
         // Mark the part running BEFORE the first chunk: a part left
         // "pending" while bytes land makes the UI show a pending row next to
@@ -756,8 +767,8 @@ export class DownloadOrchestrator {
     // to proxy.mp4; the fragment index sidecar lets the media route clamp
     // Range responses to a complete fragment (a mid-fragment clamp makes
     // Chromium die with PIPELINE_ERROR_DECODE).
-    const proxyMp4Path = `${opts.destDir}/proxy.mp4`;
-    const proxyIndexPath = `${opts.destDir}/proxy.fragments`;
+    const proxyMp4Path = `${opts.destDir}/${artifactName("proxy", opts.slug)}`;
+    const proxyIndexPath = `${opts.destDir}/${artifactName("proxy-index", opts.slug)}`;
     const proxyResume = opts.resume ? Math.floor(await this.fileSeconds(proxyMp4Path)) : 0;
     rt.get("proxy")!.status = "running";
     await this.persist(opts.streamId, state, rt);
@@ -803,8 +814,8 @@ export class DownloadOrchestrator {
     }
     if (hq && hq.name !== proxy.name) {
       rt.get("hq")!.status = "running";
-      const hqMp4Path = `${opts.destDir}/hq.mp4`;
-      const hqIndexPath = `${opts.destDir}/hq.fragments`;
+      const hqMp4Path = `${opts.destDir}/${artifactName("video", opts.slug)}`;
+      const hqIndexPath = `${opts.destDir}/${artifactName("video-index", opts.slug)}`;
       const hqResume = opts.resume ? Math.floor(await this.fileSeconds(hqMp4Path)) : 0;
       try {
         await downloadFmp4(hq.playlistUrl, hqMp4Path, {
@@ -856,12 +867,42 @@ export class DownloadOrchestrator {
     // may still be the playable file.
     const keepTs = [state.proxyPath, state.hqPath].some((p) => p?.endsWith(".ts"));
     if (keepTs) return;
-    const victims = ["proxy.ts", "hq.ts", "video.ts", "scrub.ts",
-                     "proxy.chunks", "hq.chunks", "video.chunks", "scrub.chunks",
-                     "scrub.mp4", "proxy.mp4.part"];
+    const victims = new Set<string>([
+      "proxy.ts", "hq.ts", "video.ts", "scrub.ts",
+      "proxy.chunks", "hq.chunks", "video.chunks", "scrub.chunks",
+      "scrub.mp4", "proxy.mp4.part",
+      // Legacy boilerplate media + their indexes. A project-named artifact is
+      // what survives; these are dead once the download completes.
+      ...LEGACY_NAMES.proxy, ...LEGACY_NAMES.video,
+      ...LEGACY_NAMES["proxy-index"], ...LEGACY_NAMES["video-index"],
+    ]);
+    // Never delete a file the state currently points at.
+    const keep = new Set(
+      [state.proxyPath, state.hqPath, state.proxyMp4, state.hqMp4, state.chatPath]
+        .filter((p): p is string => Boolean(p)),
+    );
     for (const dir of dirs) {
       for (const name of victims) {
-        await Deno.remove(`${dir}/${name}`).catch(() => {});
+        const path = `${dir}/${name}`;
+        if (keep.has(path)) continue;
+        await Deno.remove(path).catch(() => {});
+      }
+    }
+    // An index with no media beside it is always dead weight.
+    for (const dir of dirs) {
+      let names: string[] = [];
+      try {
+        names = [...Deno.readDirSync(dir)].filter((e) => e.isFile).map((e) => e.name);
+      } catch {
+        continue;
+      }
+      for (const name of names) {
+        if (!name.endsWith(".fragments")) continue;
+        const media = `${dir}/${name.replace(/\.fragments$/, ".mp4")}`;
+        if (keep.has(media)) continue;
+        if (!names.includes(name.replace(/\.fragments$/, ".mp4"))) {
+          await Deno.remove(`${dir}/${name}`).catch(() => {});
+        }
       }
     }
   }
