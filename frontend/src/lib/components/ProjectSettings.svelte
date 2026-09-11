@@ -5,7 +5,9 @@
   import ConfirmModal from './ConfirmModal.svelte';
   import DeleteConfirmModal from './DeleteConfirmModal.svelte';
   import type { Stream } from '$shared/types';
-  import type { DownloadState, QualityInfo } from '$lib/api/download';
+  import type { ArtifactView, DownloadView, QualityInfo } from '$lib/api/download';
+  import { fmtBytes as fmtBytesShared } from '$lib/api/download';
+  import { DOWNLOADS_KEY, downloadsQuery, viewFor } from '$lib/api/downloads';
 
   interface Props {
     stream: Stream;
@@ -62,32 +64,20 @@
 
   let saved = $state(false);
 
-  // ── Media section: download state + per-artifact actions ──
-  const downloadQuery = createQuery(() => ({
-    queryKey: ['download', stream.id],
-    queryFn: () => apiClient.getDownloadState(stream.id),
-    refetchInterval: 1000,
-    enabled: open && Boolean(stream.sourceUrl),
-  }));
-  const dlState = $derived(downloadQuery.data as DownloadState | undefined);
-  const mediaBusy = $derived(dlState?.phase === 'running');
+  // ── Media section ──
+  // Rows render the SERVER's composed view verbatim. Nothing here derives
+  // "is it on disk", "is a download happening" or "what size" — those local
+  // derivations are exactly what produced the reported inconsistencies
+  // (instant checkmarks, sizes on the wrong row, no bar while downloading).
+  const downloads = downloadsQuery();
+  const view = $derived(viewFor(downloads.data?.views, stream.id));
+  const mediaBusy = $derived(Boolean(view?.active));
 
-  // Per-artifact presence: proxy + HQ come from the download state, chat
-  // from the stream record (present for file imports too).
-  // Presence = disk truth from the server (stat-based), never state paths.
-  const hasHq = $derived(Boolean(dlState?.presence?.hq?.onDisk) || Boolean(vodPath));
-  const hasProxy = $derived(Boolean(dlState?.presence?.proxy?.onDisk));
-  const hasChat = $derived(Boolean(dlState?.presence?.chat?.onDisk) || Boolean(chatPath));
-  // Size labels from real stat bytes; while a part runs, the growing size
-  // comes from the part's own byte tracking (files mid-write stat too).
-  const presenceBytes = $derived.by(() => {
-    const p = dlState?.presence;
-    return {
-      hq: p?.hq?.onDisk ? p.hq.bytes : 0,
-      proxy: p?.proxy?.onDisk ? p.proxy.bytes : 0,
-      chat: p?.chat?.onDisk ? p.chat.bytes : 0,
-    };
-  });
+  /** Artifact rows in display order, straight from the view. */
+  const artifacts = $derived<ArtifactView[]>(view?.artifacts ?? []);
+  const chatArt = $derived(artifacts.find((a) => a.kind === 'chat'));
+  const proxyArt = $derived(artifacts.find((a) => a.kind === 'proxy'));
+  const videoArt = $derived(artifacts.find((a) => a.kind === 'video'));
 
   // Per-piece quality selection: proxy defaults 540, HQ defaults source max.
   // Resolved from the download state's quality list; fetched lazily when the
@@ -96,10 +86,10 @@
   let hqHeight = $state<number | null>(null);
   let qualityList = $state<QualityInfo[]>([]);
   const cancelPieceMutation = createMutation(() => ({
-    mutationFn: (kind: 'proxy' | 'hq' | 'chat') => apiClient.cancelPiece(stream.id, kind),
+    mutationFn: (kind: 'proxy' | 'video' | 'chat') => apiClient.cancelPiece(stream.id, pieceKind(kind)),
     onSuccess: () => {
       pendingPiece = null;
-      queryClient.invalidateQueries({ queryKey: ['download', stream.id] });
+      queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
       queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
     },
   }));
@@ -110,17 +100,23 @@
         proxyHeightCap: input.proxyHeightCap ?? null,
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['download', stream.id] });
+      queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
       queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
     },
   }));
-  let pendingPiece = $state<'proxy' | 'hq' | 'chat' | null>(null);
-  function startPiece(kind: 'proxy' | 'hq' | 'chat') {
+  let pendingPiece = $state<'proxy' | 'video' | 'chat' | null>(null);
+  /** The server's piece kinds still speak hq/proxy; the view speaks video. */
+  function pieceKind(kind: 'proxy' | 'video' | 'chat'): 'proxy' | 'hq' | 'chat' {
+    return kind === 'video' ? 'hq' : kind;
+  }
+  function startPiece(kind: 'proxy' | 'video' | 'chat') {
     pendingPiece = kind;
     pieceMutation.mutate(
       kind === 'proxy'
-        ? { kind, proxyHeightCap: proxyHeight ?? 540 }
-        : { kind, maxHeight: hqHeight },
+        ? { kind: 'proxy', proxyHeightCap: proxyHeight ?? 540 }
+        : kind === 'video'
+          ? { kind: 'hq', maxHeight: hqHeight }
+          : { kind: 'chat' },
     );
   }
   // Fetch the quality list once when the modal opens on a URL stream.
@@ -135,41 +131,30 @@
       })
       .catch(() => {});
   });
-  // Piece live progress from the polled download state (1s refresh).
-  const pieceProgress = $derived.by(() => {
-    if (!dlState) return null;
-    const kind = pendingPiece;
-    if (!kind || kind === 'chat') return null;
-    const part = dlState.parts.find((p) => p.kind === kind);
-    if (!part || part.status !== 'running') return null;
-    return { kind, percent: part.percent, frontier: part.downloadedSec ?? 0 };
-  });
-
+  // Progress comes from the view's artifact rows; the pending marker only
+  // covers the in-flight window before the server reports the run.
   function fmtPieceTime(sec: number): string {
     const h = Math.floor(sec / 3600);
     const m = Math.floor((sec % 3600) / 60);
     return h > 0 ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m`;
   }
 
-  function fmtBytes(bytes: number): string {
-    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)}GB`;
-    if (bytes >= 1024 ** 2) return `${Math.round(bytes / 1024 ** 2)}MB`;
-    return `${Math.round(bytes / 1024)}KB`;
-  }
+  const fmtBytes = fmtBytesShared;
 
-  // Clear the pending marker when the piece reaches a terminal status.
+  // Clear the optimistic marker once the server reports the run (running) or
+  // a terminal status. A REJECTED piece must not silently resolve: the
+  // mutation's error is rendered inline instead.
   $effect(() => {
-    if (!pendingPiece || !dlState) return;
-    const part = dlState.parts.find((p) => p.kind === pendingPiece);
-    if (part && part.status !== 'running') pendingPiece = null;
-    if (!mediaBusy && pendingPiece === 'chat') pendingPiece = null;
+    if (!pendingPiece) return;
+    const art = artifacts.find((a) => a.kind === pendingPiece);
+    if (art && art.status !== 'pending') pendingPiece = null;
   });
 
   // ── Trash confirmations: one modal shared by the three artifact rows ──
-  type TrashTarget = 'hq' | 'proxy' | 'chat';
+  type TrashTarget = 'video' | 'proxy' | 'chat';
   let trashTarget = $state<TrashTarget | null>(null);
   const TRASH_LABELS: Record<TrashTarget, string> = {
-    hq: 'the video file',
+    video: 'the video file',
     proxy: 'the proxy video',
     chat: 'the chat file',
   };
@@ -177,7 +162,7 @@
   const deleteProxyMutation = createMutation(() => ({
     mutationFn: () => apiClient.deleteProxy(stream.id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['download', stream.id] });
+      queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
       queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
     },
   }));
@@ -194,10 +179,10 @@
   // HQ trash: deletes ONLY the video (hq.ts/.mp4 + chunk map). Proxy and
   // chat stay untouched (deleteDownload nukes everything — that's the
   // Download-section Delete, not this row's trash).
-  const deleteHqMutation = createMutation(() => ({
+  const deleteVideoMutation = createMutation(() => ({
     mutationFn: () => apiClient.deleteVideo(stream.id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['download', stream.id] });
+      queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
       queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
       vodPath = '';
     },
@@ -207,7 +192,7 @@
     if (!trashTarget) return;
     if (trashTarget === 'proxy') deleteProxyMutation.mutate();
     else if (trashTarget === 'chat') deleteChatMutation.mutate();
-    else deleteHqMutation.mutate();
+    else deleteVideoMutation.mutate();
     trashTarget = null;
   }
 
@@ -330,28 +315,27 @@
             </button>
           </div>
 
-          {#each [
-              { key: 'hq', label: 'Video (HQ)', has: hasHq, running: pendingPiece === 'hq', part: dlState?.parts.find((p) => p.kind === 'hq') },
-              { key: 'proxy', label: 'Proxy video', has: hasProxy, running: pendingPiece === 'proxy', part: dlState?.parts.find((p) => p.kind === 'proxy') },
-              { key: 'chat', label: 'Chat', has: hasChat, running: pendingPiece === 'chat', part: dlState?.parts.find((p) => p.kind === 'chat') },
-            ] as row (row.key)}
+          <!-- One row per artifact, rendered from the server's view. A
+               single-download project has ONE video row (no proxy row),
+               because there is only one file. -->
+          {#each artifacts as art (art.kind)}
             <div class="flex flex-col gap-0.5">
               <div class="flex items-center gap-2">
-                <span class="w-24 shrink-0 font-mono text-xs text-ash">{row.label}</span>
-                {#if row.running}
+                <span class="w-24 shrink-0 font-mono text-xs text-ash">{art.label}</span>
+                {#if art.status === 'running'}
                   <button
                     class="flex items-center gap-1 rounded-md border border-accent px-2 py-1 text-xs text-accent transition-colors hover:border-error hover:text-error"
-                    onclick={() => cancelPieceMutation.mutate(row.key as 'proxy' | 'hq' | 'chat')}
+                    onclick={() => cancelPieceMutation.mutate(art.kind)}
                     title="Cancel this download (partial file is kept)"
                   >
                     <Icon name="close" size={11} /> Cancel
                   </button>
-                {:else if row.has}
+                {:else if art.onDisk}
                   <span class="flex items-center gap-1 font-mono text-[11px] text-success" title="On disk">
                     <Icon name="check" size={11} /> on disk
                   </span>
                 {:else}
-                  {#if row.key === 'proxy' && !row.has && qualityList.length > 0}
+                  {#if art.kind === 'proxy' && qualityList.length > 0}
                     <select
                       bind:value={proxyHeight}
                       class="rounded border border-border bg-surface-2 px-1.5 py-1 text-[10px] text-ink focus:border-accent focus:outline-none"
@@ -361,11 +345,11 @@
                         <option value={q.height}>{q.name}</option>
                       {/each}
                     </select>
-                  {:else if row.key === 'hq' && !row.has && qualityList.length > 0}
+                  {:else if art.kind === 'video' && qualityList.length > 0}
                     <select
                       bind:value={hqHeight}
                       class="rounded border border-border bg-surface-2 px-1.5 py-1 text-[10px] text-ink focus:border-accent focus:outline-none"
-                      aria-label="HQ resolution"
+                      aria-label="Video resolution"
                     >
                       {#each qualityList as q (q.name)}
                         <option value={q.height}>{q.name}</option>
@@ -374,47 +358,53 @@
                   {/if}
                   <button
                     class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
-                    onclick={() => startPiece(row.key as 'proxy' | 'hq' | 'chat')}
+                    onclick={() => startPiece(art.kind)}
                     disabled={mediaBusy || pieceMutation.isPending || !streamLink.trim()}
                     title={streamLink.trim() ? 'Download from the stream link' : 'Set the stream link first'}
                   >
                     <Icon name="download" size={11} /> Download
                   </button>
                 {/if}
-                {#if row.key === 'chat' && hasChat && presenceBytes.chat > 0}
-                  <span class="font-mono text-[10px] text-ash-dim">{fmtBytes(presenceBytes.chat)}</span>
-                {:else if row.key !== 'chat' && row.has && row.part && row.part.downloadedBytes > 0}
-                  <span class="font-mono text-[10px] text-ash-dim">{fmtBytes(row.part.downloadedBytes)}</span>
+                {#if art.bytes > 0}
+                  <span class="font-mono text-[10px] text-ash-dim">{fmtBytes(art.bytes)}</span>
                 {/if}
                 <span class="flex-1"></span>
-                {#if row.has}
+                {#if art.removable && !mediaBusy}
                   <button
                     class="flex h-6 w-6 items-center justify-center rounded text-ash-dim transition-colors hover:text-error"
-                    onclick={() => (trashTarget = row.key as TrashTarget)}
-                    aria-label={`Delete ${row.label}`}
+                    onclick={() => (trashTarget = art.kind as TrashTarget)}
+                    aria-label={`Delete ${art.label}`}
                   >
                     <Icon name="trash" size={12} />
                   </button>
                 {/if}
               </div>
-              {#if row.running && row.part && row.part.status === 'running'}
+              {#if art.status === 'running'}
                 <div class="flex items-center gap-2 pl-[6.5rem]">
-                  {#if row.key === 'chat'}
+                  {#if art.kind === 'chat'}
                     <!-- GQL chat has no total: indeterminate pulse -->
                     <div class="h-1 flex-1 animate-pulse overflow-hidden rounded-full bg-accent/40"></div>
-                    <span class="font-mono text-[10px] text-ash-dim">{Math.floor((row.part.downloadedSec ?? 0))} comments</span>
+                    <span class="font-mono text-[10px] text-ash-dim">{Math.floor(art.frontierSec ?? 0)} comments</span>
                   {:else}
                     <div class="h-1 flex-1 overflow-hidden rounded-full bg-surface-3">
-                      <div class="h-full bg-accent transition-all" style="width: {row.part.percent * 100}%"></div>
+                      <div class="h-full bg-accent transition-all" style="width: {art.percent * 100}%"></div>
                     </div>
                     <span class="font-mono text-[10px] text-ash-dim">
-                      {row.part.downloadedBytes > 0 ? `${fmtBytes(row.part.downloadedBytes)} · ` : ''}{Math.round(row.part.percent * 100)}%
+                      {art.bytes > 0 ? `${fmtBytes(art.bytes)} · ` : ''}{Math.round(art.percent * 100)}%
                     </span>
                   {/if}
                 </div>
               {/if}
+              {#if art.error && art.status === 'failed'}
+                <p class="pl-[6.5rem] font-mono text-[10px] text-error">{art.error}</p>
+              {/if}
             </div>
           {/each}
+          {#if view?.media.previewOnly}
+            <p class="font-mono text-[10px] text-warning">
+              Only the proxy remains — exports are not possible until the video is re-downloaded.
+            </p>
+          {/if}
           {#if pieceMutation.isError}
             <p class="font-mono text-[10px] text-error">{pieceMutation.error?.message}</p>
           {/if}

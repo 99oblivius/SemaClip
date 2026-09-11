@@ -13,7 +13,7 @@ import type {
   Axis,
   StreamStatus,
 } from '$shared/types';
-import type { DownloadState, QualityInfo } from '$lib/api/download';
+import type { DownloadState, DownloadView, QualityInfo } from '$lib/api/download';
 
 export interface ChatMessage {
   t: number;       // content_offset_seconds
@@ -65,6 +65,10 @@ export const apiClient = {
 
   getDownloadState: (streamId: string) =>
     api<DownloadState>(`/streams/${streamId}/download`),
+
+  /** Every stream's composed download view — the single UI source. */
+  listDownloads: () =>
+    api<{ views: DownloadView[] }>('/downloads'),
 
   deleteDownload: (streamId: string) =>
     api<{ ok: boolean }>(`/streams/${streamId}/download`, { method: 'DELETE' }),

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { apiClient } from '$lib/api/client';
+  import { downloadsQuery, viewFor } from '$lib/api/downloads';
   import { playerStore, seek } from '$lib/stores/player';
   import Icon from '$lib/components/Icon.svelte';
   import VolumeControl from '$lib/components/VolumeControl.svelte';
@@ -104,21 +105,21 @@
     hls ? undefined : `${apiClient.videoUrl(streamId)}${reloadCount > 0 ? `?_r=${reloadCount}` : ''}`,
   );
 
-  /** How far the download has got, in bytes — polled, not inferred. */
-  async function pollFrontier() {
-    try {
-      const dl = await apiClient.getDownloadState(streamId);
-      if (dl.phase !== 'running') {
-        // Complete: the file is fully servable, no more reloads needed.
-        frontierBytes = Number.MAX_SAFE_INTEGER;
-        return;
-      }
-      frontierBytes = dl.presence?.proxy?.bytes ?? dl.presence?.hq?.bytes ?? 0;
-    } catch {
-      // Server unreachable — leave the frontier as-is; the stall handler
-      // simply won't reload.
+  // Frontier from the SHARED downloads query (one poller for the whole app).
+  const downloads = downloadsQuery();
+  const dlView = $derived(viewFor(downloads.data?.views, streamId));
+  $effect(() => {
+    const v = dlView;
+    if (!v) return;
+    if (!v.active) {
+      // Complete: the file is fully servable, no more reloads needed.
+      frontierBytes = Number.MAX_SAFE_INTEGER;
+      return;
     }
-  }
+    const video = v.artifacts.find((a) => a.kind === 'video');
+    const proxy = v.artifacts.find((a) => a.kind === 'proxy');
+    frontierBytes = video?.bytes ?? proxy?.bytes ?? 0;
+  });
 
   /** Reload the media at the current position to pick up newly written bytes. */
   function reloadMedia() {
@@ -149,7 +150,6 @@
     const id = setInterval(() => {
       const v = videoEl;
       if (!v) return;
-      void pollFrontier();
       if (v.paused || reloadInFlight) return;
       if (performance.now() - lastProgressTime < STALL_MS) return;
       // Only reload when there is genuinely new data to fetch — otherwise a

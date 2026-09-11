@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createQuery } from '@tanstack/svelte-query';
   import { apiClient } from '$lib/api/client';
+  import { downloadsQuery, viewFor } from '$lib/api/downloads';
   import { playerStore, setZoom } from '$lib/stores/player';
   import type { Clip } from '$shared/types';
   import { onMount, onDestroy } from 'svelte';
@@ -57,20 +58,15 @@
     playerStore.update((s) => ({ ...s, pendingSeek: m.t }));
   }
 
-  // ── Proxy frontier (P0-10 progressive): time beyond the downloaded extent
-  // renders as void — the video genuinely doesn't exist there yet. Polled at
-  // 1 Hz only while a download is running. ──
-  const downloadQuery = createQuery(() => ({
-    queryKey: ['download', streamId],
-    queryFn: () => apiClient.getDownloadState(streamId),
-    refetchInterval: 1000,
-    staleTime: 900,
-  }));
+  // ── Playback frontier: time beyond the downloaded extent renders as void —
+  // the media genuinely does not exist there yet. Read from the SHARED
+  // downloads query (no second poller). ──
+  const downloads = downloadsQuery();
+  const dlView = $derived(viewFor(downloads.data?.views, streamId));
   const proxyFrontier = $derived.by(() => {
-    const d = downloadQuery.data;
-    if (!d || d.phase === 'idle') return Infinity; // fully downloaded or legacy import
-    if (d.phase === 'done') return Infinity;
-    return d.proxyFrontierSec;
+    const v = dlView;
+    if (!v || v.phase === 'idle' || v.phase === 'done') return Infinity;
+    return v.media.frontierSec;
   });
 
   let canvasEl = $state<HTMLCanvasElement | undefined>(undefined);

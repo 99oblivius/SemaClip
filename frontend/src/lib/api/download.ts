@@ -60,3 +60,71 @@ export const PART_LABELS: Record<DownloadPartKind, string> = {
   proxy: 'Proxy',
   hq: 'High quality',
 };
+// ── Server-composed view model ──────────────────────────────────────────
+// The server composes these (application/view/download-view.ts). Components
+// render them verbatim — deriving "is a download happening", "is it on
+// disk", or "which file is shared" locally is what produced the reported
+// inconsistencies, so nothing here is re-computed in the UI.
+
+export type ArtifactKind = 'chat' | 'proxy' | 'video';
+
+export interface ArtifactView {
+  kind: ArtifactKind;
+  label: string;
+  status: DownloadPartStatus;
+  percent: number;
+  etaSec: number | null;
+  bytes: number;
+  frontierSec: number | null;
+  totalSec: number | null;
+  /** A COMPLETE artifact exists — never true while it is still running. */
+  onDisk: boolean;
+  path: string | null;
+  /** Other artifacts whose file IS this one (trash must respect it). */
+  sharedWith: ArtifactKind[];
+  error: string | null;
+  downloadable: boolean;
+  removable: boolean;
+}
+
+export interface DownloadView {
+  streamId: string;
+  phase: 'idle' | 'running' | 'done' | 'failed';
+  /** ANY download happening — the single flag the UI keys off. */
+  active: boolean;
+  /** Server-composed status line ("video · 42%", "download complete"). */
+  label: string;
+  overall: { percent: number; etaSec: number | null };
+  artifacts: ArtifactView[];
+  media: {
+    playablePath: string | null;
+    /** True when only the proxy remains — exports are impossible. */
+    previewOnly: boolean;
+    frontierSec: number;
+    durationSec: number | null;
+  };
+  metadata: {
+    markers: { t: number; label: string; source: string }[] | null;
+    chatCount: number;
+  };
+  revision: number;
+  updatedAt: string;
+}
+
+/** Bytes as a short human string. */
+export function fmtBytes(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)}GB`;
+  if (bytes >= 1024 ** 2) return `${Math.round(bytes / 1024 ** 2)}MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)}KB`;
+  return `${bytes}B`;
+}
+
+/** True when a download should be shown as progress (not satisfied). */
+export function isLive(view: DownloadView): boolean {
+  return view.active || view.phase === 'failed';
+}
+
+/** A download finished with a playable file — the Library row can drop it. */
+export function isSatisfied(view: DownloadView): boolean {
+  return view.phase === 'done' && Boolean(view.media.playablePath) && !view.active;
+}

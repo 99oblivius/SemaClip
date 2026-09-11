@@ -1,54 +1,42 @@
 <script lang="ts">
-  import { createQuery, createMutation, useQueryClient } from '@tanstack/svelte-query';
+  import { createMutation, useQueryClient } from '@tanstack/svelte-query';
   import { apiClient } from '$lib/api/client';
   import Icon from '$lib/components/Icon.svelte';
-  import { PART_LABELS, fmtEta, type DownloadPart } from '$lib/api/download';
+  import { fmtEta, fmtBytes, isLive, isSatisfied, type DownloadView } from '$lib/api/download';
+  import { DOWNLOADS_KEY, downloadsQuery, viewFor } from '$lib/api/downloads';
 
   interface Props {
     streamId: string;
-    /** Project title for the container label (user-reported: the Library
-     *  container had no information about which project it belongs to). */
+    /** Project title for the container label. */
     title?: string;
   }
 
   let { streamId, title = '' }: Props = $props();
   const queryClient = useQueryClient();
 
-  const stateQuery = createQuery(() => ({
-    queryKey: ['download', streamId],
-    queryFn: () => apiClient.getDownloadState(streamId),
-    refetchInterval: (q) => (q.state.data?.phase === 'running' ? 1000 : 5000),
-  }));
+  // The ONE download query — no per-component poller.
+  const downloads = downloadsQuery();
+  const view = $derived(viewFor(downloads.data?.views, streamId));
 
-  const dlState = $derived(stateQuery.data);
   let detailOpen = $state(false);
-  // Auto-expand ONCE on transition into running/failed — "what am I
-  // resuming?" surfaces itself, but the user can still collapse it (the
-  // previous version re-forced it open on every 1s poll).
-  let lastPhase = $state<string | null>(null);
+  // Auto-expand once on the transition into a live download, so "what am I
+  // resuming?" surfaces itself without a click — but the user can collapse
+  // it and it stays collapsed (a naive effect re-opened it on every poll).
+  let wasLive = $state(false);
   $effect(() => {
-    const phase = stateQuery.data?.phase ?? null;
-    if (phase !== lastPhase) {
-      if ((phase === 'running' || phase === 'failed') && lastPhase !== 'running' && lastPhase !== 'failed') {
-        detailOpen = true;
-      }
-      lastPhase = phase;
-    }
+    const live = view ? isLive(view) : false;
+    if (live && !wasLive) detailOpen = true;
+    wasLive = live;
   });
 
-  // Delete download: abort in-flight + remove artifacts + clear state.
   const deleteMutation = createMutation(() => ({
     mutationFn: () => apiClient.deleteDownload(streamId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['download', streamId] });
-      queryClient.invalidateQueries({ queryKey: ['streams'] });
-    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] }),
   }));
 
-  // Resume: picks up from the on-disk chunk prefix; only the tail re-fetches.
   const resumeMutation = createMutation(() => ({
     mutationFn: () => apiClient.resumeDownload(streamId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['download', streamId] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] }),
   }));
 
   function fmtTime(sec: number): string {
@@ -58,37 +46,12 @@
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   }
 
-  const phaseText = $derived.by(() => {
-    if (!dlState) return '';
-    switch (dlState.phase) {
-      case 'running': {
-        const proxy = dlState.parts.find((p) => p.kind === 'proxy');
-        const hq = dlState.parts.find((p) => p.kind === 'hq');
-        if (proxy?.status === 'running') return `proxy · ${fmtTime(dlState.proxyFrontierSec)} downloaded`;
-        if (hq?.status === 'running') return 'full quality downloading';
-        return 'downloading';
-      }
-      case 'done': return 'download complete';
-      case 'failed': {
-        const failed = dlState.parts.filter((p) => p.status === 'failed');
-        return `download interrupted: ${failed.map((f) => PART_LABELS[f.kind]).join(', ')}`;
-      }
-      default: return '';
-    }
-  });
-
-  // A download that finished honestly (video bytes complete) leaves the
-  // list — the stream itself is already in the library rows. A "done" phase
-  // with no playable twin is NOT complete (aborted proxy); it stays with
-  // resume/delete actions.
-  const satisfied = $derived(Boolean(
-    dlState?.phase === 'done' && (dlState.proxyMp4 || dlState.hqMp4) && dlState.proxyFrontierSec > 0,
-  ));
+  // A satisfied download leaves the list: the stream is in the library rows.
+  const show = $derived(Boolean(view && isLive(view) && !isSatisfied(view)));
 </script>
 
-{#if dlState && dlState.phase !== 'idle' && !satisfied}
+{#if show && view}
   <div class="rounded-md border border-border bg-surface px-3 py-2" role="status">
-    <!-- Single unified bar: click for the itemized popover -->
     <button
       class="flex w-full items-center gap-2.5 text-left"
       onclick={() => (detailOpen = !detailOpen)}
@@ -96,28 +59,28 @@
       aria-controls="download-detail"
     >
       <Icon
-        name={dlState.phase === 'failed' ? 'alert' : 'download'}
+        name={view.phase === 'failed' ? 'alert' : 'download'}
         size={14}
-        class={dlState.phase === 'failed' ? 'text-error' : 'text-accent'}
+        class={view.phase === 'failed' ? 'text-error' : 'text-accent'}
       />
       {#if title}
         <span class="max-w-40 shrink-0 truncate font-mono text-[10px] text-ash-dim" title={title}>{title}</span>
       {/if}
       <div class="min-w-0 flex-1">
         <div class="flex items-center justify-between gap-2 font-mono text-[10px]">
-          <span class="truncate {dlState.phase === 'failed' ? 'text-error' : 'text-ash'}">{phaseText}</span>
+          <span class="truncate {view.phase === 'failed' ? 'text-error' : 'text-ash'}">{view.label}</span>
           <span class="flex items-center gap-2 text-ash-dim">
-            {#if dlState.overall.etaSec !== null && dlState.phase === 'running'}
-              <span>ETA {fmtEta(dlState.overall.etaSec)}</span>
+            {#if view.overall.etaSec !== null && view.active}
+              <span>ETA {fmtEta(view.overall.etaSec)}</span>
             {/if}
-            <span>{Math.round(dlState.overall.percent * 100)}%</span>
+            <span>{Math.round(view.overall.percent * 100)}%</span>
             <Icon name={detailOpen ? 'chevron-left' : 'chevron-right'} size={10} class={detailOpen ? 'rotate-90' : '-rotate-90'} />
           </span>
         </div>
         <div class="mt-1 h-1 overflow-hidden rounded-full bg-surface-3">
           <div
-            class="h-full transition-all {dlState.phase === 'failed' ? 'bg-error' : 'bg-accent'}"
-            style="width: {dlState.overall.percent * 100}%"
+            class="h-full transition-all {view.phase === 'failed' ? 'bg-error' : 'bg-accent'}"
+            style="width: {view.overall.percent * 100}%"
           ></div>
         </div>
       </div>
@@ -125,36 +88,46 @@
 
     {#if detailOpen}
       <div id="download-detail" class="mt-2 flex flex-col gap-1.5 border-t border-border pt-2">
-        {#each dlState.parts as part (part.kind)}
+        {#each view.artifacts as art (art.kind)}
           <div class="flex items-center gap-2">
-            <span class="w-24 shrink-0 font-mono text-[10px] text-ash">{PART_LABELS[part.kind]}</span>
+            <span class="w-24 shrink-0 font-mono text-[10px] text-ash">{art.label}</span>
             <div class="h-0.5 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-3">
               <div
                 class="h-full transition-all
-                {part.status === 'failed' ? 'bg-error' : part.status === 'done' ? 'bg-success' : part.status === 'running' ? 'bg-accent' : 'bg-surface-3'}"
-                style="width: {part.percent * 100}%"
+                {art.status === 'failed' ? 'bg-error' : art.onDisk ? 'bg-success' : art.status === 'running' ? 'bg-accent' : 'bg-surface-3'}"
+                style="width: {art.percent * 100}%"
               ></div>
             </div>
-            <span class="w-16 shrink-0 text-right font-mono text-[10px] text-ash-dim">
-              {#if part.status === 'running' && part.etaSec !== null}
-                {fmtEta(part.etaSec)}
-              {:else if part.status === 'done'}
-                ✓
-              {:else if part.status === 'failed'}
-                <span class="text-error" title={part.error}>failed</span>
-              {:else if part.status === 'skipped'}
+            <span class="w-24 shrink-0 text-right font-mono text-[10px] text-ash-dim">
+              {#if art.status === 'running' && art.etaSec !== null}
+                {fmtEta(art.etaSec)}
+              {:else if art.status === 'running'}
+                {fmtBytes(art.bytes)}
+              {:else if art.onDisk}
+                ✓ {fmtBytes(art.bytes)}
+              {:else if art.status === 'failed'}
+                <span class="text-error" title={art.error ?? ''}>failed</span>
+              {:else if art.status === 'skipped'}
                 skipped
               {:else}
                 pending
               {/if}
             </span>
           </div>
-          {#if part.error && part.status === 'failed'}
-            <p class="pl-28 font-mono text-[10px] text-error/80">{part.error}</p>
+          {#if art.frontierSec !== null && art.status === 'running'}
+            <p class="pl-28 font-mono text-[10px] text-ash-dim">
+              {fmtTime(art.frontierSec)} downloaded{art.sharedWith.length > 0 ? ` · shared with ${art.sharedWith.join(', ')}` : ''}
+            </p>
+          {/if}
+          {#if art.error && art.status === 'failed'}
+            <p class="pl-28 font-mono text-[10px] text-error/80">{art.error}</p>
           {/if}
         {/each}
+        {#if view.media.previewOnly}
+          <p class="pl-1 font-mono text-[10px] text-warning">preview only — the video file is missing, exports are not possible</p>
+        {/if}
         <div class="mt-1 flex items-center justify-end gap-2">
-          {#if dlState.phase === 'failed'}
+          {#if view.phase === 'failed'}
             <button
               class="rounded border border-border px-2 py-0.5 text-[10px] text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
               onclick={() => resumeMutation.mutate()}

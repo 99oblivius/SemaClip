@@ -3,11 +3,22 @@
   import { apiClient } from '$lib/api/client';
   import Icon from '$lib/components/Icon.svelte';
   import DownloadProgress from '$lib/components/DownloadProgress.svelte';
+  import { downloadsQuery, viewFor } from '$lib/api/downloads';
+  import { isLive, isSatisfied } from '$lib/api/download';
   import { fadeIn, staggerIn, hoverLift } from '$lib/actions/gsap';
   import type { Stream, Job, ImportByUrlInput, ImportByFileInput } from '$shared/types';
   import type { QualityInfo } from '$lib/api/download';
 
   const queryClient = useQueryClient();
+
+  // The shared downloads query drives the progress section: a container is
+  // rendered for exactly the streams whose download is live (or failed) and
+  // not yet satisfied — so it appears the moment a download starts, without
+  // a page refresh.
+  const downloads = downloadsQuery();
+  const liveDownloads = $derived(
+    (downloads.data?.views ?? []).filter((v) => isLive(v) && !isSatisfied(v)),
+  );
 
   const streamsQuery = createQuery(() => ({
     queryKey: ['streams'],
@@ -121,6 +132,14 @@
   );
   let filteredStreams = $derived(
     activeChannel ? streams.filter((s) => s.streamer === activeChannel) : streams,
+  );
+
+  // Live downloads, filtered by the selected channel (an unfiltered section
+  // shows downloads for channels the user filtered out).
+  const visibleDownloads = $derived(
+    activeChannel === null
+      ? liveDownloads
+      : liveDownloads.filter((v) => streams.find((s) => s.id === v.streamId)?.streamer === activeChannel),
   );
 
   // Track the last-opened stream so the rail's Review entry routes there.
@@ -278,10 +297,13 @@
     <!-- Download progress (unified bar + itemized popover). Filtered by the
          selected channel; a satisfied download (fully done, playable files
          on disk) leaves the list — the stream lives in the library rows. -->
-    {#if filteredStreams.some((s) => s.sourceUrl)}
+    {#if visibleDownloads.length > 0}
       <section class="flex flex-col gap-2" aria-label="Download progress">
-        {#each filteredStreams.filter((s) => s.sourceUrl) as stream (stream.id)}
-          <DownloadProgress streamId={stream.id} title={stream.title ?? stream.streamer ?? stream.id.slice(0, 8)} />
+        {#each visibleDownloads as v (v.streamId)}
+          <DownloadProgress
+            streamId={v.streamId}
+            title={streamTitle(v.streamId)}
+          />
         {/each}
       </section>
     {/if}
