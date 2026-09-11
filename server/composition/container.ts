@@ -207,6 +207,7 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
       presets,
       vod: vodDownloader,
       downloadState: (id: string) => downloadOrchestrator.getState(id),
+      downloadRevision: (id: string) => downloadOrchestrator.revision(id),
       cancelDownload: (id: string) => {
         const piece = mediaActions.cancelPiece(id);
         const main = importByUrl.cancelProgressive(id);

@@ -33,6 +33,7 @@ import {
   pickBestQuality,
 } from "@/adapters/outbound/vod/hls.ts";
 import { clampToServable, parseRangeHeader } from "@/adapters/inbound/http/range.ts";
+import { projectDownloadView } from "@/application/view/project-download-view.ts";
 import { fragmentBoundaryAt, parseIndex } from "@/adapters/outbound/vod/fmp4.ts";
 
 /**
@@ -88,6 +89,7 @@ export interface HttpDeps {
   presets: SqliteExportPresetRepository;
   vod: VodDownloadPort;
   downloadState: (streamId: string) => Promise<DownloadStateType>;
+  downloadRevision: (streamId: string) => number;
   cancelDownload: (streamId: string) => boolean;
   cancelPiece: (streamId: string) => boolean;
   deleteVideo: (streamId: string) => Promise<{ deleted: boolean }>;
@@ -171,6 +173,37 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     const streamId = c.req.param("id");
     const state = await deps.downloadState(streamId);
     return c.json(state);
+  });
+
+  // Every stream's download VIEW in one call — the single source the whole
+  // UI renders from. Composing server-side means no component derives
+  // "is a download happening", "is it on disk" or "which file is shared";
+  // those local derivations were the source of the reported inconsistencies.
+  app.get("/api/downloads", async (c) => {
+    const streams = await deps.listStreams.execute();
+    const views = await Promise.all(streams.map(async (stream) => {
+      const [state, markersRaw] = await Promise.all([
+        deps.downloadState(stream.id),
+        deps.metadata.get(stream.id, "markers").catch(() => null),
+      ]);
+      let markers: { t: number; label: string; source: string }[] | null = null;
+      if (markersRaw) {
+        try {
+          const parsed = JSON.parse(markersRaw) as { markers?: { t: number; label: string; source: string }[] };
+          markers = parsed.markers ?? null;
+        } catch {
+          markers = null;
+        }
+      }
+      return projectDownloadView({
+        streamId: stream.id,
+        state,
+        markers,
+        hasSource: Boolean(stream.sourceUrl),
+        revision: deps.downloadRevision(stream.id),
+      });
+    }));
+    return c.json({ views });
   });
 
   // Delete a download: abort any in-flight run, remove its artifacts, reset

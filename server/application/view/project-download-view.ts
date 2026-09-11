@@ -1,0 +1,133 @@
+/**
+ * Projects orchestrator state into the UI view model.
+ *
+ * Every rule a display used to re-derive lives here exactly once:
+ * - a running artifact is never `onDisk` (a growing file is not an artifact);
+ * - `active` is true whenever ANY artifact runs;
+ * - one video file is never presented as two artifacts;
+ * - markers are metadata, not a download.
+ *
+ * The single-download case is explicit, not inferred: in that mode the
+ * orchestrator's `proxy` PART carries the main video (one file serves the
+ * project), so part kinds alone cannot identify artifacts. `state.includeProxy`
+ * decides the shape.
+ */
+import {
+  ARTIFACT_LABELS,
+  composeLabel,
+  computeSharing,
+  resolvePlayback,
+  type ArtifactKind,
+  type ArtifactView,
+  type DownloadView,
+  type PartStatus,
+} from "@/application/view/download-view.ts";
+import type { DownloadPart, DownloadState } from "@/adapters/outbound/vod/download-orchestrator.ts";
+
+/** The state part that carries a given artifact, per download mode. */
+function partForArtifact(
+  kind: ArtifactKind,
+  parts: Map<DownloadPart["kind"], DownloadPart>,
+  includeProxy: boolean,
+): DownloadPart | undefined {
+  if (kind === "chat") return parts.get("chat");
+  if (kind === "proxy") return includeProxy ? parts.get("proxy") : undefined;
+  // The main video: `hq` when a separate proxy file exists, else the single
+  // download lives in the `proxy` part (one file, both roles).
+  return includeProxy ? parts.get("hq") : parts.get("proxy");
+}
+
+/** Disk truth for an artifact, from the state's stat-based presence map. */
+function presenceForArtifact(
+  kind: ArtifactKind,
+  presence: NonNullable<DownloadState["presence"]>,
+  includeProxy: boolean,
+): { onDisk: boolean; bytes: number; path: string | null } {
+  if (kind === "chat") return presence.chat ?? { onDisk: false, bytes: 0, path: null };
+  if (kind === "proxy") {
+    return includeProxy
+      ? (presence.proxy ?? { onDisk: false, bytes: 0, path: null })
+      : { onDisk: false, bytes: 0, path: null };
+  }
+  // Single-download: the one file is reported as the video's artifact.
+  return includeProxy
+    ? (presence.hq ?? { onDisk: false, bytes: 0, path: null })
+    : (presence.proxy ?? { onDisk: false, bytes: 0, path: null });
+}
+
+export interface ProjectInput {
+  streamId: string;
+  state: DownloadState;
+  /** Markers for the project (null when the VOD has none / not fetched). */
+  markers: { t: number; label: string; source: string }[] | null;
+  /** Project has a source URL, so pieces can be (re)downloaded. */
+  hasSource: boolean;
+  /** Monotonic revision for change detection. */
+  revision: number;
+}
+
+export function projectDownloadView(input: ProjectInput): DownloadView {
+  const { state } = input;
+  const presence = state.presence ?? {};
+  const includeProxy = state.includeProxy ?? false;
+  const parts = new Map<DownloadPart["kind"], DownloadPart>();
+  for (const p of state.parts) parts.set(p.kind, p);
+
+  const artifacts: ArtifactView[] = [];
+  for (const kind of ["chat", "proxy", "video"] as const) {
+    const part = partForArtifact(kind, parts, includeProxy);
+    const art = presenceForArtifact(kind, presence, includeProxy);
+    const hasEvidence = Boolean(part) || art.onDisk;
+    // An artifact with neither a part nor a file does not exist as a row
+    // (single-download projects have no proxy row at all).
+    if (!hasEvidence) continue;
+
+    const status: PartStatus = part?.status ?? (art.onDisk ? "done" : "pending");
+    // A running artifact is NEVER "on disk": its file is growing, not an
+    // artifact. This rule makes a fresh download show a bar, not a checkmark.
+    const onDisk = art.onDisk && status !== "running";
+    artifacts.push({
+      kind,
+      label: ARTIFACT_LABELS[kind],
+      status,
+      percent: part?.percent ?? (onDisk ? 1 : 0),
+      etaSec: part?.etaSec ?? null,
+      bytes: art.bytes,
+      frontierSec: kind === "chat" ? null : (part?.downloadedSec ?? null),
+      totalSec: kind === "chat" ? null : (part?.totalSec || null),
+      onDisk,
+      path: art.path,
+      sharedWith: [],
+      error: part?.error ?? null,
+      downloadable: kind !== "chat" && input.hasSource,
+      removable: art.onDisk || status === "failed",
+    });
+  }
+
+  // File sharing: one path claimed by several artifacts. Displays use this
+  // so a trash action never deletes a sibling artifact's media.
+  const sharing = computeSharing(artifacts);
+  for (const a of artifacts) {
+    if (!a.path) continue;
+    a.sharedWith = (sharing.get(a.path) ?? []).filter((k) => k !== a.kind);
+  }
+
+  // `active` = a download is happening. It must be true the instant a run
+  // starts, before the first part flips to running (a container that waits
+  // for a part reads as "nothing happening" for the first poll window).
+  const active = state.phase === "running" || artifacts.some((a) => a.status === "running");
+  const view: DownloadView = {
+    streamId: input.streamId,
+    phase: state.phase,
+    active,
+    label: "",
+    overall: { percent: state.overall.percent, etaSec: state.overall.etaSec },
+    artifacts,
+    media: resolvePlayback(artifacts),
+    metadata: { markers: input.markers, chatCount: state.chatCount },
+    revision: input.revision,
+    updatedAt: new Date().toISOString(),
+  };
+  view.label = composeLabel({ phase: view.phase, active, artifacts });
+  return view;
+}

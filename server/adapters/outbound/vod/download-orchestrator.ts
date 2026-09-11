@@ -59,6 +59,11 @@ export interface DownloadState {
   chatCount: number;
   qualities: { name: string; width: number; height: number }[];
   startedAt: string | null;
+  /** Two-file mode: a separate proxy file exists alongside the main video.
+   *  false (default) = ONE video file serves the project. Recorded
+   *  explicitly because the UI cannot infer it from part kinds — in
+   *  single-download mode the `proxy` PART carries the video. */
+  includeProxy: boolean;
   /** Disk truth per artifact, computed fresh on every read — never
    *  persisted (this field is the "on disk / size" source of truth). */
   presence?: Partial<Record<"proxy" | "hq" | "chat", Artifact>>;
@@ -127,13 +132,45 @@ export class DownloadOrchestrator {
    *  not touch their running phase (orphaned vs live distinction). */
   private liveRuns = new Set<string>();
 
+  /**
+   * Live view registry — the authoritative state for streams downloading in
+   * THIS process. Reads during a run come from here, so a 1 Hz poll costs no
+   * disk I/O, cannot observe a torn intermediate write, and cannot lag the
+   * downloader. The persisted snapshot remains the durability record and is
+   * read (with reconciliation) only when no live run exists.
+   */
+  private liveStates = new Map<string, DownloadState>();
+
+  /** Monotonic revision per stream — lets a client detect change cheaply. */
+  private revisions = new Map<string, number>();
+
   /** Mark/unmark a stream's orchestrator run as live (run()/piece runners). */
   markRunLive(streamId: string, live: boolean): void {
     if (live) this.liveRuns.add(streamId);
-    else this.liveRuns.delete(streamId);
+    else {
+      this.liveRuns.delete(streamId);
+      // The run is over: drop the RAM copy so later reads reconcile against
+      // disk (the durability record is now the truth).
+      this.liveStates.delete(streamId);
+    }
+  }
+
+  /** Current revision for a stream (0 when never touched in this process). */
+  revision(streamId: string): number {
+    return this.revisions.get(streamId) ?? 0;
+  }
+
+  private bumpRevision(streamId: string): void {
+    this.revisions.set(streamId, (this.revisions.get(streamId) ?? 0) + 1);
   }
 
   async getState(streamId: string): Promise<DownloadState> {
+    // A live run owns the state in RAM: return it directly (no disk read, no
+    // reconcile — reconcile would fight the downloader for ownership).
+    const live = this.liveStates.get(streamId);
+    if (live && this.liveRuns.has(streamId)) {
+      return { ...live, presence: await this.presence(live) };
+    }
     const raw = await this.metadata.get(streamId, "download_state");
     if (!raw) return this.idle();
     try {
@@ -285,6 +322,9 @@ export class DownloadOrchestrator {
   }): Promise<void> {
     const live = this.liveRuns.has(opts.streamId);
     if (live) throw new Error("A download is already running for this stream");
+    // Seed the RAM copy from the persisted state so the piece's first
+    // progress write has a full state object to extend.
+    this.liveStates.set(opts.streamId, await this.getState(opts.streamId));
     this.markRunLive(opts.streamId, true);
     if (opts.kind === "chat") {
       await this.runChatPiece({ streamId: opts.streamId, destDir: opts.destDir, vodId: opts.vodId, signal: opts.signal });
@@ -456,6 +496,7 @@ export class DownloadOrchestrator {
       chatCount: 0,
       qualities: [],
       startedAt: null,
+      includeProxy: false,
     };
   }
 
@@ -465,6 +506,10 @@ export class DownloadOrchestrator {
   private writeQueues = new Map<string, Promise<void>>();
 
   async setState(streamId: string, state: DownloadState): Promise<void> {
+    if (this.liveRuns.has(streamId)) {
+      this.liveStates.set(streamId, state);
+      this.bumpRevision(streamId);
+    }
     const prev = this.writeQueues.get(streamId) ?? Promise.resolve();
     const next = prev.then(() => this.metadata.set(streamId, "download_state", JSON.stringify(state)));
     // Queue survives a failed write; the error surfaces to this caller only.
@@ -514,7 +559,12 @@ export class DownloadOrchestrator {
       chatCount: 0,
       qualities: [],
       startedAt: new Date().toISOString(),
+      includeProxy: opts.includeProxy,
     };
+    // Publish to RAM immediately: the very first poll must already see the
+    // running phase (otherwise a container appears only after a refresh).
+    this.liveStates.set(opts.streamId, state);
+    this.bumpRevision(opts.streamId);
     const rt = new Map<DownloadPartKind, PartRuntime>();
     for (const kind of ["chat", "markers", "proxy", "hq"] as const) {
       rt.set(kind, newPart());
