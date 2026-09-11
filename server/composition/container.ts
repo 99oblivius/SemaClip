@@ -184,6 +184,13 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
     console.log(`Seeded ${DEFAULT_PRESETS.length} default export presets`);
   }
 
+  /** Stop every live download for a stream (piece + pipeline). */
+  const cancelLiveDownloads = (id: string): boolean => {
+    const piece = mediaActions.cancelPiece(id);
+    const main = importByUrl.cancelProgressive(id);
+    return piece || main;
+  };
+
   return {
     bus,
     httpDeps: {
@@ -214,9 +221,22 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
         return piece || main;
       },
       cancelPiece: (id: string) => mediaActions.cancelPiece(id),
-      deleteVideo: (id: string) => mediaActions.deleteVideo(id),
-      deleteProxy: (id: string) => mediaActions.deleteProxy(id),
-      deleteChat: (id: string) => mediaActions.deleteChat(id),
+      // Deleting an artifact must not leave a live downloader writing into a
+      // removed file (verified: DELETE /proxy during a run left ffmpeg
+      // appending to a deleted inode while the view honestly showed 0 bytes).
+      // Cancel any live run for the stream first, then delete.
+      deleteVideo: (id: string) => {
+        cancelLiveDownloads(id);
+        return mediaActions.deleteVideo(id);
+      },
+      deleteProxy: (id: string) => {
+        cancelLiveDownloads(id);
+        return mediaActions.deleteProxy(id);
+      },
+      deleteChat: (id: string) => {
+        cancelLiveDownloads(id);
+        return mediaActions.deleteChat(id);
+      },
       downloadChatPiece: (opts: { streamId: string }) => mediaActions.downloadPiece({ ...opts, kind: "chat" }),
       openFolder: (id: string) => mediaActions.openFolder(id),
       deleteDownload: (id: string) => importByUrl.deleteDownload(id, config.cacheDir),

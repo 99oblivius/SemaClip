@@ -41,8 +41,14 @@ export class MediaActionsUseCase {
    */
   private async artifactDir(streamId: string): Promise<string | null> {
     const dl = await this.orchestrator.getState(streamId);
-    if (dl.proxyPath) return dl.proxyPath.replace(/\/[^/]+$/, "");
-    if (dl.hqPath) return dl.hqPath.replace(/\/[^/]+$/, "");
+    // Every candidate is stat-checked: a path recorded in state can be stale
+    // (the file was deleted), and deriving a directory from a dead path makes
+    // every later delete a silent no-op.
+    for (const candidate of [dl.proxyPath, dl.proxyMp4, dl.hqPath, dl.hqMp4, dl.chatPath]) {
+      if (!candidate) continue;
+      const dir = candidate.replace(/\/[^/]+$/, "");
+      if (await this.fs.exists(dir)) return dir;
+    }
     const raw = await this.metadata.get(streamId, "transcript_srt");
     if (raw) {
       try {
@@ -63,29 +69,54 @@ export class MediaActionsUseCase {
     return this.orchestrator.getState(streamId);
   }
 
-  /** Delete the video artifact (the main download). Proxy, chat and the
-   *  stream record's chat path are untouched. */
+  /**
+   * Delete the MAIN video artifact only. The proxy, chat and the stream
+   * record's chat path are untouched.
+   *
+   * The video is the file the download state records for the `video`
+   * artifact. It is NEVER identified by scanning for legacy filenames: in
+   * two-file mode `stream.vodPath` points at whichever artifact completed
+   * first (the proxy, while HQ is still running), so deleting "the video"
+   * by path scan destroyed the proxy instead — the ripple the owner saw.
+   */
   async deleteVideo(streamId: string): Promise<{ deleted: boolean }> {
+    const state = await this.orchestrator.getState(streamId);
+    const videoPaths = new Set<string>();
+    // The state's own record of the video artifact (both fields can point at
+    // the same file in single-download mode — that is fine, it is one file).
+    if (state.hqPath) videoPaths.add(state.hqPath);
+    if (state.hqMp4) videoPaths.add(state.hqMp4);
+    // In two-file mode the video is `hq.*`; the proxy is never touched.
     const dir = await this.artifactDir(streamId);
-    if (!dir) return { deleted: false };
-    const targets = ["hq.mp4", "hq.ts", "hq.chunks", "video.mp4", "video.fragments",
-                     "video.ts", "video.chunks"];
+    if (dir && state.includeProxy) {
+      for (const name of ["hq.mp4", "hq.fragments", "hq.ts", "hq.chunks"]) {
+        const p = `${dir}/${name}`;
+        if (await this.fs.exists(p)) videoPaths.add(p);
+      }
+    }
+    // Legacy single-file projects recorded the video as vodPath, but ONLY
+    // when no separate proxy file exists.
+    const stream = await this.streams.findById(streamId);
+    if (stream && !state.includeProxy && stream.vodPath) {
+      videoPaths.add(stream.vodPath);
+    }
+
     let removed = false;
-    for (const name of targets) {
-      const path = `${dir}/${name}`;
+    for (const path of videoPaths) {
       if (await this.fs.exists(path)) {
         await this.fs.remove(path);
         removed = true;
       }
     }
-    // Legacy single-file imports: vodPath may point at a video in this dir.
-    const stream = await this.streams.findById(streamId);
-    if (stream && stream.vodPath && stream.vodPath.startsWith(`${dir}/`)) {
-      await this.fs.remove(stream.vodPath).catch(() => {});
-      removed = true;
-      await this.streams.update({ ...stream, vodPath: "" });
+    if (!removed) return { deleted: false };
+
+    // Point the stream record at whatever video still exists (the proxy may
+    // be the only playable file now) — or clear it so the UI stops claiming
+    // a video that is gone.
+    if (stream && stream.vodPath && videoPaths.has(stream.vodPath)) {
+      const fallback = state.proxyMp4 ?? state.proxyPath ?? "";
+      await this.streams.update({ ...stream, vodPath: fallback });
     }
-    const state = await this.orchestrator.getState(streamId);
     if (state.hqPath || state.hqMp4) {
       state.hqPath = null;
       state.hqMp4 = null;

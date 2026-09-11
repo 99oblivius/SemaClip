@@ -77,10 +77,12 @@ export function projectDownloadView(input: ProjectInput): DownloadView {
   for (const kind of ["chat", "proxy", "video"] as const) {
     const part = partForArtifact(kind, parts, includeProxy);
     const art = presenceForArtifact(kind, presence, includeProxy);
-    const hasEvidence = Boolean(part) || art.onDisk;
-    // An artifact with neither a part nor a file does not exist as a row
-    // (single-download projects have no proxy row at all).
-    if (!hasEvidence) continue;
+    // A row exists when there is a FILE, or a download in progress, or a
+    // failure to report. A leftover `pending` part with nothing on disk is
+    // not an artifact — rendering it produced phantom rows for files the
+    // user had deleted (and, in single-download mode, a fake proxy row).
+    const meaningful = art.onDisk || part?.status === "running" || part?.status === "failed";
+    if (!meaningful) continue;
 
     const status: PartStatus = part?.status ?? (art.onDisk ? "done" : "pending");
     // A running artifact is NEVER "on disk": its file is growing, not an

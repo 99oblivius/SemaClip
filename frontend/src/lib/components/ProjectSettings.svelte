@@ -188,6 +188,28 @@
     },
   }));
 
+  /**
+   * Deleting the video file makes exports impossible (ExportClip hard-requires
+   * it). Say so loudly, and say what playback falls back to — a silent
+   * deletion that quietly downgrades the project is what the owner flagged.
+   */
+  const trashWarning = $derived.by(() => {
+    const base = 'This file will be removed from disk. This cannot be undone.';
+    if (trashTarget === 'video') {
+      const stillPlayable = artifacts.find((a) => a.kind === 'proxy')?.onDisk;
+      return `NO EXPORTS WILL BE POSSIBLE unless the video is downloaded again. ` +
+        (stillPlayable
+          ? 'Only the proxy remains — playback continues at preview quality.'
+          : 'No playable video will remain for this project.') +
+        ` ${base}`;
+    }
+    if (trashTarget === 'proxy') {
+      return 'The proxy is the preview copy used for fast scrubbing and mid-download playback. ' +
+        `The video file is unaffected. ${base}`;
+    }
+    return base;
+  });
+
   function confirmTrash() {
     if (!trashTarget) return;
     if (trashTarget === 'proxy') deleteProxyMutation.mutate();
@@ -450,7 +472,7 @@
 {#if trashTarget}
   <ConfirmModal
     title="Delete {TRASH_LABELS[trashTarget]}?"
-    body="This file will be removed from disk. This cannot be undone."
+    body={trashWarning}
     confirmLabel="Delete"
     onConfirm={confirmTrash}
     onCancel={() => (trashTarget = null)}

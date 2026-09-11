@@ -233,13 +233,16 @@ export class DownloadOrchestrator {
       changed = true;
     }
 
-    // An idle/failed state with a playable twin is a real download —
-    // hydrate the phase so the player/library reflect it.
-    if ((state.phase === "idle" || state.phase === "failed") &&
-        (state.proxyPath || state.hqPath) &&
-        (state.proxyMp4 || state.hqMp4)) {
-      state = { ...state, phase: "done" };
-      changed = true;
+    // A state with a playable file on disk is a real download — hydrate the
+    // phase so the player/library reflect it. A project whose video was
+    // deleted but whose proxy survives is still playable, so it stays done.
+    if (state.phase === "idle" || state.phase === "failed") {
+      const playable = [state.proxyMp4, state.hqMp4, state.proxyPath, state.hqPath]
+        .find((p) => p && (p.endsWith(".mp4") || p.endsWith(".ts")));
+      if (playable && await exists(playable)) {
+        state = { ...state, phase: "done" };
+        changed = true;
+      }
     }
 
     // Post-completion storage hygiene: a done project keeps ONE file per
@@ -258,6 +261,26 @@ export class DownloadOrchestrator {
         }
       }
       await this.sweepLegacyArtifacts(state);
+    }
+
+    // A part whose file is gone and which is not running is no longer
+    // failed — it is simply absent (the user deleted it). Leaving it failed
+    // made the container read "interrupted: Video" forever.
+    if (state.phase === "done") {
+      const fixed = state.parts.map((p) => {
+        if (p.status !== "failed") return p;
+        const pathFor = p.kind === "hq" ? [state.hqPath, state.hqMp4]
+          : p.kind === "proxy" ? [state.proxyPath, state.proxyMp4]
+            : p.kind === "chat" ? [state.chatPath] : [];
+        const anyAlive = pathFor.some(Boolean);
+        if (anyAlive) return p;
+        const { error: _drop, ...rest } = p;
+        return { ...rest, status: "pending" as const, percent: 0, downloadedBytes: 0, etaSec: null };
+      });
+      if (fixed.some((p, i) => p.status !== state.parts[i]!.status)) {
+        state = { ...state, parts: fixed };
+        changed = true;
+      }
     }
 
     // Nothing on disk at all → the state is a husk (blank 0% containers).
