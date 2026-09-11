@@ -23,6 +23,7 @@ import {
   ImportStreamByUrlUseCase,
   ListStreamsUseCase,
   GetStreamUseCase,
+  StreamReconciler,
   DeleteStreamUseCase,
   UpdateStreamUseCase,
   AttachChatUseCase,
@@ -135,8 +136,9 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
   );
   const cancelJob = new CancelJobUseCase(jobRepo, streamRepo, engine, bus, startJob);
   const listJobs = new ListJobsUseCase(jobRepo);
-  const getStream = new GetStreamUseCase(streamRepo);
-  const listStreams = new ListStreamsUseCase(streamRepo);
+  const streamReconciler = new StreamReconciler(streamRepo, fs, config.cacheDir);
+  const getStream = new GetStreamUseCase(streamRepo, streamReconciler);
+  const listStreams = new ListStreamsUseCase(streamRepo, streamReconciler);
   const listClips = new ListClipsUseCase(clipRepo);
   const getClip = new GetClipUseCase(clipRepo);
   const rejectClip = new RejectClipUseCase(clipRepo);
