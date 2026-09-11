@@ -142,7 +142,7 @@ Deno.test("view: absent markers render as null, not an empty row", () => {
   // A project with nothing downloaded still shows its chat and video rows —
   // those rows are where the Download buttons live, so hiding them would
   // remove the ability to fetch the artifact at all.
-  assertEquals(view.artifacts.map((a) => a.kind), ["chat", "video"]);
+  assertEquals(view.artifacts.map((a) => a.kind), ["chat", "proxy", "video"]);
   assertEquals(view.artifacts.every((a) => a.onDisk === false), true);
   assertEquals(view.artifacts.every((a) => a.status === "pending"), true);
 });
@@ -161,8 +161,11 @@ Deno.test("view: a project with no proxy file has NO proxy row (single-download)
   });
   const kinds = view.artifacts.map((a) => a.kind);
   assertEquals(kinds.includes("video"), true);
-  assertEquals(kinds.filter((k) => k === "proxy").length, 0, "no phantom proxy row");
-  assertEquals(kinds, ["chat", "video"], "chat + video, never a phantom proxy");
+  // The proxy row is offered (the project has a source), but it must NOT
+  // claim a file: single-download mode has no proxy artifact on disk.
+  const proxy = view.artifacts.find((a) => a.kind === "proxy")!;
+  assertEquals(proxy.onDisk, false, "no phantom FILE for a proxy that does not exist");
+  assertEquals(proxy.bytes, 0);
 });
 
 Deno.test("view: two-file mode yields distinct proxy and video rows with no sharing", () => {
@@ -273,7 +276,7 @@ Deno.test("view: a MISSING artifact keeps its row so it can be downloaded again"
   // hid every missing artifact — and the row is where the Download button
   // lives, so the user lost the ability to re-fetch anything.
   const empty = projectDownloadView({ ...base, state: state({ phase: "idle" }) });
-  assertEquals(empty.artifacts.map((a) => a.kind), ["chat", "video"]);
+  assertEquals(empty.artifacts.map((a) => a.kind), ["chat", "proxy", "video"]);
   for (const a of empty.artifacts) {
     assertEquals(a.onDisk, false);
     assertEquals(a.removable, false, "nothing to remove");
@@ -304,11 +307,12 @@ Deno.test("view: a MISSING artifact keeps its row so it can be downloaded again"
   assertEquals(deleted.media.previewOnly, true, "and the project is flagged preview-only");
 });
 
-Deno.test("view: a single-download project never grows a phantom proxy row", () => {
-  // The rule that must NOT regress: `proxy` is the only artifact that can be
-  // absent-by-design (single-download mode has no proxy file).
+Deno.test("view: a project WITH a source offers a proxy row even in single-download mode", () => {
+  // The row is where the control to ADD a proxy lives. Hiding it in
+  // single-download mode left no way to add one later.
   const view = projectDownloadView({
     ...base,
+    hasSource: true,
     state: state({
       phase: "idle",
       includeProxy: false,
@@ -316,8 +320,20 @@ Deno.test("view: a single-download project never grows a phantom proxy row", () 
       presence: {},
     }),
   });
+  assertEquals(view.artifacts.map((a) => a.kind), ["chat", "proxy", "video"]);
+  const proxy = view.artifacts.find((a) => a.kind === "proxy")!;
+  assertEquals(proxy.onDisk, false, "no file yet");
+  assertEquals(proxy.downloadable, true, "and it can be downloaded");
+});
+
+Deno.test("view: a source-less project shows no proxy row (nothing to fetch it from)", () => {
+  const view = projectDownloadView({
+    ...base,
+    hasSource: false,
+    state: state({ phase: "idle", includeProxy: false, parts: [part("proxy", { status: "pending" })] }),
+  });
   assertEquals(view.artifacts.map((a) => a.kind), ["chat", "video"],
-    "no proxy row when the project has no proxy file");
+    "a local-folder project has no proxy download path");
 });
 
 Deno.test("view: downloadable/removable gate the row actions", () => {

@@ -214,7 +214,9 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
       presets,
       vod: vodDownloader,
       downloadState: (id: string) => downloadOrchestrator.getState(id),
-      downloadRevision: (id: string) => downloadOrchestrator.revision(id),
+      downloadRevision: (id: string) => id === "__global__" ? downloadOrchestrator.globalRev : downloadOrchestrator.revision(id),
+      touchDownload: (id: string) => downloadOrchestrator.touch(id),
+      purgeArtifacts: (id: string) => mediaActions.purgeArtifacts(id),
       cancelDownload: (id: string) => {
         const piece = mediaActions.cancelPiece(id);
         const main = importByUrl.cancelProgressive(id);

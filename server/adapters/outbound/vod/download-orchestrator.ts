@@ -144,6 +144,26 @@ export class DownloadOrchestrator {
   /** Monotonic revision per stream — lets a client detect change cheaply. */
   private revisions = new Map<string, number>();
 
+  /**
+   * Bumped whenever ANY stream's download view changes (state write, run
+   * start/finish, artifact delete). A single global counter lets the client
+   * detect "something changed" in ONE cheap comparison instead of diffing
+   * every view, and it is what makes deletions and completions appear
+   * immediately rather than on the next 30s idle poll.
+   */
+  private globalRevision = 0;
+
+  /** Latest global revision — changes on any download mutation anywhere. */
+  get globalRev(): number {
+    return this.globalRevision;
+  }
+
+  /** Record a change that affects a stream's view but not its state file
+   *  (artifact deletions, external file changes). */
+  touch(streamId: string): void {
+    this.bumpRevision(streamId);
+  }
+
   /** Mark/unmark a stream's orchestrator run as live (run()/piece runners). */
   markRunLive(streamId: string, live: boolean): void {
     if (live) this.liveRuns.add(streamId);
@@ -162,6 +182,7 @@ export class DownloadOrchestrator {
 
   private bumpRevision(streamId: string): void {
     this.revisions.set(streamId, (this.revisions.get(streamId) ?? 0) + 1);
+    this.globalRevision++;
   }
 
   async getState(streamId: string): Promise<DownloadState> {

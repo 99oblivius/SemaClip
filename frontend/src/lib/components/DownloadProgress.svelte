@@ -3,7 +3,7 @@
   import { apiClient } from '$lib/api/client';
   import Icon from '$lib/components/Icon.svelte';
   import { fmtEta, fmtBytes, isLive, isSatisfied, type DownloadView } from '$lib/api/download';
-  import { DOWNLOADS_KEY, downloadsQuery, viewFor } from '$lib/api/downloads';
+  import { DOWNLOADS_KEY, downloadsQuery, viewFor, markDownloadsChanged } from '$lib/api/downloads';
 
   interface Props {
     streamId: string;

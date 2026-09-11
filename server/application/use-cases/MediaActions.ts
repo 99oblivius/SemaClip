@@ -167,6 +167,32 @@ export class MediaActionsUseCase {
     }
   }
 
+  /**
+   * Remove a project's MEDIA directory.
+   *
+   * Download artifacts live in `{cacheDir}/vods/{streamId}`, which is NOT the
+   * directory `StreamStorage.deleteStream` removes (`{dataDir}/streams/{id}`).
+   * Deleting a project therefore left every downloaded gigabyte on disk — and
+   * an orphaned file can still be reached by the media route's fallbacks,
+   * which is how "deleted" video kept playing. Removing the whole artifact
+   * directory is the only honest delete.
+   */
+  async purgeArtifacts(streamId: string): Promise<{ bytes: number }> {
+    const dir = `${this.cacheDir}/vods/${streamId}`;
+    let bytes = 0;
+    try {
+      for await (const entry of Deno.readDir(dir)) {
+        if (!entry.isFile) continue;
+        const st = await Deno.stat(`${dir}/${entry.name}`).catch(() => null);
+        bytes += st?.size ?? 0;
+      }
+      await Deno.remove(dir, { recursive: true });
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) throw e;
+    }
+    return { bytes };
+  }
+
   /** Delete the chat JSON (chatPath in the stream record + download state). */
   async deleteChat(streamId: string): Promise<{ deleted: boolean }> {
     const dir = await this.artifactDir(streamId);

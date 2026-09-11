@@ -83,9 +83,13 @@ export function projectDownloadView(input: ProjectInput): DownloadView {
     // to fetch the artifact again. The proxy is different: it only exists
     // when the project opted into two-file mode or a proxy file is present,
     // so a single-download project never shows a phantom proxy row.
+    // The proxy row is offered whenever the project CAN have one — that is,
+    // whenever it has a source to download from. Hiding it in single-download
+    // mode left no way to ADD a proxy later (the row is where the control
+    // lives); the user asked for exactly that ability.
     const expected = kind === "chat" || kind === "video"
       ? true
-      : includeProxy || art.onDisk;
+      : includeProxy || art.onDisk || input.hasSource;
     if (!expected) continue;
 
     const status: PartStatus = part?.status ?? (art.onDisk ? "done" : "pending");

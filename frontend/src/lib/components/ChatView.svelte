@@ -2,6 +2,7 @@
   import { apiClient, type ChatMessage } from '$lib/api/client';
   import Icon from './Icon.svelte';
   import { playerStore, seek } from '$lib/stores/player';
+  import { downloadsQuery, viewFor } from '$lib/api/downloads';
 
   interface Props {
     streamId: string;
@@ -30,11 +31,31 @@
   const player = $derived($playerStore);
   const VISIBLE_COUNT = 40;
 
+  // The chat file's presence comes from the SERVER view (its `chat` artifact
+  // reports onDisk + bytes). Loading once on mount meant a chat file that
+  // appeared later — or one that was deleted — never changed the panel: it
+  // stayed "no chat file attached" through refreshes AND a backend restart,
+  // because the decision was cached in this component's own `loaded` flag.
+  const downloads = downloadsQuery();
+  const dlView = $derived(viewFor(downloads.data?.views, streamId));
+  /** Identity of the chat artifact: present, and its byte size. */
+  const chatSig = $derived.by(() => {
+    const art = dlView?.artifacts.find((a) => a.kind === 'chat');
+    return art && art.onDisk ? `${art.path ?? 'chat'}:${art.bytes}` : 'absent';
+  });
+
+  let loadedSig = $state<string | null>(null);
   $effect(() => {
-    if (streamId && !loaded) {
-      loaded = true;
-      loadAll();
+    const sig = chatSig;
+    if (!streamId || sig === loadedSig) return;
+    loadedSig = sig;
+    if (sig === 'absent') {
+      allMessages = [];
+      totalCount = 0;
+      hasChat = false;
+      return;
     }
+    void loadAll();
   });
 
   async function loadAll() {

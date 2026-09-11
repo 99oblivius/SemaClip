@@ -3,7 +3,7 @@
   import { apiClient } from '$lib/api/client';
   import Icon from '$lib/components/Icon.svelte';
   import DownloadProgress from '$lib/components/DownloadProgress.svelte';
-  import { downloadsQuery, viewFor } from '$lib/api/downloads';
+  import { downloadsQuery, viewFor, markDownloadsChanged } from '$lib/api/downloads';
   import { isLive, isSatisfied } from '$lib/api/download';
   import { fadeIn, staggerIn, hoverLift } from '$lib/actions/gsap';
   import type { Stream, Job, ImportByUrlInput, ImportByFileInput } from '$shared/types';

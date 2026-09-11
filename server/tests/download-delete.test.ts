@@ -114,9 +114,11 @@ Deno.test("delete: single-download project has one artifact, so no cross-deletio
       presence: { proxy: { onDisk: true, bytes: 500, path: "/d/video.mp4" } },
     }),
   });
-  // chat + the single video file. Crucially there is exactly ONE video-kind
-  // artifact, so no cross-deletion is possible.
-  assertEquals(view.artifacts.map((a) => a.kind), ["chat", "video"]);
+  // chat + a (fileless) proxy row + the single video file. Crucially there
+  // is exactly ONE video-kind artifact, so no cross-deletion is possible.
+  assertEquals(view.artifacts.map((a) => a.kind), ["chat", "proxy", "video"]);
+  assertEquals(view.artifacts.find((a) => a.kind === "proxy")!.onDisk, false,
+    "the proxy row must not claim the single file");
   const video = view.artifacts.find((a) => a.kind === "video")!;
   assertEquals(video.sharedWith, [], "nothing else claims this file");
   assertEquals(view.media.playablePath, "/d/video.mp4");

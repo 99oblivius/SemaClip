@@ -90,6 +90,10 @@ export interface HttpDeps {
   vod: VodDownloadPort;
   downloadState: (streamId: string) => Promise<DownloadStateType>;
   downloadRevision: (streamId: string) => number;
+  /** Record a view change that has no state write (artifact deletion). */
+  touchDownload: (streamId: string) => void;
+  /** Remove a project's downloaded media directory. */
+  purgeArtifacts: (streamId: string) => Promise<{ bytes: number }>;
   cancelDownload: (streamId: string) => boolean;
   cancelPiece: (streamId: string) => boolean;
   deleteVideo: (streamId: string) => Promise<{ deleted: boolean }>;
@@ -203,7 +207,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
         revision: deps.downloadRevision(stream.id),
       });
     }));
-    return c.json({ views });
+    return c.json({ views, revision: deps.downloadRevision("__global__") });
   });
 
   // Delete a download: abort any in-flight run, remove its artifacts, reset
@@ -239,12 +243,16 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
 
   // Stream-config media actions (download-pipeline scope).
   app.delete("/api/streams/:id/video", async (c) => {
-    const result = await deps.deleteVideo(c.req.param("id"));
+    const id = c.req.param("id");
+    const result = await deps.deleteVideo(id);
+    deps.touchDownload(id);
     return c.json(result);
   });
 
   app.delete("/api/streams/:id/proxy", async (c) => {
-    const result = await deps.deleteProxy(c.req.param("id"));
+    const id = c.req.param("id");
+    const result = await deps.deleteProxy(id);
+    deps.touchDownload(id);
     return c.json(result);
   });
 
@@ -254,7 +262,9 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   });
 
   app.delete("/api/streams/:id/chat", async (c) => {
-    const result = await deps.deleteChat(c.req.param("id"));
+    const id = c.req.param("id");
+    const result = await deps.deleteChat(id);
+    deps.touchDownload(id);
     return c.json(result);
   });
 
@@ -317,8 +327,14 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   });
 
   app.delete("/api/streams/:id", async (c) => {
-    await deps.deleteStream.execute(c.req.param("id"));
-    return c.json({ ok: true });
+    const id = c.req.param("id");
+    await deps.deleteStream.execute(id);
+    // Media artifacts live outside the storage tree — purge them too, or the
+    // downloaded gigabytes stay on disk after the project is gone (and remain
+    // reachable by the media route's fallbacks).
+    const purged = await deps.purgeArtifacts(id);
+    deps.touchDownload(id);
+    return c.json({ ok: true, freedBytes: purged.bytes });
   });
 
   // Update stream metadata (title, streamer, game, vodPath, chatPath).
@@ -875,7 +891,17 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
       // is unplayable; its .mp4 twin (kept in the download state) is the
       // playable form of the same bytes.
       const dl = await deps.downloadState(c.req.param("streamId"));
-      const playableTwin = dl.proxyMp4 ?? dl.hqMp4;
+      // Prefer the MAIN video over the proxy: the proxy is a preview copy, so
+      // playing it while a full-quality file exists wastes the download — and
+      // it made deleting the video look like it changed nothing, because the
+      // route kept serving the proxy's bytes at the same duration.
+      // Mid-download only the proxy exists, so this falls through naturally.
+      const pickPlayable = async (p: string | null | undefined) =>
+        p && await Deno.stat(p).then(() => true).catch(() => false) ? p : null;
+      const playableTwin = (await pickPlayable(dl.hqMp4))
+        ?? (await pickPlayable(dl.hqPath))
+        ?? (await pickPlayable(dl.proxyMp4))
+        ?? (await pickPlayable(dl.proxyPath));
       if (playableTwin && await Deno.stat(playableTwin).then(() => true).catch(() => false)) {
         mediaPath = playableTwin;
       } else {
@@ -905,6 +931,12 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     c.header("Cache-Control", "no-store");
     if (!mediaPath) {
       return c.json({ error: "Video not available yet" }, 404);
+    }
+    // Every candidate must be stat-checked before serving: a path recorded in
+    // the stream row or the download state can point at a file that no longer
+    // exists, and serving a stale path is how "deleted" media kept playing.
+    if (!mediaPath || !(await Deno.stat(mediaPath).then(() => true).catch(() => false))) {
+      return c.json({ error: "Video not available" }, 404);
     }
     try {
       const stat = await Deno.stat(mediaPath);

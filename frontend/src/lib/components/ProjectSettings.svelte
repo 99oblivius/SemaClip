@@ -7,7 +7,7 @@
   import type { Stream } from '$shared/types';
   import type { ArtifactView, DownloadView, QualityInfo } from '$lib/api/download';
   import { fmtBytes as fmtBytesShared } from '$lib/api/download';
-  import { DOWNLOADS_KEY, downloadsQuery, viewFor } from '$lib/api/downloads';
+  import { DOWNLOADS_KEY, downloadsQuery, viewFor, markDownloadsChanged } from '$lib/api/downloads';
 
   interface Props {
     stream: Stream;
@@ -29,18 +29,30 @@
   let loaded = $state(false);
   let prevId = $state('');
 
+  // Re-sync the editable copies when the stream RECORD changes — not only
+  // when the id changes. Gating on the id alone meant a delete (which clears
+  // vodPath/chatPath server-side) never updated the fields or the dirty
+  // check, so the panel kept showing the old paths.
+  let lastRecordSig = $state('');
   $effect(() => {
-    // Re-sync when the stream prop changes (e.g. after refetch or first load).
-    if (!loaded || stream.id !== prevId) {
+    const sig = [
+      stream.id,
+      stream.title ?? '', stream.streamer ?? '', stream.game ?? '',
+      stream.sourceUrl ?? '', stream.vodPath ?? '', stream.chatPath ?? '',
+    ].join('\u0000');
+    if (sig === lastRecordSig) return;
+    // Never clobber unsaved edits: only adopt server values when the user
+    // has nothing pending for that field.
+    if (!dirty) {
       title = stream.title ?? '';
       streamer = stream.streamer ?? '';
       game = stream.game ?? '';
       streamLink = stream.sourceUrl ?? '';
       vodPath = stream.vodPath ?? '';
       chatPath = stream.chatPath ?? '';
-      prevId = stream.id;
-      loaded = true;
     }
+    lastRecordSig = sig;
+    loaded = true;
   });
 
   const updateMutation = createMutation(() => ({
@@ -89,6 +101,7 @@
     mutationFn: (kind: 'proxy' | 'video' | 'chat') => apiClient.cancelPiece(stream.id, pieceKind(kind)),
     onSuccess: () => {
       pendingPiece = null;
+      markDownloadsChanged();
       queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
       queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
     },
@@ -100,6 +113,7 @@
         proxyHeightCap: input.proxyHeightCap ?? null,
       }),
     onSuccess: () => {
+      markDownloadsChanged();
       queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
       queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
     },
@@ -162,6 +176,7 @@
   const deleteProxyMutation = createMutation(() => ({
     mutationFn: () => apiClient.deleteProxy(stream.id),
     onSuccess: () => {
+      markDownloadsChanged();
       queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
       queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
     },
@@ -182,6 +197,7 @@
   const deleteVideoMutation = createMutation(() => ({
     mutationFn: () => apiClient.deleteVideo(stream.id),
     onSuccess: () => {
+      markDownloadsChanged();
       queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
       queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
       vodPath = '';
