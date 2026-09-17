@@ -196,6 +196,31 @@ jobs:
           fi
           echo "baked version: $version"
 
+      - name: Install rcedit + wine (Windows icon on the launcher)
+        if: matrix.platform == 'win-x64'
+        run: |
+          set -euo pipefail
+          # deno desktop puts the icon on the payload DLL, not the launcher EXE,
+          # and Windows reads a GUI process's taskbar/Explorer icon from the
+          # launcher -- so a shipped installer showed the default Deno icon.
+          # rcedit is what Electron/Tauri use; it is a Windows binary, so wine
+          # runs it here. The build wrapper applies it automatically and fails
+          # loudly if rcedit is present but the icon still does not land.
+          REDIT_VERSION="v2.0.0"
+          curl -sSL --fail --max-time 120 \
+            -o "$RUNNER_TEMP/rcedit.exe" \
+            "https://github.com/electron/rcedit/releases/download/$REDIT_VERSION/rcedit-x64.exe"
+          echo "RCEDIT_PATH=$RUNNER_TEMP/rcedit.exe" >> "$GITHUB_ENV"
+          sudo -S -p '' apt-get update -qq
+          sudo -S -p '' apt-get install -y --no-install-recommends wine64
+          # Ubuntu's wine64 package installs the binary as `wine64`, NOT `wine`.
+          # The first CI run died on `wine: command not found` (exit 127) because
+          # this script assumed the latter name.
+          if ! command -v wine >/dev/null 2>&1; then
+            sudo ln -sf "$(command -v wine64)" /usr/local/bin/wine
+          fi
+          wine --version
+
       - name: Package for ${{ matrix.platform }}
         env:
           # scripts/build-desktop.ts derives BOTH `--target` and the native tree
@@ -230,44 +255,6 @@ jobs:
           # outright. versions are now v{yy}.{patch} (26.148), which fits.
           deno run --allow-all scripts/build-desktop.ts
 
-      - name: Install rcedit + wine (Windows icon on the launcher)
-        if: matrix.platform == 'win-x64'
-        run: |
-          set -euo pipefail
-          # deno desktop puts the icon on the payload DLL, not the launcher EXE,
-          # and Windows reads a GUI process's taskbar/Explorer icon from the
-          # launcher -- so a shipped installer showed the default Deno icon.
-          # rcedit is what Electron/Tauri use; it is a Windows binary, so wine
-          # runs it here. The build wrapper applies it automatically and fails
-          # loudly if rcedit is present but the icon still does not land.
-          REDIT_VERSION="v2.0.0"
-          curl -sSL --fail --max-time 120 \
-            -o "$RUNNER_TEMP/rcedit.exe" \
-            "https://github.com/electron/rcedit/releases/download/$REDIT_VERSION/rcedit-x64.exe"
-          echo "RCEDIT_PATH=$RUNNER_TEMP/rcedit.exe" >> "$GITHUB_ENV"
-          sudo -S -p '' apt-get update -qq
-          sudo -S -p '' apt-get install -y --no-install-recommends wine64 || \
-            sudo -S -p '' apt-get install -y --no-install-recommends wine
-          wine --version
-
-      - name: Re-apply the Windows icon to the built launcher
-        if: matrix.platform == 'win-x64'
-        run: |
-          set -euo pipefail
-          # The wrapper applies the icon during the build, but rcedit/wine only
-          # became available in the step above, so run it again here now that both
-          # exist. Idempotent: it no-ops when the launcher already has an icon.
-          bash scripts/apply-windows-icon.sh dist "$PWD/assets/icon.ico"
-
-      # ONE build emits BOTH artifacts: `deno desktop -o SemaClip.msi` writes the
-      # installer AND leaves the assembled app directory (SemaClip/) beside it.
-      # Measured on Deno 2.9.6: a single win-x64 build produced a 252MB .msi plus
-      # SemaClip/{SemaClip.exe,SemaClip.dll}. An earlier revision of this step ran
-      # the build twice, which cost ~2.5 minutes of runner time for no new output.
-      #
-      # Both are shipped deliberately: the .msi registers a per-machine install
-      # under %ProgramFiles%, and the zip is the portable fallback for users who
-      # cannot or will not use that.
       - name: Collect the Windows installer + portable zip
         if: matrix.platform == 'win-x64'
         run: |
