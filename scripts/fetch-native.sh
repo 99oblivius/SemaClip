@@ -1,6 +1,6 @@
 #!/bin/sh
 # Fetch pinned external binaries + models for SemaClip's bundled native tree.
-# Used by CI (nightly/release) and by developers bootstrapping a fresh checkout.
+# Used by CI and by developers bootstrapping a fresh checkout.
 #
 # Usage: scripts/fetch-native.sh [nativeDir]
 #   nativeDir defaults to ../native relative to this script's location.

@@ -359,7 +359,7 @@
       </section>
 
       <!-- Updates. Reflects the real update state rather than a phase placeholder:
-           the channel and version come from the build, and the Windows caveat is
+           the version comes from the build, and the Windows caveat is
            the one thing a user needs to know (its update is applied by the bundled
            sidecar on the next launch, not while the app runs). -->
       <section class="flex flex-col gap-3">
@@ -369,15 +369,12 @@
             <div class="flex flex-col gap-0.5">
               <span class="text-sm text-ink">SemaClip {__APP_VERSION__}</span>
               <span class="font-mono text-xs text-ash-dim">
-                {#if __APP_CHANNEL__ === 'nightly'}
-                  Nightly channel — built from the latest commit, not a tested release.
-                {:else}
-                  Stable channel.
-                {/if}
+                Pre-alpha. Development is continuous, so every release is just the
+                next build along one line.
               </span>
             </div>
             <span class="rounded border border-border px-2 py-1 font-mono text-xs text-ash-dim">
-              {__APP_CHANNEL__}
+              pre-alpha
             </span>
           </div>
           <p class="border-t border-border pt-2 text-xs text-ash-dim">

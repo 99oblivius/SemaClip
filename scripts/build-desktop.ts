@@ -84,9 +84,9 @@ if (platform === "win-x64") {
   await Deno.mkdir(stage, { recursive: true });
   await Deno.writeTextFile(
     join(stage, "version.txt"),
-    `version=${await readVersion()}\nchannel=${channel()}\nmanifest=${manifestUrl()}\n`,
+    `version=${await readVersion()}\nmanifest=${manifestUrl()}\n`,
   );
-  console.log(`version.txt: ${await readVersion()} (${channel()})`);
+  console.log(`version.txt: ${await readVersion()}`);
   await buildSidecar(stage);
 }
 
@@ -104,24 +104,28 @@ const envFile = join(REPO, "server", ".env");
 // Passed RELATIVE to the desktop command (cwd is server/), which is the form the
 // minimal-app probe proved works.
 const envArg = ".env";
+// NOTE: nothing PER-USER belongs in this file. Measured on Deno 2.9.6: `%VAR%` is
+// not expanded at all (it ships literally, which is how a Windows install ended up
+// with a directory literally named %LOCALAPPDATA%), and `${VAR}` is expanded at
+// BUILD time, so it bakes the build machine's value. Neither can name a directory on
+// the user's machine. WEBVIEW2_USER_DATA_FOLDER is therefore resolved at RUNTIME in
+// server/adapters/outbound/platform/webview-fix.ts.
 const launchEnv = platform === "win-x64"
-  ? { WEBVIEW2_USER_DATA_FOLDER: "" } // set below: needs the user's profile path
-  : { WEBKIT_DISABLE_DMABUF_RENDERER: "1" };
-if (platform === "win-x64") {
-  // WebView2's profile must NOT sit beside the executable: under Program Files that
-  // is unwritable and the window renders white (denoland/deno#36768). %LOCALAPPDATA%
-  // expands at runtime, so the file stays machine-independent.
-  launchEnv.WEBVIEW2_USER_DATA_FOLDER = "%LOCALAPPDATA%\\SemaClip\\WebView2";
-} else {
-  // Keep native Wayland: the DMA-BUF renderer is what fails on NVIDIA + Wayland.
+  // Nothing to set here: the Windows profile path is per-user and resolved at runtime.
+  ? {}
+  // Linux keeps native Wayland: the DMA-BUF renderer is what fails on NVIDIA +
+  // Wayland, and this flag is the same for every user, so build time is correct.
   // GDK_BACKEND=x11 also works but downgrades the whole app to X11.
-  launchEnv.WEBKIT_DISABLE_DMABUF_RENDERER = "1";
-}
+  : { WEBKIT_DISABLE_DMABUF_RENDERER: "1" };
 await Deno.writeTextFile(
   envFile,
   Object.entries(launchEnv).map(([k, v]) => `${k}=${v}`).join("\n") + "\n",
 );
-console.log(`launch env (${platform}): ${Object.keys(launchEnv).join(", ")}`);
+console.log(
+  Object.keys(launchEnv).length
+    ? `launch env (${platform}): ${Object.keys(launchEnv).join(", ")}`
+    : `launch env (${platform}): none at build time (per-user paths resolve at runtime)`,
+);
 
 const args = [
   "desktop",
@@ -179,7 +183,7 @@ if (platform === "win-x64") {
   const appDir = output.endsWith(".msi") ? output.slice(0, -4) : output;
   await Deno.writeTextFile(
     join(appDir, "version.txt"),
-    `version=${await readVersion()}\nchannel=${channel()}\nmanifest=${manifestUrl()}\n`,
+    `version=${await readVersion()}\nmanifest=${manifestUrl()}\n`,
   );
   await buildSidecar(appDir);
   await Deno.remove(stage, { recursive: true }).catch(() => {});
@@ -213,11 +217,6 @@ async function readVersion(): Promise<string> {
   const v = String(pkg.version ?? "");
   if (!v) throw new Error("frontend/package.json has no version");
   return v;
-}
-
-/** Nightly unless the build explicitly asks for stable. */
-function channel(): string {
-  return Deno.env.get("SEMACLIP_CHANNEL") === "stable" ? "stable" : "nightly";
 }
 
 /** The manifest this build should poll, mirroring deno.json's desktop.release. */

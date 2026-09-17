@@ -16,9 +16,9 @@ import (
 	"time"
 )
 
-// DefaultManifestURL is the nightly channel. A stable channel would carry a
+// DefaultManifestURL is the only channel there is. A second channel would carry a
 // different path, which is why the URL is also read from version.txt.
-const DefaultManifestURL = "https://99oblivius.github.io/SemaClip/nightly/latest.json"
+const DefaultManifestURL = "https://99oblivius.github.io/SemaClip/latest.json"
 
 // versionFile is written into the bundle by the build so the updater can learn
 // what is installed WITHOUT guessing from the payload. The app cannot report its
@@ -47,7 +47,6 @@ func stateFilePath() string {
 
 type Config struct {
 	ManifestURL string
-	Channel     string
 }
 
 // Manifest mirrors the published latest.json.
@@ -69,10 +68,10 @@ type ManifestEntry struct {
 }
 
 // LoadConfig reads the bundle's version file for its channel, falling back to the
-// nightly manifest. The version itself is NOT kept here — Installed() reads it on
+// manifest. The version itself is NOT kept here — Installed() reads it on
 // demand so there is one reader of that value.
 func LoadConfig(appDir string) (Config, error) {
-	cfg := Config{ManifestURL: DefaultManifestURL, Channel: "nightly"}
+	cfg := Config{ManifestURL: DefaultManifestURL}
 	raw, err := os.ReadFile(filepath.Join(appDir, versionFile))
 	if err != nil {
 		return cfg, fmt.Errorf("no %s in %s — is this a SemaClip bundle?", versionFile, appDir)
@@ -84,9 +83,9 @@ func LoadConfig(appDir string) (Config, error) {
 		}
 		switch strings.TrimSpace(key) {
 		case "channel":
-			if v := strings.TrimSpace(value); v != "" {
-				cfg.Channel = v
-			}
+			// Retained only to TOLERATE bundles written before the channel concept was
+			// removed: the key is read and ignored, never stored or re-emitted.
+			_ = strings.TrimSpace(value)
 		case "manifest":
 			if v := strings.TrimSpace(value); v != "" {
 				cfg.ManifestURL = v
@@ -178,8 +177,8 @@ type CheckResult struct {
 
 // Check fetches the manifest and decides whether the installed bundle is already
 // current. Version comparison is exact equality: SemaClip versions are
-// v{yy}.{patch} with a nightly suffix, and the manifest names the latest build —
-// "different" is the only safe reading, since ordering nightly suffixes
+// v{yy}.{patch}, and the manifest names the latest build. "Different" is the only
+// safe reading: comparing patch numbers would need the year to match, and
 // numerically would silently skip builds.
 func (u *Updater) Check() (CheckResult, error) {
 	res := CheckResult{}
@@ -307,7 +306,7 @@ func (u *Updater) Apply(force bool) error {
 	if err := os.RemoveAll(backup); err != nil {
 		return fmt.Errorf("updated, but could not remove %s: %w", backup, err)
 	}
-	if err := writeVersion(u.Dir, chk.Latest, u.Cfg.Channel, u.Cfg.ManifestURL); err != nil {
+	if err := writeVersion(u.Dir, chk.Latest, u.Cfg.ManifestURL); err != nil {
 		return fmt.Errorf("updated files but could not write %s: %w", versionFile, err)
 	}
 	u.log("updated to %s", chk.Latest)
@@ -402,17 +401,16 @@ func copyVerified(src, dest, want string) error {
 // Assets live in the RELEASE, beside the manifest's own directory, so the
 // manifest's path is rewriten one level up rather than hardcoding a repo path.
 func resolveArtifactURL(manifestURL, name string) string {
-	// <base>/<channel>/latest.json  ->  <base>/<channel>/<name>
+	// <base>/latest.json  ->  <base>/<name>
 	return strings.TrimSuffix(manifestURL, "latest.json") + name
 }
 
 // writeVersion records the applied version, preferring the bundle (so it travels
 // with a re-zip) and falling back to the per-user state file when the install
 // directory is not writable — the normal case for a Program Files install.
-func writeVersion(dir, version, channel, manifest string) error {
+func writeVersion(dir, version, manifest string) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "version=%s\n", version)
-	fmt.Fprintf(&b, "channel=%s\n", channel)
 	if manifest != "" {
 		fmt.Fprintf(&b, "manifest=%s\n", manifest)
 	}

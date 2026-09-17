@@ -1,36 +1,42 @@
 #!/usr/bin/env bash
 # Compute the SemaClip version: v{yy}.{patch} where yy = year - 2000 and patch
-# counts commits since Jan 1 of the current year. One number that means something
-# locally, satisfies Deno.autoUpdate (which compares version strings and treats
-# "differs" as an update), AND is encodable as a Windows MSI ProductVersion.
+# counts commits since Jan 1 of the current year.
+#
+# ONE CONTINUOUS LINE. There is no stable/beta/nightly split: development is
+# continuous and every release is simply the next point on it. The patch number is
+# the commit count, so it advances by itself and no channel suffix is needed to keep
+# two builds of the same commit distinct -- each commit has its own number.
 #
 # WHY yy AND NOT THE FULL YEAR (verified): Windows Installer packs ProductVersion
 # as major(0-255).minor(0-255).build(0-65535), so a CalVer major of 2026 is
 # rejected outright -- `deno desktop -o SemaClip.msi` fails with "the major field
 # 2026 exceeds the maximum of 255". Year-2000 fits (26, and it stays <=255 until
-# 2255) and the commit count fits the minor field (<=255 commits so far this
-# year; the build field's 65535 ceiling is the overflow valve if it ever grows).
+# 2255) and the commit count fits the minor field; the build field's 65535 ceiling
+# is the overflow valve if the commit count ever grows past 255.
 #
-# Writes frontend/package.json's "version" (the header banner reads it via
-# vite.config.ts) and prints the version + the release tag.
+# Writes the version into BOTH frontend/package.json (the header banner reads it via
+# vite.config.ts) and server/deno.json (what `deno desktop` bakes into the binary as
+# Deno.desktopVersion, which Deno.autoUpdate compares against the manifest). They
+# must never drift, or the updater re-applies patches forever.
 #
-# Usage:  ./scripts/version.sh              # stable:  2026.138         -> v2026.138
-#         ./scripts/version.sh --nightly    # nightly: 2026.138-nightly.42
-#         ./scripts/version.sh --check      # print only, no write (CI verify)
-#
-# THE NIGHTLY SUFFIX IS LOAD-BEARING, not cosmetic. Deno.autoUpdate looks up a
-# patch under manifest.patches[Deno.desktopVersion], so if a nightly and a
-# stable build both reported "2026.138" the updater would treat them as the same
-# version and a nightly would never see the next nightly. The suffix also keys
-# the nightly manifest, served from a URL separate from the stable one.
+# Usage:  ./scripts/version.sh           # write package.json + deno.json, print
+#         ./scripts/version.sh --check   # print only, no write (CI verify)
 set -euo pipefail
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+check_only="no"
+for arg in "$@"; do
+  case "$arg" in
+    --check) check_only="yes" ;;
+    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mode="stable"
 check_only="no"
 for arg in "$@"; do
   case "$arg" in
-    --nightly) mode="nightly" ;;
     --check) check_only="yes" ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
@@ -51,13 +57,6 @@ if [ "$patch" -le 255 ]; then
   version="${yy}.${patch}"
 else
   version="${yy}.255.${patch}"
-fi
-if [ "$mode" = "nightly" ]; then
-  # The run number keeps consecutive nightlies of the SAME commit distinct —
-  # otherwise two runs of one commit collide on a single version and the updater
-  # sees no change. CI supplies GITHUB_RUN_NUMBER.
-  run="${GITHUB_RUN_NUMBER:-0}"
-  version="${version}-nightly.${run}"
 fi
 tag="v${version}"
 
@@ -82,4 +81,4 @@ fi
 
 echo "version=${version}"
 echo "tag=${tag}"
-echo "mode=${mode}"
+echo "repo=${repo}"

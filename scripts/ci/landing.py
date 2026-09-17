@@ -3,15 +3,14 @@
 
 WHY THIS IS A FILE AND NOT AN INLINE HEREDOC: a `run: |` block in a GitHub Actions
 workflow carries its own indentation into the script, so an inline `python3 - <<'PY'`
-body arrives indented — IndentationError, and a `PY` terminator no longer at column 0
-so the heredoc never closes. Both failures are silent until the job runs.
+body arrives indented. That is an IndentationError, and the `PY` terminator is no
+longer at column 0 so the heredoc never closes. Both failures are silent until the job
+actually runs.
 
-WHY THE PAGE IS GENERATED PER RELEASE rather than being a static file with JavaScript
-that finds the newest download: every SemaClip release is published as a PRERELEASE,
-and GitHub's `/releases/latest` redirect resolves to the releases LIST, not to a tag.
-So there is no tag-free download URL — something must know the version. Baking it in
-at publish time means the page always names a real artifact, needs no API call, hits
-no rate limit, and cannot show a stale or wrong version.
+WHY THE PAGE IS GENERATED PER RELEASE rather than being a static file that looks up the
+newest download: anything that must name a version has to learn it. Baking it in at
+publish time means the page always names an artifact this very run uploaded, needs no
+API call, hits no rate limit, and cannot show a stale or wrong version.
 
 USAGE
   landing.py <out.html> <version> <release-url> <asset:os:arch:label>...
@@ -33,13 +32,16 @@ INK = "#ffffff"
 ASH = "#a1a1aa"
 ASH_DIM = "#71717a"
 ACCENT = "#cc0000"
-SUCCESS = "#22c55e"
 WARNING = "#eab308"
 
 OS_LABELS = {"linux": "Linux", "windows": "Windows", "macos": "macOS"}
 OS_ORDER = ["windows", "linux", "macos"]
 
 REPO = "https://github.com/99oblivius/SemaClip"
+
+# An em-dash reads as machine-written prose and was called out for exactly that, so
+# the generated page must not contain one. The release workflow asserts this too.
+FORBIDDEN = "\u2014"
 
 
 def parse_asset(spec: str) -> dict:
@@ -52,17 +54,46 @@ def parse_asset(spec: str) -> dict:
     return {"name": name, "os": os_name, "arch": arch, "label": label}
 
 
+def rank(a: dict) -> int:
+    """Prefer something installable, then a single-file bundle."""
+    if a["name"].endswith((".msi", ".AppImage", ".dmg")):
+        return 0
+    if a["name"].endswith(".deb"):
+        return 1
+    return 2
+
+
 def hint_for(asset: dict) -> str:
     """One line telling the user what to do with the file they just downloaded."""
     if asset["os"] == "windows":
         if asset["name"].endswith(".msi"):
-            return "Run the installer. Windows may warn about an unknown publisher — the build is signed by nobody yet."
-        return "No install: unzip anywhere and run <code>SemaClip.exe</code>."
+            return "Run the installer. It is unsigned, so Windows will warn about an unknown publisher."
+        return "Nothing to install. Unzip it anywhere and run <code>SemaClip.exe</code>."
     if asset["os"] == "linux":
         if asset["name"].endswith(".AppImage"):
-            return "No install: <code>chmod +x</code> the file, then run it. Needs <code>webkit2gtk</code>."
+            return "Nothing to install. Mark it executable, then run it. It needs <code>webkit2gtk</code>."
         return "Install with your package manager."
-    return "Open the disk image and drag SemaClip to Applications."
+    return "Open the disk image and drag SemaClip across to Applications."
+
+
+def card(os_name: str, group: list[dict], release_url: str) -> str:
+    ordered = sorted(group, key=rank)
+    links = "\n".join(
+        f'        <a class="dl" href="{html.escape(release_url)}/{html.escape(a["name"])}"\n'
+        f'           data-os="{a["os"]}" data-arch="{a["arch"]}">\n'
+        f'          <span class="dl-label">{html.escape(a["label"])}</span>\n'
+        f'          <span class="dl-meta">{OS_LABELS[os_name]} &middot; '
+        f'{html.escape(a["arch"])} &middot; {html.escape(a["name"].rsplit(".", 1)[-1])}</span>\n'
+        f"        </a>"
+        for a in ordered
+    )
+    return (
+        f'    <section class="card" id="card-{os_name}" data-os-card="{os_name}">\n'
+        f"      <h3>{OS_LABELS[os_name]}</h3>\n"
+        f'      <div class="links">\n{links}\n      </div>\n'
+        f'      <p class="hint">{hint_for(ordered[0])}</p>\n'
+        f"    </section>"
+    )
 
 
 def render(version: str, release_url: str, assets: list[dict]) -> str:
@@ -70,41 +101,31 @@ def render(version: str, release_url: str, assets: list[dict]) -> str:
     for a in assets:
         by_os.setdefault(a["os"], []).append(a)
 
-    cards = []
-    for os_name in OS_ORDER:
-        group = by_os.get(os_name)
-        if not group:
-            continue
-        # Prefer an installer, then a single-file bundle; the runtime libraries are
-        # NOT offered — they are patch ingredients for the updater, not downloads.
-        group.sort(key=lambda a: (
-            0 if a["name"].endswith((".msi", ".AppImage", ".dmg")) else
-            1 if a["name"].endswith(".deb") else 2
-        ))
-        links = "\n".join(
-            f'''          <a class="dl" href="{html.escape(release_url)}/{html.escape(a['name'])}"
-             data-os="{a['os']}" data-arch="{a['arch']}">
-            <span class="dl-label">{html.escape(a['label'])}</span>
-            <span class="dl-meta">{html.escape(os_name)} · {html.escape(a['arch'])} · {html.escape(a['name'].rsplit(".", 1)[-1])}</span>
-          </a>'''
-            for a in group
-        )
-        hint = hint_for(group[0])
-        cards.append(f'''      <section class="card" data-os-card="{os_name}">
-        <h2>{html.escape(OS_LABELS[os_name])}</h2>
-        <div class="links">
-{links}
-        </div>
-        <p class="hint">{hint}</p>
-      </section>''')
+    present = [o for o in OS_ORDER if o in by_os]
+    # The build cannot know who is downloading, so one platform is rendered in the
+    # main slot and a script swaps in the right one. Every platform's card is in the
+    # document either way, so the page is complete and usable as served.
+    first = present[0] if present else None
+    rest = present[1:]
+
+    primary_card = card(first, by_os[first], release_url) if first else ""
+    other_cards = "\n".join(card(o, by_os[o], release_url) for o in rest)
+    others_html = (
+        '  <details class="others" id="other-oss">\n'
+        "    <summary>Other operating systems</summary>\n"
+        f'    <div class="other-grid">\n{other_cards}\n    </div>\n'
+        "  </details>"
+        if rest
+        else ""
+    )
 
     return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SemaClip — find the clips in a VOD</title>
-<meta name="description" content="SemaClip is a local-first desktop app that finds the clip-worthy moments in a Twitch VOD. Everything runs on your machine.">
+<title>SemaClip</title>
+<meta name="description" content="SemaClip opens a Twitch VOD and marks the moments that might be worth clipping. It runs on your machine.">
 <style>
   :root {{
     --foundation: {FOUNDATION};
@@ -115,7 +136,6 @@ def render(version: str, release_url: str, assets: list[dict]) -> str:
     --ash: {ASH};
     --ash-dim: {ASH_DIM};
     --accent: {ACCENT};
-    --success: {SUCCESS};
     --warning: {WARNING};
     --display: 'Space Grotesk', system-ui, sans-serif;
     --body: 'Inter', system-ui, sans-serif;
@@ -127,21 +147,16 @@ def render(version: str, release_url: str, assets: list[dict]) -> str:
     font-family: var(--body); line-height: 1.55;
   }}
   a {{ color: inherit; }}
-  .wrap {{ max-width: 62rem; margin: 0 auto; padding: 0 1.5rem; }}
-
-  header {{
-    border-bottom: 1px solid var(--border); background: var(--surface);
-    position: sticky; top: 0; z-index: 2;
+  .wrap {{ max-width: 42rem; margin: 0 auto; padding-left: 1.5rem; padding-right: 1.5rem; }}
+  .bar {{
+    display: flex; align-items: center; gap: .75rem; height: 2.75rem;
+    border-bottom: 1px solid var(--border);
   }}
-  .bar {{ display: flex; align-items: center; gap: .75rem; height: 2.75rem; }}
   .wordmark {{ font-family: var(--display); font-weight: 700; letter-spacing: -.01em; }}
   .wordmark span {{ color: var(--accent); }}
-  .chip {{
-    font-family: var(--mono); font-size: .6875rem; color: var(--ash-dim);
-    border: 1px solid var(--border); border-radius: .25rem; padding: .1rem .375rem;
-  }}
-  /* The pre-alpha notice, matching the app's own header: this is the honest state
-     of the software and the page must not imply otherwise. */
+  .ver {{ font-family: var(--mono); font-size: .6875rem; color: var(--ash-dim); }}
+  /* The pre-alpha notice, matching the app's own header. This is the honest state of
+     the software and the page must not imply otherwise. */
   .prealpha {{
     margin-left: auto; font-family: var(--mono); font-size: .6875rem; font-weight: 700;
     color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
@@ -149,14 +164,14 @@ def render(version: str, release_url: str, assets: list[dict]) -> str:
     border-radius: .25rem; padding: .1rem .5rem;
   }}
 
-  main.wrap {{ padding-top: 3.5rem; padding-bottom: 4rem; }}
-  h1 {{ font-family: var(--display); font-size: clamp(2rem, 5vw, 3rem); line-height: 1.1; margin: 0 0 .75rem; }}
-  .lede {{ font-size: 1.125rem; color: var(--ash); max-width: 40rem; margin: 0 0 2rem; }}
-  .lede strong {{ color: var(--ink); font-weight: 600; }}
+  main.wrap {{ padding-top: 3rem; padding-bottom: 3rem; }}
+  h1 {{ font-family: var(--display); font-size: clamp(1.5rem, 4vw, 2rem); line-height: 1.15; margin: 0 0 .75rem; }}
+  .lede {{ font-size: 1rem; color: var(--ash); margin: 0 0 1rem; }}
+  .state {{ font-size: .9375rem; color: var(--ash-dim); margin: 0 0 2.25rem; }}
+  .state strong {{ color: var(--warning); font-weight: 600; }}
 
-  .downloads {{ display: grid; gap: 1rem; align-items: start; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); }}
-  .card {{ background: var(--surface); border: 1px solid var(--border); border-radius: .5rem; padding: 1.25rem; }}
-  .card h2 {{ font-family: var(--display); font-size: .8125rem; text-transform: uppercase; letter-spacing: .08em; color: var(--ash); margin: 0 0 .875rem; }}
+  h2 {{ font-family: var(--display); font-size: .8125rem; text-transform: uppercase; letter-spacing: .08em; color: var(--ash); margin: 0 0 .75rem; }}
+  .card h3 {{ font-family: var(--display); font-size: .8125rem; text-transform: uppercase; letter-spacing: .06em; color: var(--ash); margin: 0 0 .5rem; }}
   .links {{ display: flex; flex-direction: column; gap: .5rem; }}
   .dl {{
     display: flex; flex-direction: column; text-decoration: none;
@@ -166,79 +181,73 @@ def render(version: str, release_url: str, assets: list[dict]) -> str:
   .dl:hover {{ border-color: var(--accent); }}
   .dl-label {{ font-weight: 600; }}
   .dl-meta {{ font-family: var(--mono); font-size: .6875rem; color: var(--ash-dim); }}
-  /* The detected platform is highlighted, but every option stays visible and
-     clickable — detection is a convenience, never a gate. */
-  .dl[data-detected="1"] {{ border-color: var(--accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent); }}
-  .hint {{ font-size: .8125rem; color: var(--ash-dim); margin: .875rem 0 0; }}
+  .hint {{ font-size: .8125rem; color: var(--ash-dim); margin: .75rem 0 0; }}
   .hint code {{ font-family: var(--mono); color: var(--ash); }}
 
-  .note {{
-    margin-top: 2rem; border: 1px solid var(--border); border-radius: .5rem;
-    padding: 1rem 1.125rem; background: var(--surface); font-size: .9375rem; color: var(--ash);
+  .others {{
+    margin-top: 1.5rem; border: 1px solid var(--border); border-radius: .375rem;
+    background: var(--surface);
   }}
-  .note b {{ color: var(--warning); }}
-  footer.wrap {{ border-top: 1px solid var(--border); margin-top: 2.5rem; padding-top: 1.5rem; padding-bottom: 3rem; color: var(--ash-dim); font-size: .8125rem; }}
+  .others > summary {{
+    cursor: pointer; padding: .625rem .875rem; font-size: .875rem; color: var(--ash);
+    list-style: none;
+  }}
+  .others > summary::-webkit-details-marker {{ display: none; }}
+  .others > summary::before {{ content: '+  '; font-family: var(--mono); color: var(--ash-dim); }}
+  .others[open] > summary::before {{ content: '-  '; }}
+  .others > summary:hover {{ color: var(--ink); }}
+  .other-grid {{ display: grid; gap: 1rem; padding: 0 .875rem 1rem; }}
+
+  footer.wrap {{
+    border-top: 1px solid var(--border); margin-top: 2.5rem;
+    padding-top: 1.5rem; padding-bottom: 3rem;
+    color: var(--ash-dim); font-size: .8125rem;
+  }}
   footer a {{ color: var(--ash); }}
-  .feat {{ display: grid; gap: 1.25rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); margin: 3rem 0 0; }}
-  .feat div h3 {{ font-family: var(--display); font-size: .9375rem; margin: 0 0 .25rem; }}
-  .feat div p {{ margin: 0; color: var(--ash); font-size: .9375rem; }}
 </style>
 </head>
 <body>
-<header>
-  <div class="wrap bar">
+<div class="wrap">
+  <div class="bar">
     <span class="wordmark">Sema<span>Clip</span></span>
-    <span class="chip">local</span>
-    <span class="chip">nightly {html.escape(version)}</span>
-    <span class="prealpha">pre-alpha — missing features, will break</span>
+    <span class="ver">v{html.escape(version)}</span>
+    <span class="prealpha">pre-alpha</span>
   </div>
-</header>
+</div>
 
 <main class="wrap">
-  <h1>Find the clips in a VOD.</h1>
+  <h1>SemaClip</h1>
   <p class="lede">
-    SemaClip watches a Twitch VOD and marks the moments worth clipping — chat spikes,
-    loud reactions, the parts everyone rewound. <strong>Everything runs on your
-    machine:</strong> no account, no upload, no cloud. Download once and it works
-    offline.
+    Opens a Twitch VOD and marks the moments that might be worth clipping, so you can
+    look them over in one pass instead of scrubbing through the whole stream. It runs
+    on your machine, and it keeps working with the network off.
+  </p>
+  <p class="state">
+    <strong>Not finished.</strong> Downloading a VOD works, and detection works.
+    Review and export are still being built, so making a clip from start to finish
+    does not work yet. Expect it to break.
   </p>
 
-  <div class="downloads">
-{chr(10).join(cards)}
+  <h2 id="download-heading">Download</h2>
+  <div id="primary-slot">
+{primary_card}
   </div>
 
-  <div class="note">
-    <b>This is pre-alpha.</b> Downloading, detection and review work today; the app is
-    missing features and will break in places. It reports its own problems instead of
-    hiding them — if something looks wrong, it probably is, and it should say so.
-  </div>
-
-  <div class="feat">
-    <div>
-      <h3>Local-first</h3>
-      <p>Detection, transcription and export all run on your hardware. Your VODs never leave the machine.</p>
-    </div>
-    <div>
-      <h3>Streams while it downloads</h3>
-      <p>A scrubbable preview appears within seconds and grows as the file arrives, so you can start reviewing immediately.</p>
-    </div>
-    <div>
-      <h3>Nothing to configure</h3>
-      <p>Point it at a VOD or a folder and it works out the rest — resolution, proxy quality and CPU use have sensible defaults.</p>
-    </div>
-  </div>
+{others_html}
 </main>
 
-<footer class="wrap">
-  <a href="{html.escape(REPO)}">Source, issues and release notes</a> ·
-  nightly builds are produced automatically from the latest commit and are not tested releases.
-</footer>
+<div class="wrap">
+  <footer>
+    <a href="{html.escape(REPO)}">Source and issue tracker</a>. Each build is cut from
+    the latest commit and has not been through a test pass.
+  </footer>
+</div>
 
 <script>
-  // Highlight the visitor's platform. This is a CONVENIENCE only: every download is
-  // rendered above regardless, because detection is wrong often enough (a Linux user
-  // on a phone, a Chromebook, a UA-locked browser) that hiding options would strand
-  // people. If it cannot tell, it simply changes nothing.
+  // Put the visitor's platform in the main slot. The section holding the others
+  // stays closed, so the page shows one download and offers the rest. Presentation
+  // only: every download is already in the document, so if detection is unavailable
+  // or simply wrong the page still works exactly as served.
   (function () {{
     var ua = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent || "";
     ua = ua.toLowerCase();
@@ -247,12 +256,19 @@ def render(version: str, release_url: str, assets: list[dict]) -> str:
            : ua.indexOf("linux") >= 0 || ua.indexOf("x11") >= 0 ? "linux"
            : null;
     if (!os) return;
-    var links = document.querySelectorAll('.dl[data-os="' + os + '"]');
-    for (var i = 0; i < links.length; i++) links[i].setAttribute("data-detected", "1");
-    var cards = document.querySelectorAll(".card[data-os-card]");
-    for (var j = 0; j < cards.length; j++) {{
-      cards[j].style.order = cards[j].getAttribute("data-os-card") === os ? "-1" : "0";
-    }}
+
+    var slot = document.getElementById("primary-slot");
+    var others = document.getElementById("other-oss");
+    var grid = others && others.querySelector(".other-grid");
+    var wanted = document.getElementById("card-" + os);
+    // Nothing to do when detection agrees with what was rendered first, or when this
+    // platform has no card at all.
+    if (!slot || !others || !grid || !wanted || wanted.parentNode === slot) return;
+
+    var current = slot.querySelector(".card");
+    if (current) grid.appendChild(current);
+    slot.appendChild(wanted);
+    // Deliberately NOT opened: the other platforms stay behind the disclosure.
   }})();
 </script>
 </body>
@@ -270,8 +286,10 @@ def main() -> int:
     # offering one would hand the user a bare .so/.dll.
     assets = [a for a in assets if not a["name"].endswith(("-runtime.so", "-runtime.dll"))]
     if not assets:
-        sys.exit("::error::no downloadable assets given — the page would ship empty")
+        sys.exit("::error::no downloadable assets given, so the page would ship empty")
     page = render(version, release_url.rstrip("/"), assets)
+    if FORBIDDEN in page:
+        sys.exit("::error::the generated page contains an em-dash, which reads as machine-written prose")
     with open(out, "w") as fh:
         fh.write(page)
     print(json.dumps({"wrote": out, "version": version, "assets": len(assets)}))

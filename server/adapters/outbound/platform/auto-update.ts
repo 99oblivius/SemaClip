@@ -19,9 +19,7 @@
  * status is surfaced in-app rather than hidden, so a Windows user is not shown
  * "update ready" forever with nothing happening.
  */
-const CHANNEL = Deno.env.get("SEMACLIP_CHANNEL") === "stable" ? "stable" : "nightly";
-
-/** One update check per 6h — frequent enough for a nightly channel, not a poll. */
+/** One update check per 6h: often enough to keep up with continuous development. */
 const INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 /**
@@ -35,7 +33,6 @@ const UPDATE_PUBLIC_KEY = "";
 export interface UpdateStatus {
   /** Version baked into THIS binary, or null in a dev run. */
   current: string | null;
-  channel: string;
   /** Set once a patch is staged and waiting for the next launch. */
   pendingVersion: string | null;
   /** Set when the PREVIOUS launch failed and the launcher rolled it back. */
@@ -46,7 +43,6 @@ export interface UpdateStatus {
 
 const status: UpdateStatus = {
   current: (Deno as { desktopVersion?: string | null }).desktopVersion ?? null,
-  channel: CHANNEL,
   pendingVersion: null,
   lastRollback: null,
   canApply: Deno.build.os !== "windows",
@@ -91,7 +87,7 @@ export function startAutoUpdate(baseUrl?: string): void {
   }
 
   console.log(
-    `Updates: ${CHANNEL} channel, current ${status.current}, polling ` +
+    `Updates: current ${status.current}, polling ` +
       `${override ?? "the baseUrl baked into this build"}`,
   );
   if (!status.canApply) {

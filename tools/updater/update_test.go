@@ -93,19 +93,19 @@ func sha256File(t *testing.T, path string) string {
 func newTestUpdater(t *testing.T, dir string, manifest map[string]any, artifactPath string) (*Updater, *httptest.Server) {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/nightly/latest.json", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/latest.json", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(manifest)
 	})
 	if artifactPath != "" {
-		mux.HandleFunc("/nightly/", func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFile(w, r, artifactPath)
 		})
 	}
 	srv := httptest.NewServer(mux)
 	u := &Updater{
 		Dir: dir,
-		Cfg: Config{ManifestURL: srv.URL + "/nightly/latest.json", Channel: "nightly"},
+		Cfg: Config{ManifestURL: srv.URL + "/latest.json"},
 		Out: os.Stdout,
 	}
 	t.Cleanup(srv.Close)
@@ -388,8 +388,8 @@ func TestApplyIsIdempotent(t *testing.T) {
 }
 
 func TestResolveArtifactURLSitsBesideTheManifest(t *testing.T) {
-	got := resolveArtifactURL("https://example.test/nightly/latest.json", "payload.zip")
-	want := "https://example.test/nightly/payload.zip"
+	got := resolveArtifactURL("https://example.test/latest.json", "payload.zip")
+	want := "https://example.test/payload.zip"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}
@@ -402,7 +402,7 @@ func TestLoadConfigDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ManifestURL != "https://x.test/m.json" || cfg.Channel != "nightly" {
+	if cfg.ManifestURL != "https://x.test/m.json" {
 		t.Fatalf("cfg=%+v", cfg)
 	}
 
@@ -613,7 +613,7 @@ func TestWriteVersionFallsBackWhenBundleIsReadOnly(t *testing.T) {
 	os.Remove(filepath.Join(dir, versionFile))
 	os.MkdirAll(filepath.Join(dir, versionFile), 0o755)
 
-	if err := writeVersion(dir, "v26.9", "nightly", "http://x/m.json"); err != nil {
+	if err := writeVersion(dir, "v26.9", "http://x/m.json"); err != nil {
 		t.Fatalf("writeVersion: %v", err)
 	}
 	got := read(t, filepath.Join(stateDir, "SemaClip", "state.txt"))

@@ -3,8 +3,8 @@
 #
 # Usage: scripts/ci/push-pages.sh <owner/repo> <token> <src> <dest-in-branch> [<src> <dest> ...]
 #   e.g. scripts/ci/push-pages.sh 99oblivius/SemaClip "$GH_TOKEN" \
-#          dist/nightly/latest.json nightly/latest.json \
-#          work/patch-x.bin nightly/patch-x.bin
+#          dist/latest.json latest.json \
+#          work/patch-x.bin patch-x.bin
 #
 # WHY A SCRIPT AND NOT A PAGES ACTION: the manifest and its patch files must land
 # in the SAME commit. Two publishes (manifest first, patch second) leave a window
@@ -29,7 +29,7 @@ repo="$1"; token="$2"; shift 2
 branch="releases"
 
 # Sources arrive as paths relative to the CALLER's cwd (release.yml passes
-# "dist/nightly/latest.json"), but this script cds into its scratch directory.
+# "dist/latest.json"), but this script cds into its scratch directory.
 # Resolving to absolute up front is not cosmetic: without it every publish fails
 # with "source not found" after the cd, which is exactly the failure this test
 # caught.
@@ -92,7 +92,7 @@ if git diff --cached --quiet; then
   exit 0
 fi
 git -c user.name="semaclip-ci" -c user.email="ci@users.noreply.github.com" \
-  commit -q -m "publish ${GITHUB_RUN_NUMBER:+nightly.${GITHUB_RUN_NUMBER} }manifests"
+  commit -q -m "publish manifest${GITHUB_RUN_NUMBER:+ (run ${GITHUB_RUN_NUMBER})}"
 
 # Fast-forward push: the release workflow serialises on a concurrency group, so a
 # rejected push means something else wrote the branch and the manifest would be

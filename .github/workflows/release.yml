@@ -1,4 +1,9 @@
-# SemaClip nightly release pipeline.
+# SemaClip release pipeline.
+#
+# ONE CONTINUOUS LINE OF RELEASES. There is no stable/beta/nightly split: development
+# is continuous, every build is pre-alpha, and the version (v{yy}.{patch}) is the only
+# identity. The patch number is the commit count, so each commit has its own version
+# and consecutive builds can never collide.
 #
 # Nightly channel only. A stable channel (tag push `v*`) would reuse the build and
 # verify jobs and differ only in the version source and manifest path.
@@ -27,8 +32,8 @@ on:
   push:
     branches: [main]
     # A docs-only push still changes the commit count, so without this every
-    # typo fix in a markdown file would cut a nightly release — and the version
-    # is commit-derived, so each no-op nightly moves every user's version.
+    # typo fix in a markdown file would cut a release — and the version is
+    # commit-derived, so each no-op release moves every user's version.
     paths-ignore:
       - "**/*.md"
       - "docs/**"
@@ -38,7 +43,7 @@ on:
 # to the releases branch; the second push wins and the loser's patch entry is
 # dropped. Serialise instead.
 concurrency:
-  group: release-nightly
+  group: release
   cancel-in-progress: true
 
 permissions:
@@ -50,7 +55,6 @@ env:
   # (check.yml deliberately floats; see the note at the top of that file.)
   DENO_VERSION: v2.9.6
   NODE_VERSION: "22"
-  CHANNEL_DIR: nightly
   # Pin DENO_DIR into the workspace so both matrix runners share one cache path:
   # the default is ~/.cache/deno on Linux but %LOCALAPPDATA%\deno on Windows, so
   # a cache keyed on the default path would silently miss.
@@ -74,11 +78,11 @@ jobs:
           # clone point and silently produces a wrong (smaller) version.
           fetch-depth: 0
 
-      - name: Compute the nightly version
+      - name: Compute the version
         id: compute
         run: |
           set -euo pipefail
-          out="$(./scripts/version.sh --nightly)"
+          out="$(./scripts/version.sh)"
           printf '%s\n' "$out"
 
           version="$(printf '%s\n' "$out" | sed -n 's/^version=//p')"
@@ -93,12 +97,11 @@ jobs:
             echo "::error::tag '$tag' is not 'v' + version '$version'"
             exit 1
           fi
-          # The nightly suffix keys the manifest entry: without it a nightly and a
-          # stable build of the same commit claim one version and the updater sees
-          # no change (see version.sh's header).
+          # The version must carry no channel suffix: the patch number IS the commit
+          # count, so consecutive builds can never collide (see version.sh's header).
           case "$version" in
-            *-nightly.*) ;;
-            *) echo "::error::expected a -nightly.<run> suffix on '$version'"; exit 1 ;;
+            *-*) echo "::error::the version must have no channel suffix, got '$version'"; exit 1 ;;
+            *) ;;
           esac
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -188,7 +191,7 @@ jobs:
           # does not, the version baked into the binary differs from the one about
           # to be tagged and published — the failure the updater cannot recover
           # from, because it compares the two.
-          out="$(./scripts/version.sh --nightly)"
+          out="$(./scripts/version.sh)"
           version="$(printf '%s\n' "$out" | sed -n 's/^version=//p')"
           if [ "$version" != "${{ needs.version.outputs.version }}" ]; then
             echo "::error::build computed '$version', version job computed '${{ needs.version.outputs.version }}'"
@@ -314,7 +317,7 @@ jobs:
 
           # The runtime dylib (<App>.so / <App>.dll) carries the whole ~560MB
           # payload and is what the launcher swaps. It is published so the NEXT
-          # nightly's patch job has the "old" side to diff against.
+          # release's patch job has the "old" side to diff against.
           DYLIB="$(find dist -maxdepth 3 -type f \( -name '*.so' -o -name '*.dll' \) -print -quit)"
           if [ -z "$DYLIB" ]; then
             echo "::error::no runtime dylib (*.so/*.dll) in dist — patches cannot be generated"
@@ -406,7 +409,7 @@ jobs:
             echo "ok $art $got"
           done
 
-      - name: Create the nightly release
+      - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -419,14 +422,13 @@ jobs:
             exit 1
           fi
 
-          # --prerelease keeps nightlies out of the repo's "latest" slot. The
-          # runtime dylibs are attached because the next nightly's patch job needs
+          # A normal release: there is no channel to keep out of the "latest" slot.
+          # The runtime dylibs are attached because the next release's patch job needs
           # the previous version to diff from; without them patches cannot exist.
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "SemaClip $V (nightly)" \
-            --prerelease \
+            --title "SemaClip $V" \
             --notes "Nightly build $V from ${GITHUB_SHA:0:12}.
 
           Linux: \`SemaClip.AppImage\` — chmod +x, then run. Needs \`webkit2gtk\` installed.
@@ -448,12 +450,11 @@ jobs:
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
             --jq '.assets[].name' | sed 's/^/published: /'
 
-      - name: Write latest.json for the nightly channel
+      - name: Write latest.json
         run: |
           set -euo pipefail
-          mkdir -p "dist/${{ env.CHANNEL_DIR }}"
           python3 scripts/ci/manifest.py init \
-            "dist/${{ env.CHANNEL_DIR }}/latest.json" \
+            "dist/latest.json" \
             "${{ needs.version.outputs.version }}"
 
           # The Windows whole-payload artifact. Deno.autoUpdate cannot swap a
@@ -466,7 +467,7 @@ jobs:
           ZIP="SemaClip-$V-win-x64-portable.zip"
           if [ -f "dist/$ZIP" ]; then
             python3 scripts/ci/manifest.py artifact \
-              "dist/${{ env.CHANNEL_DIR }}/latest.json" \
+              "dist/latest.json" \
               "$V" win-x64 "$ZIP" "$(awk '{print $1}' "dist/$ZIP.sha256")" \
               "https://github.com/${{ github.repository }}/releases/download/${{ needs.version.outputs.tag }}/$ZIP"
           else
@@ -503,7 +504,7 @@ jobs:
         run: |
           set -euo pipefail
           # GitHub Pages serves the `releases` branch, and the updater fetches
-          # <baseUrl>/latest.json — so the manifest lands at nightly/latest.json.
+          # <baseUrl>/latest.json — so the manifest lands at latest.json in the branch root.
           # The page goes to the branch ROOT (index.html) because every SemaClip
           # release is a PRERELEASE: GitHub's /releases/latest resolves to the
           # releases LIST, not to a tag, so no tag-free download URL exists and the
@@ -511,8 +512,8 @@ jobs:
           # push-pages.sh, which preserves the patch files the live manifest still
           # references. Plain git push; no third-party Pages action.
           bash scripts/ci/push-pages.sh "$GITHUB_REPOSITORY" "$GH_TOKEN" \
-            "dist/${{ env.CHANNEL_DIR }}/latest.json" \
-            "${{ env.CHANNEL_DIR }}/latest.json" \
+            "dist/latest.json" \
+            "latest.json" \
             "landing/index.html" "index.html"
 
       # ── Ed25519 manifest signing: WIRED BUT NOT ACTIVE ──────────────────────
@@ -542,7 +543,7 @@ jobs:
       #   run: |
       #     python3 -m pip install --quiet cryptography
       #     python3 scripts/ci/sign-manifest.py \
-      #       "dist/${{ env.CHANNEL_DIR }}/latest.json" \
+      #       "dist/latest.json" \
       #       "$SEMACLIP_ED25519_KEY"
 
   # ── patch ──────────────────────────────────────────────────────────────────
@@ -605,7 +606,7 @@ jobs:
           qbsdiff --help >/dev/null
           qbspatch --help >/dev/null
 
-      - name: Find the previous nightly
+      - name: Find the previous release
         id: prev
         env:
           GH_TOKEN: ${{ github.token }}
@@ -613,7 +614,7 @@ jobs:
           set -euo pipefail
           CUR="${{ needs.version.outputs.tag }}"
 
-          # The newest nightly other than this one that actually carries a Linux
+          # The newest release other than this one that actually carries a Linux
           # runtime dylib — a release without one cannot be a diff base.
           prev=""
           for tag in $(gh release list --repo "$GITHUB_REPOSITORY" --limit 30 \
@@ -630,10 +631,10 @@ jobs:
           if [ -z "$prev" ]; then
             # First run of the channel. `patches` stays empty and every user stays
             # put — correct behaviour, not a failure.
-            echo "::notice::no previous nightly with a runtime dylib; nothing to patch from"
+            echo "::notice::no previous release with a runtime dylib; nothing to patch from"
             echo "found=false" >> "$GITHUB_OUTPUT"
           else
-            echo "previous nightly: $prev"
+            echo "previous release: $prev"
             echo "found=true" >> "$GITHUB_OUTPUT"
             echo "tag=$prev" >> "$GITHUB_OUTPUT"
             echo "version=${prev#v}" >> "$GITHUB_OUTPUT"
@@ -718,7 +719,7 @@ jobs:
           # job is also the path that repairs a manifest, and merging into a stale
           # local copy would drop any entry added in between.
           curl -sSfL --max-time 60 \
-            "${{ env.MANIFEST_BASE_URL }}/${{ env.CHANNEL_DIR }}/latest.json" \
+            "${{ env.MANIFEST_BASE_URL }}/latest.json" \
             -o dist/latest.json
 
           # Manifest shape: {version, patches: {"<fromVersion>": {name, sha256}}}.
@@ -754,9 +755,9 @@ jobs:
           # observable separately.
           bash scripts/ci/push-pages.sh "$GITHUB_REPOSITORY" "$GH_TOKEN" \
             "dist/latest.json" \
-            "${{ env.CHANNEL_DIR }}/latest.json" \
+            "latest.json" \
             "work/${{ steps.diff.outputs.name }}" \
-            "${{ env.CHANNEL_DIR }}/${{ steps.diff.outputs.name }}"
+            "${{ steps.diff.outputs.name }}"
 
       # Signing must run here too, not only in `publish`: this job rewrites the
       # manifest, so signing only there leaves the FINAL published manifest
@@ -766,7 +767,7 @@ jobs:
   verify:
     needs: [version, publish, patch]
     # Runs when the patch job was skipped (patches disabled, or no previous
-    # nightly): the release and the manifest must still be checked. It fails on
+    # release): the release and the manifest must still be checked. It fails on
     # its own if either is wrong, so this is not a lenient gate.
     if: |
       always() &&
@@ -840,7 +841,7 @@ jobs:
       - name: Verify the live manifest at the Pages URL
         run: |
           set -euo pipefail
-          URL="${{ env.MANIFEST_BASE_URL }}/${{ env.CHANNEL_DIR }}/latest.json"
+          URL="${{ env.MANIFEST_BASE_URL }}/latest.json"
 
           # A Pages build is asynchronous, so poll — but never claim the manifest
           # is live when it is not. If it never appears, this fails: an updater
@@ -881,8 +882,12 @@ jobs:
 
           # The page must name THIS version and must not still be advertising an
           # older one — a stale page is how a user downloads the wrong build.
-          grep -qF "nightly $V" back/live-index.html \
-            || { echo "::error::landing page does not mention nightly $V"; exit 1; }
+          grep -qF "v$V" back/live-index.html \
+            || { echo "::error::landing page does not mention v$V"; exit 1; }
+          # An em-dash reads as machine-written prose; the page must not ship one.
+          if grep -qP "\x{2014}" back/live-index.html; then
+            echo "::error::landing page contains an em-dash"; exit 1;
+          fi
           grep -qF "pre-alpha" back/live-index.html \
             || { echo "::error::landing page lost the pre-alpha notice"; exit 1; }
 
@@ -911,7 +916,7 @@ jobs:
           V="${{ needs.version.outputs.version }}"
           n="$(python3 -c 'import json;print(len(json.load(open("back/live-latest.json")).get("patches",{})))')"
           if [ "$n" = "0" ]; then
-            echo "::notice::live manifest lists no patches (first nightly, or patches disabled) — nothing to verify"
+            echo "::notice::live manifest lists no patches (first release, or patches disabled) — nothing to verify"
             exit 0
           fi
 
@@ -933,7 +938,7 @@ jobs:
             # will check. A mismatch means the runtime refuses it and every user
             # on $frm silently never updates.
             curl -sSfL --max-time 300 \
-              "${{ env.MANIFEST_BASE_URL }}/${{ env.CHANNEL_DIR }}/$name" -o "back/$name"
+              "${{ env.MANIFEST_BASE_URL }}/$name" -o "back/$name"
             got="$(sha256sum "back/$name" | awk '{print $1}')"
             [ "$got" = "$sha" ] || { echo "::error::$name manifest sha=$sha actual=$got"; exit 1; }
 
@@ -964,10 +969,10 @@ jobs:
       - name: Summary
         run: |
           {
-            echo "## SemaClip nightly ${{ needs.version.outputs.version }}"
+            echo "## SemaClip ${{ needs.version.outputs.version }}"
             echo
             echo "- tag: \`${{ needs.version.outputs.tag }}\`"
-            echo "- manifest: ${{ env.MANIFEST_BASE_URL }}/${{ env.CHANNEL_DIR }}/latest.json"
+            echo "- manifest: ${{ env.MANIFEST_BASE_URL }}/latest.json"
             echo "- publish: ${{ needs.publish.result }}"
             echo "- patch: ${{ needs.patch.result }}"
             echo

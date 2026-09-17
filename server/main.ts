@@ -1,7 +1,10 @@
 import { createApp } from "@/adapters/inbound/http/routes.ts";
 import { buildContainer } from "@/composition/container.ts";
 import { ToolRegistry } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
-import { reportWebviewLaunchEnvironment } from "@/adapters/outbound/platform/webview-fix.ts";
+import {
+  applyWebviewLaunchEnvironment,
+  reportWebviewLaunchEnvironment,
+} from "@/adapters/outbound/platform/webview-fix.ts";
 import { startAutoUpdate } from "@/adapters/outbound/platform/auto-update.ts";
 import { adoptWindowLifecycle } from "@/adapters/outbound/platform/window-lifecycle.ts";
 import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
@@ -122,6 +125,11 @@ async function serveFile(
 // Before serving: the window must be adopted while it exists, and this is also
 // what makes a window close exit the process instead of leaving a headless server
 // holding the port (measured on Windows: close did nothing).
+// Resolve per-user launch environment BEFORE anything else: the webview host may
+// initialise around the entrypoint, and the Windows profile path cannot come from the
+// build-time env file (see webview-fix.ts for the measurements).
+applyWebviewLaunchEnvironment();
+
 // Report the launch workaround this build was compiled with (see webview-fix.ts).
 // It must arrive via `deno desktop --env-file`, because setting it here is too late.
 reportWebviewLaunchEnvironment();

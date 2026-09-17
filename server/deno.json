@@ -20,7 +20,7 @@
       }
     },
     "release": {
-      "baseUrl": "https://99oblivius.github.io/SemaClip/nightly"
+      "baseUrl": "https://99oblivius.github.io/SemaClip"
     },
     "output": {
       "windows": "../dist/SemaClip",

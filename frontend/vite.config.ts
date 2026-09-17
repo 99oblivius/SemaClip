@@ -11,9 +11,9 @@ import pkg from './package.json' with { type: 'json' };
 export default defineConfig({
   plugins: [tailwindcss(), sveltekit()],
   define: {
+    // One continuous line of releases; there is no channel concept, so the version
+    // alone identifies the build.
     __APP_VERSION__: JSON.stringify(pkg.version),
-    // 'nightly' when the version carries the -nightly suffix, 'stable' otherwise.
-    __APP_CHANNEL__: JSON.stringify(pkg.version.includes('nightly') ? 'nightly' : 'stable'),
   },
   server: {
     proxy: {
