@@ -56,11 +56,20 @@ fi
 
 # rcedit is a Windows executable; wine runs it elsewhere.
 if head -c2 "$RCEDIT" | grep -q 'MZ' && [ "$(uname -s)" != "MINGW"* ] && [ "$(uname -s)" != "MSYS"* ]; then
-  command -v wine >/dev/null 2>&1 || {
-    echo "::warning::rcedit is a Windows binary and wine is not installed; skipping the icon"
+  # On Ubuntu the wine64 package installs NOTHING on PATH and a `wine` symlink to
+  # the loader fails ("could not exec the wine loader") -- measured. The loader
+  # must be invoked by its real path, so prefer WINELOADER_BIN and fall back to a
+  # `wine` only if one genuinely exists.
+  if [ -n "${WINELOADER_BIN:-}" ] && [ -x "$WINELOADER_BIN" ]; then
+    RUN=("$WINELOADER_BIN")
+  elif [ -x /usr/lib/wine/wine64 ]; then
+    RUN=(/usr/lib/wine/wine64)
+  elif command -v wine >/dev/null 2>&1; then
+    RUN=(wine)
+  else
+    echo "::warning::rcedit needs wine and no usable loader was found; skipping the icon"
     exit 0
-  }
-  RUN=(wine)
+  fi
 else
   RUN=()
 fi

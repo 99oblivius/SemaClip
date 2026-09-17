@@ -213,13 +213,15 @@ jobs:
           echo "RCEDIT_PATH=$RUNNER_TEMP/rcedit.exe" >> "$GITHUB_ENV"
           sudo -S -p '' apt-get update -qq
           sudo -S -p '' apt-get install -y --no-install-recommends wine64
-          # Ubuntu's wine64 package installs the binary as `wine64`, NOT `wine`.
-          # The first CI run died on `wine: command not found` (exit 127) because
-          # this script assumed the latter name.
-          if ! command -v wine >/dev/null 2>&1; then
-            sudo ln -sf "$(command -v wine64)" /usr/local/bin/wine
-          fi
-          wine --version
+          # MEASURED in a real ubuntu:24.04 container, because two CI runs were
+          # spent guessing: the wine64 package puts NOTHING on PATH (`dpkg -L
+          # wine64` has no bin/ entries), the loader lives at /usr/lib/wine/wine64,
+          # and a `wine` SYMLINK to it fails with "could not exec the wine loader".
+          # Calling the loader path directly works:
+          #   /usr/lib/wine/wine64 /tmp/rcedit.exe --help  ->  Rcedit v2.0.0
+          # The script takes the loader via WINELOADER_BIN.
+          echo "WINELOADER_BIN=/usr/lib/wine/wine64" >> "$GITHUB_ENV"
+          /usr/lib/wine/wine64 --version
 
       - name: Package for ${{ matrix.platform }}
         env:
