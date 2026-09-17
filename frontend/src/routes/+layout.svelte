@@ -39,7 +39,7 @@
 <QueryClientProvider client={data.queryClient}>
   <div class="flex h-screen w-screen flex-col overflow-hidden bg-foundation text-ink">
     <!-- Top bar (44px): wordmark + local-first badge + connection state -->
-    <header class="flex h-11 shrink-0 items-center gap-3 border-b border-border bg-surface px-4">
+    <header class="relative flex h-11 shrink-0 items-center gap-3 border-b border-border bg-surface px-4">
       <a href="/" class="flex items-baseline gap-2" aria-label="SemaClip home">
         <span class="font-display text-base font-bold tracking-tight">Sema<span class="text-accent">Clip</span></span>
       </a>
@@ -47,6 +47,14 @@
         <Icon name="cpu" size={10} /> local
       </span>
       <div class="flex-1"></div>
+      <!-- Pre-alpha notice: dead-centre of the bar so it is unmissable on every
+           navigation. Uses the theme's blood-red accent (scarce by design). -->
+      <span
+        class="pointer-events-none absolute left-1/2 -translate-x-1/2 rounded border border-accent/60 bg-accent/10 px-2 py-0.5 font-mono text-[10px] font-bold tracking-wide text-accent"
+        title="This software is pre-alpha: features are missing and things will break."
+      >
+        pre-alpha v{__APP_VERSION__} — missing features, will break
+      </span>
       <span
         class="flex items-center gap-1.5 font-mono text-[10px] {$wsStore.connected ? 'text-success' : 'text-warning'}"
         title={$wsStore.connected ? 'Engine events connected' : 'Reconnecting to engine events...'}

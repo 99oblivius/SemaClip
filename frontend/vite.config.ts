@@ -3,8 +3,16 @@ import { sveltekit } from '@sveltejs/kit/vite';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'vite';
 
+// Version string surfaced in the UI (the pre-alpha banner). Derived from
+// package.json version so the banner, package.json and the release tag can
+// never disagree — see scripts/version.sh.
+import pkg from './package.json' with { type: 'json' };
+
 export default defineConfig({
   plugins: [tailwindcss(), sveltekit()],
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   server: {
     proxy: {
       '/api': 'http://localhost:5174',
