@@ -108,6 +108,12 @@ export function startAutoUpdate(baseUrl?: string): void {
 
   // Fire-and-forget: a failed update check must never prevent the app from
   // serving. autoUpdate() already swallows non-2xx responses internally.
+  //
+  // It does NOT return a Promise — the runtime's own docs never chain `.catch()` and
+  // the call yields `undefined`, so `autoUpdate({...}).catch(...)` throws
+  // "TypeError: Cannot read properties of undefined (reading 'catch')" as an UNCAUGHT
+  // desktop error on every single launch. Measured on a real AppImage. Any failure
+  // reporting must come from the callbacks below, never from a promise.
   autoUpdate({
     // `url` is REQUIRED in the type but optional to the runtime when the build
     // carries a baseUrl, so only pass it when we are genuinely overriding.
@@ -122,7 +128,5 @@ export function startAutoUpdate(baseUrl?: string): void {
       status.lastRollback = reason;
       console.warn("Updates: previous launch failed, rolled back —", reason);
     },
-  }).catch((err) => {
-    console.warn("Updates: check failed —", err instanceof Error ? err.message : err);
   });
 }

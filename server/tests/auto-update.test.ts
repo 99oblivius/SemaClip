@@ -26,9 +26,12 @@ function withFakeAutoUpdate(
   const real = (Deno as Record<string, unknown>).autoUpdate;
   const realVersion = (Deno as Record<string, unknown>).desktopVersion;
   (Deno as Record<string, unknown>).desktopVersion = desktopVersion;
+  // The REAL call returns undefined, not a Promise — that is exactly what made
+  // `autoUpdate({...}).catch(...)` throw on every launch. The fake must match, or it
+  // would hide the bug it exists to prevent.
   (Deno as Record<string, unknown>).autoUpdate = (opts: Captured) => {
     captured.push(opts);
-    return Promise.resolve();
+    return undefined;
   };
   return async () => {
     try {
@@ -101,6 +104,26 @@ Deno.test("a dev run (no baked version) stays inert", async () => {
       0,
       "deno run has no version, so the check must not fire",
     );
+  });
+  await run();
+});
+
+Deno.test("startAutoUpdate must not THROW when the runtime returns undefined", async () => {
+  // The regression: `autoUpdate({...}).catch(...)` on a call that returns undefined
+  // threw "TypeError: Cannot read properties of undefined (reading 'catch')" as an
+  // UNCAUGHT desktop error on every launch — the app still served, so nothing in CI
+  // noticed. The fake above returns undefined precisely so this test is meaningful.
+  const run = withFakeAutoUpdate("26.180-nightly.20", async () => {
+    const mod = await import(
+      `@/adapters/outbound/platform/auto-update.ts?t=${Date.now()}throw`
+    );
+    const prev = Deno.env.get("SEMACLIP_UPDATE_URL");
+    Deno.env.delete("SEMACLIP_UPDATE_URL");
+    try {
+      mod.startAutoUpdate(); // throws => this test fails
+    } finally {
+      if (prev !== undefined) Deno.env.set("SEMACLIP_UPDATE_URL", prev);
+    }
   });
   await run();
 });
