@@ -99,4 +99,26 @@ const status = await new Deno.Command("deno", {
   stdout: "inherit",
   stderr: "inherit",
 }).spawn().status;
-Deno.exit(status.code);
+if (status.code !== 0) Deno.exit(status.code);
+
+// Windows: `deno desktop` puts the icon on the payload DLL, not the launcher
+// EXE, and Windows reads a GUI process's taskbar/Explorer icon from the launcher.
+// Post-process it so the icon declared in deno.json actually appears.
+if (platform === "win-x64" && !Deno.env.get("SEMACLIP_SKIP_ICON")) {
+  const ico = join(REPO, "assets", "icon.ico");
+  // The .msi build leaves the assembled app directory next to the installer.
+  const appDir = output.endsWith(".msi") ? output.slice(0, -4) : output;
+  const r = await new Deno.Command(join(REPO, "scripts", "apply-windows-icon.sh"), {
+    args: [appDir, ico],
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  }).spawn().status;
+  // Non-fatal by design: a missing rcedit/wine warns and exits 0, but a genuine
+  // failure to apply exits non-zero and must not be swallowed.
+  if (r.code !== 0) {
+    console.error("windows icon step failed (see above)");
+    Deno.exit(r.code);
+  }
+}
+Deno.exit(0);
