@@ -1,6 +1,11 @@
 {
   "version": "26.177-nightly.17",
-  "patches": {},
+  "patches": {
+    "26.176-nightly.16": {
+      "name": "patch-26.176-nightly.16-to-26.177-nightly.17.bin",
+      "sha256": "9bbb1bebf10387548124af312d70d29490fb255bca23be4ed7dd78ea9c15e358"
+    }
+  },
   "artifacts": {
     "win-x64": {
       "name": "SemaClip-26.177-nightly.17-win-x64-portable.zip",
