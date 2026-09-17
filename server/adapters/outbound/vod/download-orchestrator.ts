@@ -174,8 +174,27 @@ export class DownloadOrchestrator {
 
   /** Mark/unmark a stream's orchestrator run as live (run()/piece runners). */
   markRunLive(streamId: string, live: boolean): void {
-    if (live) this.liveRuns.add(streamId);
-    else {
+    if (live) {
+      this.liveRuns.add(streamId);
+      // PUBLISH A RUNNING STATE IMMEDIATELY, not when the downloader gets round to its
+      // first progress tick. getState() answers from liveStates while a run is live and
+      // otherwise falls back to the persisted snapshot — which for a just-imported
+      // stream does not exist yet, so it returned idle()/active:false. A client polling
+      // right after an import therefore saw no download at all and the Library's
+      // progress container did not appear until a refresh or a navigation away and back
+      // (the reported regression). Seeding the state here makes that window zero.
+      //
+      // An existing live state is left alone: this is called at the start of a run, and
+      // a resume must not wipe the progress it is resuming from.
+      if (!this.liveStates.has(streamId)) {
+        this.liveStates.set(streamId, {
+          ...this.idle(),
+          phase: "running",
+          startedAt: new Date().toISOString(),
+        });
+        this.bumpRevision(streamId);
+      }
+    } else {
       this.liveRuns.delete(streamId);
       // The run is over: drop the RAM copy so later reads reconcile against
       // disk (the durability record is now the truth).

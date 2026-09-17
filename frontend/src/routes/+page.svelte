@@ -3,7 +3,7 @@
   import { apiClient } from '$lib/api/client';
   import Icon from '$lib/components/Icon.svelte';
   import DownloadProgress from '$lib/components/DownloadProgress.svelte';
-  import { downloadsQuery, viewFor, markDownloadsChanged } from '$lib/api/downloads';
+  import { DOWNLOADS_KEY, downloadsQuery, viewFor, markDownloadsChanged } from '$lib/api/downloads';
   import { needsAttention } from '$lib/api/download';
   import { fadeIn, staggerIn, hoverLift } from '$lib/actions/gsap';
   import type { Stream, Job, ImportByUrlInput, ImportByFileInput } from '$shared/types';
@@ -35,12 +35,29 @@
 
   const importUrlMutation = createMutation(() => ({
     mutationFn: (input: ImportByUrlInput) => apiClient.importByUrl(input),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['streams'] }),
+    onSuccess: () => {
+      // An import STARTS a progressive download server-side (progressive: true), so
+      // the downloads query is the surface that must learn about it immediately.
+      // Invalidating only ['streams'] left the progress container showing whatever it
+      // had cached, so it appeared only after a refresh or a navigation away and back
+      // — the reported regression. markDownloadsChanged() also switches the poller out
+      // of its idle heartbeat so progress is continuous from the first second rather
+      // than up to 30 s later.
+      markDownloadsChanged();
+      queryClient.invalidateQueries({ queryKey: ['streams'] });
+      queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
+    },
   }));
 
   const importFileMutation = createMutation(() => ({
     mutationFn: (input: ImportByFileInput) => apiClient.importByFile(input),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['streams'] }),
+    onSuccess: () => {
+      // A folder import adopts real files, so presence changes even though no
+      // download runs. The downloads view is where presence is rendered.
+      markDownloadsChanged();
+      queryClient.invalidateQueries({ queryKey: ['streams'] });
+      queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
+    },
   }));
 
   const cancelMutation = createMutation(() => ({

@@ -31,7 +31,14 @@
 
   const deleteMutation = createMutation(() => ({
     mutationFn: () => apiClient.deleteDownload(streamId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] }),
+    onSuccess: () => {
+      // markDownloadsChanged() too, not just the invalidation: the poller would
+      // otherwise stay on its idle heartbeat, so the row lingers for up to 30 s after a
+      // delete has already happened. The other mutators in this file already do both;
+      // this one did not, which the structural test caught.
+      markDownloadsChanged();
+      queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
+    },
   }));
 
   const resumeMutation = createMutation(() => ({
