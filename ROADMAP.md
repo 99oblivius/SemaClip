@@ -58,6 +58,9 @@ Reference: docs/FRONTEND-REQUIREMENTS.md (professional-VOD-clipper expectations,
 3. Settings → Updates: channel selector, check-now, pending-update UI; `Deno.autoUpdate` wired; Windows staged-update external-updater path.
 4. Repository public on Livia's GitHub; tags drive stable; PRs gated by check.yml.
 5. twitch-dl pinned/bundled for URL import; import validation.
+6. **Standalone prerequisites** (found by measuring `deno desktop` on the dev machine — see docs/DISTRIBUTION-PLAN.md): bundle ffmpeg/ffprobe per-OS into `native/` and resolve them like whisper (they are bare PATH lookups today, so the binary is not yet standalone); set `GDK_BACKEND=x11` in the Linux launcher or the window never opens on Wayland; add `desktop.*` config + app icons to deno.json.
+
+**Tooling correction**: `deno desktop` (Deno 2.9, experimental) supersedes the v1-era plan. It authors the `.msi` and `.AppImage` itself in pure Rust, cross-compiled from any host — there is **no Inno Setup and no appimagetool step**, and no Windows build host. Verified on this machine (hello-world `.msi` 32 MB, `.AppImage` 34 MB from Arch Linux). Inno Setup remains an option only by feeding it the plain app directory.
 
 **Exit gate**: on this machine, install the `.AppImage`, update from nightly→nightly+1 via the built-in updater (verifies the patch + rollback path); the same flow verified on a Windows machine or VM (staged path); a fresh clone to green CI is reproducible.
 

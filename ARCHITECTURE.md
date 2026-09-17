@@ -227,6 +227,19 @@ type EngineEvent =
 - Both channels' manifests live side by side: `releases/stable/latest.json`, `releases/nightly/latest.json`. The client's channel setting selects which manifest it polls.
 
 ### 8.2 CI/CD (GitHub Actions)
+> **Tooling correction (measured 2026-09, Deno 2.9.6).** The `deno desktop` in this section's
+> original wording (`--backend cef --all-targets`) is real but the surrounding assumptions are
+> stale. `deno desktop` authors the `.msi` (pure Rust, per-machine, cross-compiled from any host)
+> and the `.AppImage`/`.deb`/`.rpm` itself — **no Inno Setup, no appimagetool, no Windows build
+> host**, and framework auto-detection is bypassed by pointing it at `server/main.ts` (which is
+> what SemaClip wants, since it uses adapter-static and serves its own build). `--include` embeds
+> `frontend/build` + `native/` so the existing `import.meta.url` resolution works inside the
+> binary. Two real blockers: ffmpeg/ffprobe are bare PATH lookups (not standalone yet), and the
+> webview window dies on Wayland without `GDK_BACKEND=x11`. The updater manifest is
+> **patches-only** (no full-artifact entry), so bsdiff entries must exist for every supported
+> prior version, generated per-architecture from the runtime dylib with the `bsdiff` CLI.
+> Full verified detail and the workflow design: `docs/DISTRIBUTION-PLAN.md`.
+
 - **check.yml** (PR + push): `deno check`, `deno test` (detection/ is pure TS — real unit tests run here, fast, no models), frontend `svelte-check` + `vite build`, `deno publish --dry-run` style lint of deno.json. This is the gate; nightly releases depend on green.
 - **nightly.yml** (merge to main): frontend build → `deno desktop --target x86_64-pc-windows-msvc` + `--target x86_64-unknown-linux-gnu` (single ubuntu host cross-compiles both; `.msi` + `.AppImage` outputs) → SHA-256 per artifact → upload to releases (GH Releases for artifacts; Pages/R2 for manifests — §8.4) → generate bsdiff patches from previous nightly per platform → publish `latest.json` (patch entries carry mandatory sha256) → optionally Ed25519-sign the manifest (key in GH secret).
 - **release.yml** (tag `v*`): same matrix, versioned artifacts + changelog from commits, stable manifest update.
