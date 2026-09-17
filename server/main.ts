@@ -1,16 +1,10 @@
 import { createApp } from "@/adapters/inbound/http/routes.ts";
 import { buildContainer } from "@/composition/container.ts";
 import { ToolRegistry } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
-import { reexecForWebview } from "@/adapters/outbound/platform/webview-fix.ts";
+import { reportWebviewLaunchEnvironment } from "@/adapters/outbound/platform/webview-fix.ts";
 import { startAutoUpdate } from "@/adapters/outbound/platform/auto-update.ts";
 import { adoptWindowLifecycle } from "@/adapters/outbound/platform/window-lifecycle.ts";
 import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
-
-// MUST run before anything else: the webview backend initialises before this
-// module body executes, so neither the Linux DMA-BUF nor the Windows WebView2
-// user-data workaround can be applied in-process (see the module for the measured
-// evidence on each). This re-execs once and never returns when it acts.
-await reexecForWebview();
 
 const PORT = parseInt(Deno.env.get("PORT") ?? "5174", 10);
 /** Platform app-data default; SEMACLIP_DATA overrides (isolated test runs). */
@@ -128,6 +122,9 @@ async function serveFile(
 // Before serving: the window must be adopted while it exists, and this is also
 // what makes a window close exit the process instead of leaving a headless server
 // holding the port (measured on Windows: close did nothing).
+// Report the launch workaround this build was compiled with (see webview-fix.ts).
+// It must arrive via `deno desktop --env-file`, because setting it here is too late.
+reportWebviewLaunchEnvironment();
 adoptWindowLifecycle();
 
 Deno.serve({ port: PORT, hostname: "127.0.0.1" }, app.fetch);

@@ -90,9 +90,51 @@ if (platform === "win-x64") {
   await buildSidecar(stage);
 }
 
+// The launch workaround must exist in the environment BEFORE the runtime starts,
+// because the webview backend initialises first (setting it in main.ts is measured
+// too late). `deno desktop --env-file` bakes it into the binary, so the process is
+// born with it — this replaces an in-app re-exec, which spawned a second runtime and
+// therefore a second window.
+// MEASURED: `deno desktop --env-file` only honours a file named exactly `.env`.
+// Given any other name it warns "the environment file specified '.env' was not
+// found" and carries on WITHOUT the variables — and if the wrong file does get
+// compiled it is evaluated as a MODULE, so a dotenv body crashes startup with
+// "FOO is not defined". Both are silent-ish failures, so the name is not a detail.
+const envFile = join(REPO, "server", ".env");
+// Passed RELATIVE to the desktop command (cwd is server/), which is the form the
+// minimal-app probe proved works.
+const envArg = ".env";
+const launchEnv = platform === "win-x64"
+  ? { WEBVIEW2_USER_DATA_FOLDER: "" } // set below: needs the user's profile path
+  : { WEBKIT_DISABLE_DMABUF_RENDERER: "1" };
+if (platform === "win-x64") {
+  // WebView2's profile must NOT sit beside the executable: under Program Files that
+  // is unwritable and the window renders white (denoland/deno#36768). %LOCALAPPDATA%
+  // expands at runtime, so the file stays machine-independent.
+  launchEnv.WEBVIEW2_USER_DATA_FOLDER = "%LOCALAPPDATA%\\SemaClip\\WebView2";
+} else {
+  // Keep native Wayland: the DMA-BUF renderer is what fails on NVIDIA + Wayland.
+  // GDK_BACKEND=x11 also works but downgrades the whole app to X11.
+  launchEnv.WEBKIT_DISABLE_DMABUF_RENDERER = "1";
+}
+await Deno.writeTextFile(
+  envFile,
+  Object.entries(launchEnv).map(([k, v]) => `${k}=${v}`).join("\n") + "\n",
+);
+console.log(`launch env (${platform}): ${Object.keys(launchEnv).join(", ")}`);
+
 const args = [
   "desktop",
   "--allow-all",
+  // MEASURED (four variants, minimal app): the file must be named exactly `.env`,
+  // in dotenv syntax, AND --no-check must be present — the `.env` is otherwise
+  // TYPE-CHECKED as a module and a dotenv body fails with
+  // "Cannot find name 'WEBKIT_DISABLE_DMABUF_RENDERER'" (TS2304), aborting the
+  // build. Given any other file NAME, desktop warns it looked for '.env' and
+  // silently ships without the variables. The JS-module form (`export default {}`)
+  // is accepted by the flag but never reaches Deno.env at runtime.
+  "--no-check",
+  `--env-file=${envArg}`,
   "--include",
   "../frontend/build",
   "--include",
@@ -141,6 +183,8 @@ if (platform === "win-x64") {
   );
   await buildSidecar(appDir);
   await Deno.remove(stage, { recursive: true }).catch(() => {});
+// `.env` is a build input generated here, and server/.gitignore excludes it.
+await Deno.remove(envFile).catch(() => {});
   console.log(`app files: version.txt + sidecar written into ${appDir}`);
 }
 
@@ -212,5 +256,7 @@ async function buildSidecar(appDir: string): Promise<void> {
 }
 
 await Deno.remove(stage, { recursive: true }).catch(() => {});
+// `.env` is a build input generated here, and server/.gitignore excludes it.
+await Deno.remove(envFile).catch(() => {});
 
 Deno.exit(0);

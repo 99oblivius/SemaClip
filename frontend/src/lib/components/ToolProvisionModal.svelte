@@ -28,9 +28,21 @@ const toolsQuery = createQuery(() => ({
 type Phase = 'idle' | 'downloading' | 'done' | 'error';
 
 let phase = $state<Phase>('idle');
-/** Dismissed for this session. The modal must not be un-closable. */
-let dismissed = $state(false);
+/**
+ * Set when the user declines. ffmpeg is a hard dependency — nothing can download or
+ * export without it — so declining is a decision to quit, not to hide a prompt. The
+ * button says Exit and this closes the window, which the desktop runtime treats as
+ * ending the app (see window-lifecycle.ts).
+ */
+let exiting = $state(false);
 let percent = $state(0);
+/**
+ * Which phase the server is in. "extracting" and "verifying" have NO measurable
+ * percentage — the server sends percent: 1 for them as a "not zero" marker — so
+ * showing a number there is a lie. Extract dominates the wall-clock time of a
+ * 65-82MB archive, which is why a real download read as "stuck at 1%".
+ */
+let phaseName = $state<'downloading' | 'extracting' | 'verifying'>('downloading');
 let receivedMB = $state(0);
 let totalMB = $state(0);
 let error = $state('');
@@ -38,7 +50,21 @@ let error = $state('');
 const missing = $derived(
   toolsQuery.data ? !toolsQuery.data.available : false,
 );
-const shown = $derived(missing && !dismissed && phase !== 'done');
+const shown = $derived(missing && !exiting && phase !== 'done');
+
+/**
+ * Ends the app. The window is the app: closing it exits the process, which is the
+ * behaviour the desktop runtime gives us. Under `deno run` there is no window, so
+ * this falls back to a closed state rather than a silent no-op.
+ */
+function exitApp() {
+  exiting = true;
+  try {
+    window.close();
+  } catch {
+    // No window (dev run) — the modal simply closes.
+  }
+}
 
 /**
  * Streams progress from the provisioning endpoint.
@@ -71,9 +97,15 @@ async function download() {
         if (!line) continue;
         const event = JSON.parse(line.slice(6));
         if (event.type === 'progress') {
-          receivedMB = Math.round((event.receivedBytes ?? 0) / 1048576);
+          if (event.phase) phaseName = event.phase;
+          // The server's field names are bytesDownloaded/totalBytes; reading
+          // `receivedBytes` here meant both stayed 0, so the bar had nothing real
+          // to show even during the download.
+          receivedMB = Math.round((event.bytesDownloaded ?? 0) / 1048576);
           totalMB = Math.round((event.totalBytes ?? 0) / 1048576);
-          percent = event.percent ?? (totalMB ? Math.round((receivedMB / totalMB) * 100) : 0);
+          percent = event.phase === 'downloading'
+            ? (totalMB ? Math.round((receivedMB / totalMB) * 100) : 0)
+            : 100;
         } else if (event.type === 'done') {
           phase = 'done';
           await toolsQuery.refetch();
@@ -124,16 +156,28 @@ onMount(() => {
 
       {#if phase === 'downloading'}
         <div class="mt-4 flex flex-col gap-2">
-          <div class="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
-            <div
-              class="h-full rounded-full bg-accent transition-[width] duration-200"
-              style="width: {percent}%"
-            ></div>
-          </div>
-          <div class="flex justify-between font-mono text-xs text-ash-dim">
-            <span>{percent}%</span>
-            <span>{receivedMB}MB{#if totalMB} of {totalMB}MB{/if}</span>
-          </div>
+          {#if phaseName === 'downloading'}
+            <div class="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
+              <div
+                class="h-full rounded-full bg-accent transition-[width] duration-200"
+                style="width: {percent}%"
+              ></div>
+            </div>
+            <div class="flex justify-between font-mono text-xs text-ash-dim">
+              <span>Downloading</span>
+              <span>{percent}%{#if totalMB} · {receivedMB} of {totalMB}MB{/if}</span>
+            </div>
+          {:else}
+            <!-- No measurable percentage exists for these phases: a pulse, not a
+                 frozen bar, is the honest rendering. -->
+            <div class="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
+              <div class="h-full w-1/3 animate-pulse rounded-full bg-accent"></div>
+            </div>
+            <div class="flex justify-between font-mono text-xs text-ash-dim">
+              <span>{phaseName === 'extracting' ? 'Extracting' : 'Verifying'}</span>
+              <span>{phaseName === 'extracting' ? 'a few seconds' : 'almost done'}</span>
+            </div>
+          {/if}
         </div>
       {:else if phase === 'error'}
         <p class="mt-4 rounded border border-error/40 bg-error/10 p-2 font-mono text-xs text-error">
@@ -145,9 +189,9 @@ onMount(() => {
         {#if phase === 'error'}
           <button
             class="rounded border border-border px-3 py-1.5 text-sm text-ash hover:bg-surface-2"
-            onclick={() => dismissed = true}
+            onclick={exitApp}
           >
-            Close
+            Exit
           </button>
           <button
             class="rounded border border-accent bg-accent/10 px-3 py-1.5 text-sm text-accent hover:bg-accent/20"
@@ -160,10 +204,10 @@ onMount(() => {
         {:else}
           <button
             class="rounded border border-border px-3 py-1.5 text-sm text-ash hover:bg-surface-2"
-            onclick={() => dismissed = true}
-            title="SemaClip works without it only if you install ffmpeg yourself"
+            onclick={exitApp}
+            title="SemaClip needs ffmpeg for every download and export — without it there is nothing to do"
           >
-            Close
+            Exit
           </button>
           <button
             class="rounded border border-accent bg-accent/10 px-3 py-1.5 text-sm text-accent hover:bg-accent/20"
@@ -176,7 +220,8 @@ onMount(() => {
 
       <p class="mt-3 border-t border-border pt-3 text-xs text-ash-dim">
         Prefer to manage it yourself? Install ffmpeg from your package manager, or point
-        SemaClip at an existing binary in Settings — both avoid this download.
+        SemaClip at an existing binary in Settings — both avoid this download. Otherwise
+        SemaClip cannot download or cut video, which is why declining exits the app.
       </p>
     </div>
   </div>

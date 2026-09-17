@@ -1,5 +1,5 @@
 /**
- * Webview launch fixes, per platform.
+ * Webview launch workaround — reported, never re-executed.
  *
  * Two platforms need the process to be BORN with a variable set, because the
  * webview backend initialises before this module's body runs. One file, one
@@ -62,66 +62,37 @@
  * IS the app there) and catastrophic under `deno run`, so the two paths must not
  * share the spawn.
  */
-const MARKER = "SEMACLIP_WEBVIEW_REEXEC";
-
-/** Windows: where WebView2 keeps its profile, if the user has not chosen a path. */
-function webview2UserDataFolder(): string {
+/** Windows: where WebView2 keeps its profile when we point it somewhere writable. */
+export function webview2UserDataFolder(): string {
   const local = Deno.env.get("LOCALAPPDATA")
     ?? `${Deno.env.get("USERPROFILE") ?? ""}\\AppData\\Local`;
   return `${local}\\SemaClip\\WebView2`;
 }
 
-interface Workaround {
-  /** The variable the child must be born with. */
-  name: string;
-  value: () => string;
-  /** Explained in the log so a user can see why the process appears twice. */
-  why: string;
-}
-
-function workaroundFor(os: typeof Deno.build.os): Workaround | null {
-  if (os === "linux") {
-    return {
-      name: "WEBKIT_DISABLE_DMABUF_RENDERER",
-      value: () => "1",
-      why: "Wayland/WebKitGTK DMA-BUF renderer would not open a window",
-    };
-  }
-  if (os === "windows") {
-    return {
-      name: "WEBVIEW2_USER_DATA_FOLDER",
-      value: webview2UserDataFolder,
-      why: "the app lives in Program Files, where WebView2 cannot create its profile",
-    };
-  }
-  return null;
-}
-
 /**
- * Re-execs the process with the webview workaround applied. Returns normally
- * (and does nothing) when there is nothing to do — a healthy desktop, a platform
- * without a workaround, an already-applied child, or a dev run.
+ * Reports whether this build's launch workaround is in effect.
+ *
+ * The variable is supplied by `deno desktop --env-file` at BUILD time, because
+ * the webview backend initialises before this module runs — `Deno.env.set` here
+ * is too late (measured: still `Error 71`, no window). Reporting it means a
+ * misconfigured build is visible in the log instead of silently showing a blank
+ * window with no signal.
+ *
+ * A missing variable is not fatal: the WebKit failure is Wayland/NVIDIA specific,
+ * and a WebView2 profile beside a writable executable works fine.
  */
-export async function reexecForWebview(): Promise<void> {
-  const fix = workaroundFor(Deno.build.os);
-  if (!fix) return;
-  // Only the packaged desktop runtime: see the note above — re-execing under
-  // `deno run` would launch a REPL, not the server.
+export function reportWebviewLaunchEnvironment(): void {
   if (!Deno.env.get("DENO_SERVE_ADDRESS")) return;
-  if (Deno.env.get(fix.name)) return;
-  if (Deno.env.get(MARKER)) return;
 
-  const value = fix.value();
-  if (!value) return;
+  if (Deno.build.os === "linux") {
+    const set = Deno.env.get("WEBKIT_DISABLE_DMABUF_RENDERER");
+    if (set) console.log(`webview: WEBKIT_DISABLE_DMABUF_RENDERER=${set}`);
+    else console.warn("webview: WEBKIT_DISABLE_DMABUF_RENDERER not set — a Wayland/NVIDIA session will open no window");
+  }
 
-  console.log(`webview: restarting once with ${fix.name} — ${fix.why}`);
-  const cmd = new Deno.Command(Deno.execPath(), {
-    args: Deno.args,
-    env: { ...Deno.env.toObject(), [fix.name]: value, [MARKER]: "1" },
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  });
-  const status = await cmd.spawn().status;
-  Deno.exit(status.code);
+  if (Deno.build.os === "windows") {
+    const set = Deno.env.get("WEBVIEW2_USER_DATA_FOLDER");
+    if (set) console.log(`webview: WEBVIEW2_USER_DATA_FOLDER=${set}`);
+    else console.warn("webview: WEBVIEW2_USER_DATA_FOLDER not set — an install under Program Files will show a white window");
+  }
 }

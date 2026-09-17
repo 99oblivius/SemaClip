@@ -5,6 +5,7 @@
   import { playerStore, selectClip, setZoom, pan, frameClip, setView } from '$lib/stores/player';
   import Icon from '$lib/components/Icon.svelte';
   import VideoPlayer from '$lib/components/VideoPlayer.svelte';
+  import { downloadsQuery, viewFor } from '$lib/api/downloads';
   import Timeline from '$lib/components/Timeline.svelte';
   import SignalBar from '$lib/components/SignalBar.svelte';
   import KeyboardHelp from '$lib/components/KeyboardHelp.svelte';
@@ -60,6 +61,19 @@
   let reviewedLocal = $state<Set<string>>(new Set());
   const currentClip = $derived(visibleClips[currentClipIndex]);
   const stream = $derived(streamQuery.data);
+
+  // Playback source rule: LOCAL MEDIA FIRST, the source URL only as a fallback.
+  //
+  // The source URL exists to DOWNLOAD from. Streaming it for playback made a fully
+  // downloaded project depend on the network, which breaks the whole point of a
+  // local-first clipper (and offline use). The download view already reports which
+  // local file is playable, so playback is derived from it rather than from the
+  // presence of a URL.
+  const downloads = downloadsQuery();
+  const localMedia = $derived(viewFor(downloads.data?.views, streamId)?.media ?? null);
+  /** True only when NOTHING local exists yet — i.e. before the first download. */
+  const useSourceUrl = $derived(Boolean(stream?.sourceUrl) && !localMedia?.playablePath);
+
 
   // ── Undo/redo history (P0-12): endpoint edits push undo entries; Ctrl+Z /
   // Ctrl+Shift+Z walk the stack. Entries carry the clip id + before/after,
@@ -442,7 +456,7 @@
       <VideoPlayer
         bind:this={playerComp}
         {streamId}
-        hls={Boolean(stream?.sourceUrl)}
+        hls={useSourceUrl}
         duration={stream?.duration ?? null}
         clips={visibleClips}
         currentClip={currentClip}
