@@ -1,16 +1,11 @@
 {
-  "version": "26.177-nightly.17",
-  "patches": {
-    "26.176-nightly.16": {
-      "name": "patch-26.176-nightly.16-to-26.177-nightly.17.bin",
-      "sha256": "9bbb1bebf10387548124af312d70d29490fb255bca23be4ed7dd78ea9c15e358"
-    }
-  },
+  "version": "26.178-nightly.18",
+  "patches": {},
   "artifacts": {
     "win-x64": {
-      "name": "SemaClip-26.177-nightly.17-win-x64-portable.zip",
-      "sha256": "9889b45f3d89b97db5f96858c8034878a18c71c4705a656892f3e99f05031415",
-      "url": "https://github.com/99oblivius/SemaClip/releases/download/v26.177-nightly.17/SemaClip-26.177-nightly.17-win-x64-portable.zip"
+      "name": "SemaClip-26.178-nightly.18-win-x64-portable.zip",
+      "sha256": "5a88d8dad742dd0cc4693e0d468049a8d7ca7191e379f793f681baa5f88f449e",
+      "url": "https://github.com/99oblivius/SemaClip/releases/download/v26.178-nightly.18/SemaClip-26.178-nightly.18-win-x64-portable.zip"
     }
   }
 }
