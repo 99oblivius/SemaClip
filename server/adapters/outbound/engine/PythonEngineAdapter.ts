@@ -3,6 +3,7 @@ import type { EngineEvent, EngineCommand } from "shared/types";
 import { ENGINE_EVENT_TOPIC } from "@/application/ports/outbound.ts";
 import type { EventBus } from "@/application/ports/outbound.ts";
 import { parseEngineEvent } from "./validate.ts";
+import { spawnChild, type ChildHandle } from "@/adapters/outbound/process/spawn.ts";
 
 type EventHandler = (event: EngineEvent) => void;
 
@@ -21,8 +22,8 @@ type EventHandler = (event: EngineEvent) => void;
  *   event of a crashing engine was lost).
  */
 export class PythonEngineAdapter implements EnginePort {
-  private process: Deno.ChildProcess | null = null;
-  private stdin: WritableStreamDefaultWriter<Uint8Array> | null = null;
+  private process: ChildHandle | null = null;
+  private stdin: { write(chunk: Uint8Array): Promise<void>; releaseLock(): void } | null = null;
   private readonly handlers = new Set<EventHandler>();
   private readerLoop: Promise<void> | null = null;
   private stderrLoop: Promise<void> | null = null;
@@ -64,15 +65,19 @@ export class PythonEngineAdapter implements EnginePort {
     const cmd = parts[0] ?? this.engineBinaryPath;
     const preArgs = parts.slice(1);
 
-    this.process = new Deno.Command(cmd, {
+    // Long-lived IPC engine: it needs a writable stdin, live stdout/stderr, a
+    // cancellable handle and an exit status — all of which the handle provides.
+    this.process = spawnChild(cmd, {
       args: [...preArgs, "--ipc"],
       stdin: "piped",
       stdout: "piped",
       stderr: "piped",
       env,
-    }).spawn();
+    });
 
-    this.stdin = this.process.stdin.getWriter();
+    const engineStdin = this.process.stdin;
+    if (!engineStdin) throw new Error("engine stdin was not piped — the IPC channel is unusable");
+    this.stdin = engineStdin.getWriter();
     this.readerLoop = this.readEvents();
     this.stderrLoop = this.readStderr();
 
@@ -132,7 +137,9 @@ export class PythonEngineAdapter implements EnginePort {
   private async readEvents(): Promise<void> {
     if (!this.process) return;
     const decoder = new TextDecoder();
-    const reader = this.process.stdout.getReader();
+    const events = this.process.stdout;
+    if (!events) return;
+    const reader = events.getReader();
     let buffer = "";
 
     try {
@@ -171,7 +178,9 @@ export class PythonEngineAdapter implements EnginePort {
 
   private async readStderr(): Promise<void> {
     if (!this.process) return;
-    const reader = this.process.stderr.getReader();
+    const stderrStream = this.process.stderr;
+    if (!stderrStream) return;
+    const reader = stderrStream.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     try {

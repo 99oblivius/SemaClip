@@ -15,6 +15,7 @@
  * (resume re-muxes from the last complete fragment), and the error propagates.
  */
 import { Fmp4BoxParser, serializeIndex, type FragmentIndex, type FragmentSpan } from "./fmp4.ts";
+import { spawnChild } from "@/adapters/outbound/process/spawn.ts";
 
 export interface Fmp4DownloadProgress {
   downloadedSec: number;
@@ -153,7 +154,7 @@ export async function downloadFmp4(
     void indexWriter?.flush();
   };
 
-  const ffmpeg = new Deno.Command(opts.ffmpegPath, {
+  const ffmpeg = spawnChild(opts.ffmpegPath, {
     args: [
       "-hide_banner", "-loglevel", "error",
       "-f", "mpegts", "-i", "pipe:0",
@@ -165,19 +166,23 @@ export async function downloadFmp4(
     stdin: "piped",
     stdout: "piped",
     stderr: "piped",
-  }).spawn();
+  });
 
   // Drain ffmpeg stderr so a mux failure is visible instead of hanging.
   let stderrTail = "";
   const stderrDone = (async () => {
     const dec = new TextDecoder();
+    if (!ffmpeg.stderr) return;
     for await (const part of ffmpeg.stderr) {
       stderrTail = (stderrTail + dec.decode(part, { stream: true })).slice(-2000);
     }
   })();
 
   const writeChunk = async (data: Uint8Array): Promise<void> => {
-    const writer = ffmpeg.stdin.getWriter();
+    // stdin is piped by construction above; the guard makes that explicit rather
+    // than an unchecked assertion.
+    const writer = ffmpeg.stdin?.getWriter();
+    if (!writer) return;
     try {
       await writer.write(data);
     } finally {
@@ -187,6 +192,7 @@ export async function downloadFmp4(
 
   /** Pump ffmpeg stdout into the file + parser. */
   const pump = (async () => {
+    if (!ffmpeg.stdout) throw new Error("ffmpeg stdout was not piped — cannot capture the muxed mp4");
     for await (const part of ffmpeg.stdout) {
       const slice = part instanceof Uint8Array ? part : new Uint8Array(part);
       await dest.write(slice);
@@ -243,7 +249,7 @@ export async function downloadFmp4(
       }
     }
     // Close stdin so ffmpeg flushes its final fragment and exits.
-    await ffmpeg.stdin.close().catch(() => {});
+    await ffmpeg.stdin?.close().catch(() => {});
     await pump;
     await stderrDone;
     const status = await ffmpeg.status;

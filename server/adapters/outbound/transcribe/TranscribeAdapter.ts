@@ -13,6 +13,7 @@
  */
 import type { TranscriptSegment } from "../../../../detection/types.ts";
 import { memoryCappedWorkers } from "@/application/use-cases/SettingsUseCase.ts";
+import { run, runStatus, spawnChild } from "@/adapters/outbound/process/spawn.ts";
 
 export interface WhisperPaths {
   /** Directory containing whisper-cli + whisper-vad-speech-segments (+ libs). */
@@ -112,12 +113,9 @@ export class TranscribeAdapter {
 
   private async extractAudio(vodPath: string): Promise<string> {
     const out = await Deno.makeTempFile({ prefix: "semaclip-audio-", suffix: ".wav" });
-    const cmd = new Deno.Command(this.ffmpegPath, {
+    const status = await runStatus(this.ffmpegPath, {
       args: ["-y", "-i", vodPath, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", out],
-      stdout: "null",
-      stderr: "null",
     });
-    const status = await cmd.spawn().status;
     if (!status.success) throw new Error(`ffmpeg audio extraction failed (${status.code})`);
     return out;
   }
@@ -125,15 +123,12 @@ export class TranscribeAdapter {
   private async speechSegments(wavPath: string): Promise<Array<{ start: number; end: number }>> {
     const vadBin = `${this.paths.binDir}/whisper-vad-speech-segments${Deno.build.os === "windows" ? ".exe" : ""}`;
     const vadModel = `${this.paths.modelsDir}/${this.paths.vadModelFile}`;
-    const cmd = new Deno.Command(vadBin, {
+    const out = await run(vadBin, {
       args: ["-vm", vadModel, "-f", wavPath],
-      stdout: "piped",
-      stderr: "null",
       env: Deno.build.os === "windows"
         ? {}
         : { LD_LIBRARY_PATH: this.paths.binDir },
     });
-    const out = await cmd.output();
     if (!out.success) throw new Error(`VAD failed (${out.code})`);
     // stdout format: "Speech segment N: start = 29.00, end = 221.00" —
     // values are CENTISECONDS (221.00 = 2.21s). Diagnostics go to stderr.
@@ -234,15 +229,14 @@ export class TranscribeAdapter {
     index: number,
   ): Promise<string> {
     const out = await Deno.makeTempFile({ prefix: `semaclip-slice-${index}-`, suffix: ".wav" });
-    const cmd = new Deno.Command(this.ffmpegPath, {
+    const cmd = spawnChild(this.ffmpegPath, {
       args: [
         "-y", "-i", wavPath,
         "-ss", String(chunk.start), "-t", String(chunk.end - chunk.start),
         "-c", "copy", out,
       ],
-      stdout: "null", stderr: "null",
     });
-    const status = await cmd.spawn().status;
+    const status = await cmd.status;
     if (!status.success) {
       await Deno.remove(out).catch(() => {});
       throw new Error(`WAV slice failed (${status.code}) on chunk ${chunk.start}-${chunk.end}`);
@@ -257,7 +251,8 @@ export class TranscribeAdapter {
   ): Promise<TranscriptSegment[]> {
     const cli = `${this.paths.binDir}/whisper-cli${Deno.build.os === "windows" ? ".exe" : ""}`;
     const model = `${this.paths.modelsDir}/${this.paths.modelFile}`;
-    const cmd = new Deno.Command(cli, {
+    const out = await run(cli, {
+      signal,
       args: [
         "-m", model,
         "-f", wavPath,
@@ -275,14 +270,9 @@ export class TranscribeAdapter {
         ? {}
         : { LD_LIBRARY_PATH: this.paths.binDir },
     });
-    const child = cmd.spawn();
-    // Cancel must kill in-flight whisper processes — the signal is only
-    // checked between chunk dispatches, so a running child would otherwise
-    // keep 2GB+ of RSS alive after the job settled (2026-09-09 incident).
-    const onAbort = () => { try { child.kill(); } catch { /* already exited */ } };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    const out = await child.output();
-    signal?.removeEventListener("abort", onAbort);
+    // Cancel still kills in-flight whisper processes: run() receives the signal,
+    // so an abort terminates the child rather than leaving 2GB+ of RSS alive after
+    // the job settled (the 2026-09-09 incident). The result reports the failure.
     if (!out.success) throw new Error(`whisper-cli failed (${out.code}) on chunk ${chunk.start}-${chunk.end}`);
     return this.parseWhisperTxt(new TextDecoder().decode(out.stdout));
   }

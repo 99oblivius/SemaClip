@@ -28,6 +28,7 @@ import { downloadChat } from "./chat-fetch.ts";
 import { remuxToMp4, mp4Twin } from "./remux.ts";
 import { downloadFmp4 } from "./fmp4-download.ts";
 import { artifactName, indexPathFor, LEGACY_NAMES } from "@/application/use-cases/artifact-naming.ts";
+import { run } from "@/adapters/outbound/process/spawn.ts";
 
 export type DownloadPartKind = "chat" | "markers" | "proxy" | "hq";
 export type DownloadPartStatus = "pending" | "running" | "done" | "failed" | "skipped";
@@ -924,11 +925,9 @@ export class DownloadOrchestrator {
   /** Actual media seconds on disk (ffprobe) — the resume base. 0 on any
    *  failure (missing/corrupt file → fresh download). */
   private async fileSeconds(path: string): Promise<number> {
-    const cmd = new Deno.Command(this.tools.ffprobe, {
+    const out = await run(this.tools.ffprobe, {
       args: ["-v", "quiet", "-print_format", "json", "-show_format", path],
-      stdout: "piped", stderr: "null",
     });
-    const out = await cmd.output();
     if (!out.success) return 0;
     try {
       const info = JSON.parse(new TextDecoder().decode(out.stdout));

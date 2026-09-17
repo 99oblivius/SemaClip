@@ -1,4 +1,5 @@
 import type { VodDownloadPort, VodMetadata } from "@/application/ports/outbound.ts";
+import { spawnChild } from "@/adapters/outbound/process/spawn.ts";
 
 const TWITCH_VOD_REGEX = /^https?:\/\/(?:www\.)?twitch\.tv\/videos\/(\d+)/;
 
@@ -154,15 +155,16 @@ export class TwitchDlAdapter implements VodDownloadPort {
       onStderr?: (line: string) => void;
     },
   ): Promise<string> {
-    const cmd = new Deno.Command(this.binaryPath, {
+    const child = spawnChild(this.binaryPath, {
       args,
       stdout: opts.capture ? "piped" : "inherit",
       stderr: "piped",
     });
-    const child = cmd.spawn();
 
     if (opts.onStderr) {
-      this.readLines(child.stderr, opts.onStderr).catch(() => {});
+      // The stream exists whenever stderr was piped; guard rather than assume, so a
+      // future spawn without piped stderr cannot throw here.
+      if (child.stderr) this.readLines(child.stderr, opts.onStderr).catch(() => {});
     }
 
     const { stdout, success, code } = await child.output();
@@ -171,7 +173,7 @@ export class TwitchDlAdapter implements VodDownloadPort {
   }
 
   private async readLines(
-    stream: ReadableStream<Uint8Array>,
+    stream: { getReader(): { read(): Promise<{ done: boolean; value: Uint8Array | undefined }> } },
     onLine: (line: string) => void,
   ): Promise<void> {
     const reader = stream.getReader();

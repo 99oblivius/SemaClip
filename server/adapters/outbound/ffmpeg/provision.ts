@@ -15,6 +15,7 @@
  *     so a truncated download can never leave a half-installed tree that
  *     `discover()` would then treat as valid.
  */
+import { run, runStatus } from "@/adapters/outbound/process/spawn.ts";
 import { join } from "node:path";
 import { archiveFor, type ToolArchive } from "./tool-paths.ts";
 
@@ -132,10 +133,9 @@ async function extract(archive: ToolArchive, file: string, managedDir: string): 
   await Deno.remove(staging, { recursive: true }).catch(() => {});
   await Deno.mkdir(staging, { recursive: true });
 
-  const cmd = archive.ext === "zip"
-    ? new Deno.Command("tar", { args: ["-xf", file, "-C", staging] })
-    : new Deno.Command("tar", { args: ["-xJf", file, "-C", staging] });
-  const status = await cmd.output();
+  const status = await run("tar", {
+    args: archive.ext === "zip" ? ["-xf", file, "-C", staging] : ["-xJf", file, "-C", staging],
+  });
   if (!status.success) {
     throw new Error(`extract failed: ${new TextDecoder().decode(status.stderr).trim()}`);
   }
@@ -164,11 +164,9 @@ async function extract(archive: ToolArchive, file: string, managedDir: string): 
 }
 
 async function assertRunnable(binary: string, flag: string): Promise<void> {
-  const status = await new Deno.Command(binary, {
-    args: [flag],
-    stdout: "null",
-    stderr: "null",
-  }).output().catch(() => undefined);
+  // run() reports a spawn failure as a result, so no .catch is needed to keep the
+  // "did it actually run" check below meaningful.
+  const status = await run(binary, { args: [flag] });
   if (!status?.success) {
     throw new Error(`${binary} did not run after installation`);
   }

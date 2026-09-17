@@ -18,6 +18,8 @@
  * acceptable once, not per transcode.
  */
 
+import { run, runStatus } from "@/adapters/outbound/process/spawn.ts";
+
 export type GpuBackend = "nvenc" | "qsv" | "vaapi" | "amf" | "cpu";
 
 export interface GpuEncoder {
@@ -119,11 +121,7 @@ async function listRenderNodes(): Promise<string[]> {
 
 /** Probe `-encoders` list (fast, one process). */
 async function availableEncoders(ffmpegPath: string): Promise<string[]> {
-  const cmd = new Deno.Command(ffmpegPath, {
-    args: ["-hide_banner", "-encoders"],
-    stdout: "piped", stderr: "null",
-  });
-  const out = await cmd.output();
+  const out = await run(ffmpegPath, { args: ["-hide_banner", "-encoders"] });
   const text = new TextDecoder().decode(out.stdout);
   return text.split("\n")
     .map((l) => l.trim().split(/\s+/)[1] ?? "")
@@ -142,10 +140,10 @@ async function testEncode(ffmpegPath: string, c: (typeof CANDIDATES)[number], he
     "-c:v", c.encoder, ...c.encoderArgs,
     "-an", "-f", "null", "-",
   ];
-  const cmd = new Deno.Command(ffmpegPath, { args, stdout: "null", stderr: "null" });
   try {
+    // Output is discarded: this only asks whether the encoder accepts the work.
     const status = await Promise.race([
-      cmd.spawn().status,
+      runStatus(ffmpegPath, { args }),
       new Promise<{ success: false }>((resolve) => setTimeout(() => resolve({ success: false }), 15_000)),
     ]);
     return status.success;

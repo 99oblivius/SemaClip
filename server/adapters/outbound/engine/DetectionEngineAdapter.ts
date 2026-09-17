@@ -26,6 +26,7 @@ import type { FeatureTable, TranscriptSegment } from "../../../../detection/type
 import { TranscribeAdapter, type WhisperPaths } from "../transcribe/TranscribeAdapter.ts";
 import { toSrt } from "../transcribe/srt.ts";
 import { generateUuid } from "@/infrastructure/uuid.ts";
+import { run, spawnChild } from "@/adapters/outbound/process/spawn.ts";
 
 export interface DetectionEngineConfig {
   whisper: WhisperPaths;
@@ -250,11 +251,9 @@ export class DetectionEngineAdapter {
 
   private async probeDuration(vodPath: string): Promise<number | null> {
     try {
-      const cmd = new Deno.Command(this.config.ffprobePath, {
+      const out = await run(this.config.ffprobePath, {
         args: ["-v", "quiet", "-print_format", "json", "-show_format", vodPath],
-        stdout: "piped", stderr: "null",
       });
-      const out = await cmd.output();
       const info = JSON.parse(new TextDecoder().decode(out.stdout));
       const d = parseFloat(info.format?.duration ?? "0");
       return d > 0 ? d : null;
@@ -265,11 +264,9 @@ export class DetectionEngineAdapter {
 
   private async extractAudio(vodPath: string, signal: AbortSignal): Promise<string> {
     const out = await Deno.makeTempFile({ prefix: "semaclip-engine-audio-", suffix: ".wav" });
-    const cmd = new Deno.Command(this.config.ffmpegPath, {
+    const child = spawnChild(this.config.ffmpegPath, {
       args: ["-y", "-i", vodPath, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", out],
-      stdout: "null", stderr: "null",
     });
-    const child = cmd.spawn();
     const onAbort = () => { try { child.kill(); } catch { /* ok */ } };
     signal.addEventListener("abort", onAbort, { once: true });
     const status = await child.status;

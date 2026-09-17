@@ -12,6 +12,7 @@ import type { StreamRepository, StreamMetadataRepository, FileSystemPort } from 
 import { DownloadOrchestrator, type DownloadState } from "@/adapters/outbound/vod/download-orchestrator.ts";
 import { resolveQualities, pickProxyQuality, pickBestQuality, extractVodId, type HlsQuality } from "@/adapters/outbound/vod/hls.ts";
 import { artifactName, indexPathFor, LEGACY_NAMES, streamSlug } from "@/application/use-cases/artifact-naming.ts";
+import { runStatus } from "@/adapters/outbound/process/spawn.ts";
 
 export class MediaActionsUseCase {
   /** Live piece downloads by stream — DELETE /download aborts these too. */
@@ -187,8 +188,9 @@ export class MediaActionsUseCase {
     if (!dir || !(await this.fs.exists(dir))) return { opened: false, dir: null };
     const cmd = Deno.build.os === "windows" ? "explorer" : "xdg-open";
     try {
-      const child = new Deno.Command(cmd, { args: [dir] });
-      child.spawn();
+      // Fire-and-forget: opening the folder in the OS file manager. No output is
+      // wanted, and a console flash on Windows is avoided by the helper.
+      void runStatus(cmd, { args: [dir] });
       return { opened: true, dir };
     } catch {
       return { opened: false, dir };

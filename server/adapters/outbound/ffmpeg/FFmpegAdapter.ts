@@ -1,4 +1,5 @@
 import type { FFmpegExportPort, MediaProbePort } from "@/application/ports/outbound.ts";
+import { run, spawnChild } from "@/adapters/outbound/process/spawn.ts";
 import { probeGpuEncoderCached, proxyEncodeArgs, blacklistGpuBackend } from "./gpu-probe.ts";
 
 type ExportInput = Parameters<FFmpegExportPort["exportClip"]>[0];
@@ -92,12 +93,9 @@ export class FFmpegAdapter implements FFmpegExportPort, MediaProbePort {
 
   private async probeDimensions(vodPath: string): Promise<[number, number]> {
     try {
-      const cmd = new Deno.Command(this.probeBinaryPath, {
+      const out = await run(this.probeBinaryPath, {
         args: ["-v", "quiet", "-print_format", "json", "-show_streams", "-select_streams", "v:0", vodPath],
-        stdout: "piped",
-        stderr: "piped",
       });
-      const out = await cmd.output();
       const info = JSON.parse(new TextDecoder().decode(out.stdout));
       const s = info.streams?.[0];
       if (s?.width && s?.height) return [s.width, s.height];
@@ -109,12 +107,9 @@ export class FFmpegAdapter implements FFmpegExportPort, MediaProbePort {
 
   async probeDuration(vodPath: string): Promise<number | null> {
     try {
-      const cmd = new Deno.Command(this.probeBinaryPath, {
+      const out = await run(this.probeBinaryPath, {
         args: ["-v", "quiet", "-print_format", "json", "-show_format", vodPath],
-        stdout: "piped",
-        stderr: "piped",
       });
-      const out = await cmd.output();
       const info = JSON.parse(new TextDecoder().decode(out.stdout));
       const d = parseFloat(info.format?.duration ?? "0");
       return d > 0 ? d : null;
@@ -195,17 +190,19 @@ export class FFmpegAdapter implements FFmpegExportPort, MediaProbePort {
   /** Spawns ffmpeg, drains stderr (last lines kept for diagnostics), and
    *  resolves on exit. Non-zero exit throws with the last stderr lines attached. */
   private async run(args: string[]): Promise<void> {
-    const cmd = new Deno.Command(this.binaryPath, {
+    const child = spawnChild(this.binaryPath, {
       args,
       stdout: "null",
       stderr: "piped",
     });
-    const child = cmd.spawn();
     const decoder = new TextDecoder();
     let lastStderr: string[] = [];
 
     const stderrLoop = (async () => {
-      const reader = child.stderr.getReader();
+      // The stream is only present when stderr was piped; without this the
+      // rolling error tail would throw instead of reporting a failed run.
+      const reader = child.stderr?.getReader();
+      if (!reader) return;
       let buffer = "";
       try {
         for (;;) {

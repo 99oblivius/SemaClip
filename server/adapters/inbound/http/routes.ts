@@ -37,6 +37,7 @@ import {
 import { clampToServable, parseRangeHeader } from "@/adapters/inbound/http/range.ts";
 import { projectDownloadView } from "@/application/view/project-download-view.ts";
 import { fragmentBoundaryAt, parseIndex } from "@/adapters/outbound/vod/fmp4.ts";
+import { run, spawnChild } from "@/adapters/outbound/process/spawn.ts";
 
 /**
  * How many bytes of `mediaPath` may be served right now.
@@ -595,9 +596,9 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     if (durationSec !== null) args.unshift("-t", String(durationSec));
     args.unshift("-i", vodPath);
 
-    const cmd = new Deno.Command(deps.tools.ffmpeg, { args, stdout: "piped", stderr: "null" });
-    const proc = cmd.spawn();
-    const reader = proc.stdout.getReader();
+    const proc = spawnChild(deps.tools.ffmpeg, { args, stdout: "piped" });
+    const reader = proc.stdout?.getReader();
+    if (!reader) throw new Error("ffmpeg waveform output was not captured");
 
     let peakBuf: number[] = [];
     let acc = new Float32Array(0);
@@ -644,7 +645,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
         yield { firstIndex: peakIdx - peakBuf.length, startTime, peaks: [...peakBuf] };
       }
     } finally {
-      try { reader.releaseLock(); } catch { /* ok */ }
+      try { reader.releaseLock?.(); } catch { /* ok */ }
       // Client disconnect must not leave a full-speed audio decode running to
       // EOF — kill the process, then reap it.
       try { proc.kill(); } catch { /* already exited */ }
@@ -701,11 +702,9 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
 
           // Media duration is needed both for cache staleness and for the
           // waveform extent — probe it before deciding to trust the cache.
-          const probe = new Deno.Command(deps.tools.ffprobe, {
+          const probeOut = await run(deps.tools.ffprobe, {
             args: ["-v", "quiet", "-print_format", "json", "-show_format", mediaPath],
-            stdout: "piped", stderr: "piped",
           });
-          const probeOut = await probe.output();
           const probeInfo = JSON.parse(new TextDecoder().decode(probeOut.stdout));
           const mediaDuration = parseFloat(probeInfo.format?.duration ?? "0");
           if (!mediaDuration) {
@@ -903,11 +902,9 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
 
     // Detect NVIDIA GPUs.
     try {
-      const cmd = new Deno.Command("nvidia-smi", {
+      const out = await run("nvidia-smi", {
         args: ["--query-gpu=index,name,memory.total", "--format=csv,noheader,nounits"],
-        stdout: "piped", stderr: "null",
       });
-      const out = await cmd.output();
       const text = new TextDecoder().decode(out.stdout).trim();
       if (text) {
         for (const line of text.split("\n")) {

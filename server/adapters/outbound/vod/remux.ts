@@ -5,6 +5,7 @@
  * remux is ~4200× realtime (0.2s per 10.5 min of 540p), so re-running it
  * over the downloaded prefix is effectively free.
  */
+import { run, runStatus } from "@/adapters/outbound/process/spawn.ts";
 import { join } from "node:path";
 
 export interface RemuxOptions {
@@ -17,12 +18,11 @@ export interface RemuxOptions {
  *  the source of truth either way. */
 export async function remuxToMp4(srcTs: string, dstMp4: string, opts: RemuxOptions): Promise<boolean> {
   const tmp = `${dstMp4}.part`;
-  const cmd = new Deno.Command(opts.ffmpegPath, {
+  const status = await runStatus(opts.ffmpegPath, {
     args: ["-y", "-i", srcTs, "-c", "copy", "-movflags", "+faststart", "-f", "mp4", tmp],
     stdout: "null", stderr: "null",
   });
   try {
-    const status = await cmd.spawn().status;
     if (!status.success) {
       await Deno.remove(tmp).catch(() => {});
       return false;
