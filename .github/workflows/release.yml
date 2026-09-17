@@ -267,7 +267,10 @@ jobs:
           V="${{ needs.version.outputs.version }}"
           mv dist/SemaClip.msi "dist/SemaClip-$V-win-x64.msi"
           cd dist
-          zip -qr "SemaClip-$V-win-x64-portable.zip" SemaClip
+          # The portable zip is the UPDATE PAYLOAD, so it must not carry the
+          # updater: that process is replaced only by an installer, and a running
+          # image cannot be overwritten on Windows.
+          zip -qr "SemaClip-$V-win-x64-portable.zip" SemaClip -x "SemaClip/SemaClipUpdater.exe"
 
       - name: Collect artifact, sidecar, runtime dylib
         run: |
@@ -443,6 +446,23 @@ jobs:
           python3 scripts/ci/manifest.py init \
             "dist/${{ env.CHANNEL_DIR }}/latest.json" \
             "${{ needs.version.outputs.version }}"
+
+          # The Windows whole-payload artifact. Deno.autoUpdate cannot swap a
+          # loaded DLL, so Windows updates via the bundled sidecar and downloads
+          # the full portable zip rather than a bsdiff patch. The URL is explicit
+          # because the payload lives in the RELEASE while the manifest is served
+          # from Pages — without it a client would 404 against the manifest's own
+          # directory.
+          V="${{ needs.version.outputs.version }}"
+          ZIP="SemaClip-$V-win-x64-portable.zip"
+          if [ -f "dist/$ZIP" ]; then
+            python3 scripts/ci/manifest.py artifact \
+              "dist/${{ env.CHANNEL_DIR }}/latest.json" \
+              "$V" win-x64 "$ZIP" "$(cat "dist/$ZIP.sha256")" \
+              "https://github.com/${{ github.repository }}/releases/download/${{ needs.version.outputs.tag }}/$ZIP"
+          else
+            echo "::warning::no portable zip in dist; the Windows artifact entry is omitted (Windows clients stay put)"
+          fi
 
       - name: Publish the manifest to the releases branch
         env:

@@ -75,6 +75,21 @@ const output = platform === "win-x64"
   ? `${out}.AppImage`
   : out;
 
+// Windows needs two files INSIDE the assembler's input, so they must exist before
+// `deno desktop` runs — a post-step only reaches the app directory it leaves
+// beside the .msi, never the .msi's own cabinet (measured: the installer carried
+// exactly the payload and the launcher, with no updater and no version.txt).
+const stage = join(REPO, "server", "appfiles");
+if (platform === "win-x64") {
+  await Deno.mkdir(stage, { recursive: true });
+  await Deno.writeTextFile(
+    join(stage, "version.txt"),
+    `version=${await readVersion()}\nchannel=${channel()}\nmanifest=${manifestUrl()}\n`,
+  );
+  console.log(`version.txt: ${await readVersion()} (${channel()})`);
+  await buildSidecar(stage);
+}
+
 const args = [
   "desktop",
   "--allow-all",
@@ -82,6 +97,7 @@ const args = [
   "../frontend/build",
   "--include",
   "../native",
+  ...(platform === "win-x64" ? ["--include", "appfiles"] : []),
   ...exclusions.flatMap((e) => ["--exclude", e]),
   "--target",
   triple,
@@ -122,4 +138,56 @@ if (platform === "win-x64" && !Deno.env.get("SEMACLIP_SKIP_ICON")) {
     Deno.exit(r.code);
   }
 }
+
+/** The version the bundle claims, taken from frontend/package.json — the same
+ *  file the UI banner is built from, so the banner and version.txt cannot drift. */
+async function readVersion(): Promise<string> {
+  const pkg = JSON.parse(await Deno.readTextFile(join(REPO, "frontend", "package.json")));
+  const v = String(pkg.version ?? "");
+  if (!v) throw new Error("frontend/package.json has no version");
+  return v;
+}
+
+/** Nightly unless the build explicitly asks for stable. */
+function channel(): string {
+  return Deno.env.get("SEMACLIP_CHANNEL") === "stable" ? "stable" : "nightly";
+}
+
+/** The manifest this build should poll, mirroring deno.json's desktop.release. */
+function manifestUrl(): string {
+  const override = Deno.env.get("SEMACLIP_UPDATE_URL");
+  if (override) return override;
+  const denoJson = JSON.parse(Deno.readTextFileSync(join(REPO, "server", "deno.json")));
+  const base = denoJson?.desktop?.release?.baseUrl;
+  if (!base) throw new Error("server/deno.json has no desktop.release.baseUrl");
+  return `${String(base).replace(/\/$/, "")}/latest.json`;
+}
+
+/**
+ * Cross-compile the Windows sidecar updater into the bundle.
+ *
+ * Go, stdlib only: it builds a static .exe from any host with no module
+ * downloads, which matters because this runs inside the release pipeline. The
+ * updater cannot update itself (a running executable cannot overwrite its own
+ * image), so it is replaced only by a new installer.
+ */
+async function buildSidecar(appDir: string): Promise<void> {
+  const src = join(REPO, "tools", "updater");
+  const out = join(appDir, "SemaClipUpdater.exe");
+  const go = await new Deno.Command("go", { args: ["version"] }).output();
+  if (go.code !== 0) throw new Error("go toolchain not found — needed to build the Windows sidecar updater");
+  const r = await new Deno.Command("go", {
+    args: ["build", "-trimpath", "-ldflags", "-s -w", "-o", out, "."],
+    cwd: src,
+    env: { ...Deno.env.toObject(), GOOS: "windows", GOARCH: "amd64", CGO_ENABLED: "0" },
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  }).spawn().status;
+  if (r.code !== 0) throw new Error(`sidecar build failed (exit ${r.code})`);
+  console.log(`sidecar: ${out}`);
+}
+
+await Deno.remove(stage, { recursive: true }).catch(() => {});
+
 Deno.exit(0);

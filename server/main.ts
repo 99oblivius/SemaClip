@@ -1,15 +1,15 @@
 import { createApp } from "@/adapters/inbound/http/routes.ts";
 import { buildContainer } from "@/composition/container.ts";
 import { ToolRegistry } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
-import { reexecForLinuxWebview } from "@/adapters/outbound/platform/linux-webview.ts";
+import { reexecForWebview } from "@/adapters/outbound/platform/webview-fix.ts";
 import { startAutoUpdate } from "@/adapters/outbound/platform/auto-update.ts";
 import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
 
-// MUST run before anything else on Linux: the GTK/WebKit backend initialises
-// before this module body executes, so the DMA-BUF workaround cannot be applied
-// in-process (see the module for the measured evidence). This re-execs once and
-// never returns when it acts.
-await reexecForLinuxWebview();
+// MUST run before anything else: the webview backend initialises before this
+// module body executes, so neither the Linux DMA-BUF nor the Windows WebView2
+// user-data workaround can be applied in-process (see the module for the measured
+// evidence on each). This re-execs once and never returns when it acts.
+await reexecForWebview();
 
 const PORT = parseInt(Deno.env.get("PORT") ?? "5174", 10);
 /** Platform app-data default; SEMACLIP_DATA overrides (isolated test runs). */

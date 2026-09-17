@@ -13,6 +13,7 @@ Subcommands:
   version-files <version>                          assert both version files agree
   init          <out> <version>                    write a fresh, empty-patch manifest
   merge         <path> <version> <from> <name> <sha>   add one patch entry
+  artifact      <path> <version> <platform> <name> <sha> [url]   add/replace one artifact
   check         <path> <version>                   validate a published manifest
 
 Run with no arguments for a self-test of init/merge/check.
@@ -82,6 +83,37 @@ def cmd_merge(path: str, version: str, frm: str, name: str, sha: str) -> int:
     return 0
 
 
+
+def cmd_artifact(path: str, version: str, platform: str, name: str, sha: str, url: str = "") -> int:
+    """Record a whole-payload artifact for one platform.
+
+    Windows does not take a bsdiff patch: Deno.autoUpdate cannot swap a loaded DLL,
+    so a sidecar process updates the stopped app and downloads the full payload.
+    Replacing the entry each release is deliberate — only the newest payload is
+    ever fetched, and keeping old ones would grow the manifest without a reader."""
+    if not SHA256_RE.match(sha):
+        fail(f"artifact sha256 is not a 64-char hex digest: {sha!r}")
+    with open(path) as fh:
+        manifest = json.load(fh)
+    artifacts = manifest.setdefault("artifacts", {})
+    if not isinstance(artifacts, dict):
+        fail("manifest `artifacts` is not an object")
+    # The payload lives in the RELEASE, not beside the manifest on Pages, so an
+    # explicit url is recorded when given. Without one a client would resolve the
+    # name against the manifest's own directory and 404.
+    entry = {"name": name, "sha256": sha}
+    if url:
+        entry["url"] = url
+    artifacts[platform] = entry
+    manifest["version"] = version
+
+    with open(path, "w") as fh:
+        json.dump(manifest, fh, indent=2)
+        fh.write("\n")
+    print(json.dumps(manifest, indent=2))
+    return 0
+
+
 def cmd_check(path: str, version: str) -> int:
     """Validate what is actually being SERVED, not what we meant to write."""
     with open(path) as fh:
@@ -141,7 +173,25 @@ def self_test() -> int:
         else:
             raise AssertionError("version drift was accepted")
 
-    print("self-test OK (init/merge/check, empty patches, bad sha, version drift)")
+        # artifact: additive to `patches`, replaced in place, digest validated.
+        cmd_artifact(p, "2026.142-nightly.43", "win-x64", "payload.zip", "a" * 64)
+        doc = json.load(open(p))
+        if doc["artifacts"]["win-x64"]["name"] != "payload.zip":
+            raise AssertionError("artifact entry not recorded")
+        if "2026.141-nightly.42" not in doc["patches"]:
+            raise AssertionError("artifact write dropped the patch entries")
+        cmd_artifact(p, "2026.142-nightly.43", "win-x64", "payload2.zip", "b" * 64)
+        doc = json.load(open(p))
+        if doc["artifacts"]["win-x64"]["name"] != "payload2.zip":
+            raise AssertionError("artifact entry was not replaced")
+        try:
+            cmd_artifact(p, "2026.142-nightly.43", "win-x64", "x.zip", "NOT-A-HASH")
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("a malformed artifact digest was accepted")
+
+    print("self-test OK (init/merge/artifact/check, empty patches, bad sha, version drift)")
     return 0
 
 
@@ -155,14 +205,19 @@ def main() -> int:
         "version-files": (cmd_version_files, 1),
         "init": (cmd_init, 2),
         "merge": (cmd_merge, 5),
+        "artifact": (cmd_artifact, (5, 6)),
         "check": (cmd_check, 2),
     }
     if cmd not in table:
         print(__doc__, file=sys.stderr)
         return 2
     fn, arity = table[cmd]
-    if len(args) != arity:
-        print(f"FAIL: {cmd} takes {arity} argument(s), got {len(args)}", file=sys.stderr)
+    # arity is an int, or a tuple of accepted counts for subcommands with an
+    # optional trailing argument.
+    allowed = arity if isinstance(arity, tuple) else (arity,)
+    if len(args) not in allowed:
+        want = " or ".join(str(a) for a in allowed)
+        print(f"FAIL: {cmd} takes {want} argument(s), got {len(args)}", file=sys.stderr)
         return 2
     return fn(*args)
 
