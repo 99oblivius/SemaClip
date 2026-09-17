@@ -1,7 +1,15 @@
 import { createApp } from "@/adapters/inbound/http/routes.ts";
 import { buildContainer } from "@/composition/container.ts";
 import { resolveToolPaths } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
+import { reexecForLinuxWebview } from "@/adapters/outbound/platform/linux-webview.ts";
 import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
+
+// MUST run before anything else on Linux: the GTK/WebKit backend initialises
+// before this module body executes, so the DMA-BUF workaround cannot be applied
+// in-process (see the module for the measured evidence). This re-execs once and
+// never returns when it acts.
+await reexecForLinuxWebview();
+
 const PORT = parseInt(Deno.env.get("PORT") ?? "5174", 10);
 /** Platform app-data default; SEMACLIP_DATA overrides (isolated test runs). */
 const DATA_DIR = Deno.env.get("SEMACLIP_DATA")
