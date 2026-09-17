@@ -1,6 +1,11 @@
 {
   "version": "26.181-nightly.21",
-  "patches": {},
+  "patches": {
+    "26.180-nightly.20": {
+      "name": "patch-26.180-nightly.20-to-26.181-nightly.21.bin",
+      "sha256": "12333c836289221bbf6368a8199eef0b34b15623c2d94ed3620407719df975e8"
+    }
+  },
   "artifacts": {
     "win-x64": {
       "name": "SemaClip-26.181-nightly.21-win-x64-portable.zip",
