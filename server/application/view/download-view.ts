@@ -116,16 +116,51 @@ export function computeSharing(artifacts: ArtifactView[]): Map<string, ArtifactK
   return byPath;
 }
 
-/** Playback resolution: the video is canonical, the proxy is a preview. */
+/**
+ * Playback resolution: the video is canonical, the proxy is a preview.
+ *
+ * `onDisk` means COMPLETE and nothing else — a running download must never claim it,
+ * because the downloader opens its destination immediately and a stat succeeds while
+ * bytes are still arriving. But completeness is not what playback needs. The whole
+ * point of the fragmented MP4 pipeline is that the growing file IS playable: index at
+ * the front, and the frontier is the seek ceiling. Gating playback on `onDisk` meant
+ * nothing was playable until a multi-GB download finished, so the Review page fell
+ * back to streaming straight from Twitch — reported as "the preview still streams
+ * from the url instead of the proxy or video being downloaded".
+ *
+ * So a RUNNING artifact whose file exists is playable up to its frontier. `onDisk`
+ * keeps its meaning everywhere else, and `previewOnly` still describes export
+ * capability rather than what can be watched.
+ */
 export function resolvePlayback(artifacts: ArtifactView[]): DownloadView["media"] {
   const video = artifacts.find((a) => a.kind === "video");
   const proxy = artifacts.find((a) => a.kind === "proxy");
-  const videoPlayable = video?.onDisk ? video.path : null;
-  const proxyPlayable = proxy?.onDisk ? proxy.path : null;
+
+  // Playable = a real file exists that the media route can open. A complete artifact
+  // qualifies, and so does one currently being written: the pipeline guarantees it is
+  // seekable up to frontierSec.
+  const playable = (a?: ArtifactView): string | null => {
+    if (!a?.path) return null;
+    if (a.onDisk) return a.path;
+    return a.status === "running" && a.bytes > 0 ? a.path : null;
+  };
+
+  const videoPlayable = playable(video);
+  const proxyPlayable = playable(proxy);
+  // The video is canonical: prefer it whenever it can be watched at all.
+  const chosen = videoPlayable ?? proxyPlayable;
+
+  // How far into `chosen` playback may seek. A running artifact reports its frontier;
+  // a complete one is its full duration.
+  const chosenArtifact = chosen === videoPlayable ? video : proxy;
+  const frontier = chosenArtifact?.onDisk
+    ? (chosenArtifact.totalSec ?? chosenArtifact.frontierSec ?? 0)
+    : (chosenArtifact?.frontierSec ?? 0);
+
   return {
-    playablePath: videoPlayable ?? proxyPlayable ?? null,
+    playablePath: chosen,
     previewOnly: !videoPlayable && Boolean(proxyPlayable),
-    frontierSec: video?.frontierSec ?? proxy?.frontierSec ?? 0,
+    frontierSec: frontier,
     durationSec: video?.totalSec ?? proxy?.totalSec ?? null,
   };
 }

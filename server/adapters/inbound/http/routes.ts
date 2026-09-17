@@ -38,6 +38,10 @@ import { clampToServable, parseRangeHeader } from "@/adapters/inbound/http/range
 import { projectDownloadView } from "@/application/view/project-download-view.ts";
 import { fragmentBoundaryAt, parseIndex } from "@/adapters/outbound/vod/fmp4.ts";
 import { run, spawnChild } from "@/adapters/outbound/process/spawn.ts";
+import {
+  chromeState,
+  closeWindow,
+} from "@/adapters/outbound/platform/window-lifecycle.ts";
 
 /**
  * How many bytes of `mediaPath` may be served right now.
@@ -837,6 +841,20 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   // comparable tool resolves an existing binary). The UI asks first, then this
   // installs into app data. `available` gates every job/export path.
   app.get("/api/tools", (c) => c.json(deps.tools.status()));
+
+  // ── window chrome ─────────────────────────────────────────────────────────
+  // The app draws its own header and, when the window is frameless, must also
+  // provide a close action: with no OS decoration there is no other way out. The
+  // capability report is served rather than assumed, so the UI never renders a
+  // button for something the window class cannot do. Measured against the runtime:
+  // minimize/maximize are ABSENT from BrowserWindow.
+  app.get("/api/window", (c) => c.json(chromeState()));
+
+  app.post("/api/window/close", (c) => {
+    // Fire the close and report whether it was accepted; the process exits from the
+    // window's own close handler, which is also what the OS button triggers.
+    return c.json({ closing: closeWindow() });
+  });
 
   app.post("/api/tools/ffmpeg", async (c) => {
     const status = deps.tools.status();

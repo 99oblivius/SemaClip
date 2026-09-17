@@ -6,8 +6,32 @@ import {
   reportWebviewLaunchEnvironment,
 } from "@/adapters/outbound/platform/webview-fix.ts";
 import { startAutoUpdate } from "@/adapters/outbound/platform/auto-update.ts";
-import { adoptWindowLifecycle } from "@/adapters/outbound/platform/window-lifecycle.ts";
+import {
+  adoptWindowLifecycle,
+  chromeState,
+  setWindowTitle,
+} from "@/adapters/outbound/platform/window-lifecycle.ts";
 import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
+
+/**
+ * The app's version, for the window title.
+ *
+ * `Deno.desktopVersion` is what a packaged build was compiled with; under `deno run`
+ * it is null, so a dev run falls back to the same file the banner reads. Reading the
+ * file at startup is cheap and keeps the title honest in both cases.
+ */
+function appVersion(): string {
+  const baked = (Deno as { desktopVersion?: string | null }).desktopVersion;
+  if (baked) return baked;
+  try {
+    const pkg = JSON.parse(
+      Deno.readTextFileSync(new URL("../frontend/package.json", import.meta.url)),
+    );
+    return String(pkg.version ?? "dev");
+  } catch {
+    return "dev";
+  }
+}
 
 const PORT = parseInt(Deno.env.get("PORT") ?? "5174", 10);
 /** Platform app-data default; SEMACLIP_DATA overrides (isolated test runs). */
@@ -133,7 +157,22 @@ applyWebviewLaunchEnvironment();
 // Report the launch workaround this build was compiled with (see webview-fix.ts).
 // It must arrive via `deno desktop --env-file`, because setting it here is too late.
 reportWebviewLaunchEnvironment();
-adoptWindowLifecycle();
+
+// Adopt the startup window. Frameless chrome is OFF by default: measured, the window
+// class has no minimize/maximize, so removing the OS decoration would leave the app
+// with no way to do either. Set SEMACLIP_FRAMELESS=1 to ask for it deliberately.
+const frameless = Deno.env.get("SEMACLIP_FRAMELESS") === "1";
+const APP_TITLE = `SemaClip ${appVersion()}`;
+adoptWindowLifecycle({ frameless, title: APP_TITLE });
+// The webview would otherwise title the window with the URL it navigated to.
+setWindowTitle(APP_TITLE);
+{
+  const c = chromeState();
+  console.log(
+    `window: decorations=${c.nativeDecorations ? "native" : "none (custom chrome)"} ` +
+      `minimize=${c.canMinimize} maximize=${c.canMaximize}`,
+  );
+}
 
 Deno.serve({ port: PORT, hostname: "127.0.0.1" }, app.fetch);
 

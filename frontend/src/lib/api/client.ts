@@ -220,3 +220,28 @@ export const apiClient = {
   getRegimes: (streamId: string) =>
     api<{ regimes: { start: number; end: number; type: string }[] }>(`/streams/${streamId}/regimes`),
 };
+
+/** Window chrome capability, as reported by the runtime-backed server. */
+export interface WindowChrome {
+  frameless: boolean;
+  nativeDecorations: boolean;
+  canMinimize: boolean;
+  canMaximize: boolean;
+}
+
+export async function getWindowChrome(): Promise<WindowChrome> {
+  const r = await fetch('/api/window');
+  if (!r.ok) throw new Error(`window chrome: ${r.status}`);
+  return await r.json();
+}
+
+/**
+ * Closes the app window.
+ *
+ * The response is frequently lost, because the process exits from the window's close
+ * handler while this request is still in flight. Callers should not treat a rejected
+ * promise here as a failure.
+ */
+export async function closeAppWindow(): Promise<void> {
+  await fetch('/api/window/close', { method: 'POST' });
+}
