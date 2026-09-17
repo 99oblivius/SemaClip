@@ -121,6 +121,29 @@ if (status.code !== 0) Deno.exit(status.code);
 // Windows: `deno desktop` puts the icon on the payload DLL, not the launcher
 // EXE, and Windows reads a GUI process's taskbar/Explorer icon from the launcher.
 // Post-process it so the icon declared in deno.json actually appears.
+// Real files in the assembled app directory, AFTER the build.
+//
+// `--include appfiles` does NOT do this: measured, --include embeds a file into
+// the compiled executable's virtual filesystem and never emits it as a real file
+// beside the payload. The app can read an embedded version.txt (verified), but a
+// SEPARATE process — the Windows sidecar — cannot, and the portable zip that the
+// sidecar downloads is built from this directory, so an embedded-only
+// version.txt left the published payload with no version record at all.
+//
+// The MSI is authored before this point and so cannot carry these (deno desktop
+// limitation); the sidecar therefore falls back to a per-user state file, which
+// is also the only location that stays writable in Program Files.
+if (platform === "win-x64") {
+  const appDir = output.endsWith(".msi") ? output.slice(0, -4) : output;
+  await Deno.writeTextFile(
+    join(appDir, "version.txt"),
+    `version=${await readVersion()}\nchannel=${channel()}\nmanifest=${manifestUrl()}\n`,
+  );
+  await buildSidecar(appDir);
+  await Deno.remove(stage, { recursive: true }).catch(() => {});
+  console.log(`app files: version.txt + sidecar written into ${appDir}`);
+}
+
 if (platform === "win-x64" && !Deno.env.get("SEMACLIP_SKIP_ICON")) {
   const ico = join(REPO, "assets", "icon.ico");
   // The .msi build leaves the assembled app directory next to the installer.

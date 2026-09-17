@@ -29,6 +29,11 @@ func mkBundle(t *testing.T, dir, version string) {
 
 func write(t *testing.T, path, content string) {
 	t.Helper()
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -548,5 +553,71 @@ func TestApplyDoesNotReplaceTheUpdater(t *testing.T) {
 	}
 	if got := read(t, filepath.Join(dir, "SemaClipUpdater.exe")); got != "running updater" {
 		t.Fatalf("Apply replaced the running updater: %q", got)
+	}
+}
+
+func TestInstalledFallsBackToPerUserState(t *testing.T) {
+	// The Program Files case: the bundle's version.txt may be absent (the MSI is
+	// authored before the build can write one) or unreadable, and the updater must
+	// still know its version rather than re-downloading a payload it already has.
+	dir := t.TempDir()
+	os.Remove(filepath.Join(dir, versionFile))
+	stateDir := t.TempDir()
+	write(t, filepath.Join(stateDir, "SemaClip", "state.txt"), "version=v26.5\nchannel=nightly\n")
+
+	prev := os.Getenv("LOCALAPPDATA")
+	t.Cleanup(func() { os.Setenv("LOCALAPPDATA", prev) })
+	os.Setenv("LOCALAPPDATA", stateDir)
+
+	u := &Updater{Dir: dir, Out: os.Stdout}
+	got, err := u.Installed()
+	if err != nil {
+		t.Fatalf("no version resolvable from either source: %v", err)
+	}
+	if got != "v26.5" {
+		t.Fatalf("got %q, want v26.5", got)
+	}
+}
+
+func TestBundleVersionWinsOverState(t *testing.T) {
+	// The bundle travels with the payload, so it is authoritative when readable;
+	// a stale per-user state must not override it.
+	dir := t.TempDir()
+	mkBundle(t, dir, "v26.7")
+	stateDir := t.TempDir()
+	write(t, filepath.Join(stateDir, "SemaClip", "state.txt"), "version=v26.1\n")
+
+	prev := os.Getenv("LOCALAPPDATA")
+	t.Cleanup(func() { os.Setenv("LOCALAPPDATA", prev) })
+	os.Setenv("LOCALAPPDATA", stateDir)
+
+	u := &Updater{Dir: dir, Out: os.Stdout}
+	if got, _ := u.Installed(); got != "v26.7" {
+		t.Fatalf("got %q, want the bundle's v26.7", got)
+	}
+}
+
+func TestWriteVersionFallsBackWhenBundleIsReadOnly(t *testing.T) {
+	// A per-machine install lives in Program Files and is not writable by a
+	// non-elevated process. The applied version must still be recorded, or every
+	// launch re-offers an update it already applied.
+	dir := t.TempDir()
+	mkBundle(t, dir, "v26.1")
+	stateDir := t.TempDir()
+	prev := os.Getenv("LOCALAPPDATA")
+	t.Cleanup(func() { os.Setenv("LOCALAPPDATA", prev) })
+	os.Setenv("LOCALAPPDATA", stateDir)
+
+	// Make the version file unwritable by replacing it with a DIRECTORY: rename
+	// onto it fails, which is what an ACL-protected file looks like from here.
+	os.Remove(filepath.Join(dir, versionFile))
+	os.MkdirAll(filepath.Join(dir, versionFile), 0o755)
+
+	if err := writeVersion(dir, "v26.9", "nightly", "http://x/m.json"); err != nil {
+		t.Fatalf("writeVersion: %v", err)
+	}
+	got := read(t, filepath.Join(stateDir, "SemaClip", "state.txt"))
+	if !strings.Contains(got, "v26.9") {
+		t.Fatalf("version not recorded anywhere: %q", got)
 	}
 }

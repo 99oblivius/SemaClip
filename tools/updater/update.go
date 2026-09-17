@@ -26,6 +26,25 @@ const DefaultManifestURL = "https://99oblivius.github.io/SemaClip/nightly/latest
 // of a PE resource would be a second source of truth.
 const versionFile = "version.txt"
 
+// stateFile is the per-user record of what is installed. The install directory is
+// %ProgramFiles%\SemaClip (the MSI is per-machine: ALLUSERS=1 in its own tables),
+// where a non-elevated process cannot write — so the updater records the version
+// it applied somewhere it can actually own. It is a cache, not the source of
+// truth: the bundle's version.txt still wins when it is readable, and a stale or
+// missing cache just means one extra download.
+func stateFilePath() string {
+	base := os.Getenv("LOCALAPPDATA")
+	if base == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			base = filepath.Join(home, "AppData", "Local")
+		}
+	}
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "SemaClip", "state.txt")
+}
+
 type Config struct {
 	ManifestURL string
 	Channel     string
@@ -77,20 +96,39 @@ func LoadConfig(appDir string) (Config, error) {
 	return cfg, nil
 }
 
-// Installed answers "what version is on disk" — the version file is the single
-// source, so a half-applied update cannot leave the bundle claiming a version it
-// does not contain.
+// Installed answers "what version is on disk".
+//
+// The bundle's own version.txt is authoritative when readable, because that file
+// travels with the payload. The per-user state file is the fallback for an install
+// whose directory cannot be read (or was laid down by an installer that could not
+// carry one), so the updater still knows its version instead of re-downloading a
+// payload it already has.
 func (u *Updater) Installed() (string, error) {
-	raw, err := os.ReadFile(filepath.Join(u.Dir, versionFile))
+	if v, err := readVersionFrom(filepath.Join(u.Dir, versionFile)); err == nil {
+		return v, nil
+	}
+	if p := stateFilePath(); p != "" {
+		if v, err := readVersionFrom(p); err == nil {
+			return v, nil
+		}
+	}
+	return "", fmt.Errorf("no readable %s in %s and no per-user state — cannot determine the installed version", versionFile, u.Dir)
+}
+
+// readVersionFrom parses `version=` out of one of our key/value files.
+func readVersionFrom(path string) (string, error) {
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("cannot read %s: %w", versionFile, err)
+		return "", err
 	}
 	for _, line := range strings.Split(string(raw), "\n") {
 		if key, value, ok := strings.Cut(strings.TrimSpace(line), "="); ok && strings.TrimSpace(key) == "version" {
-			return strings.TrimSpace(value), nil
+			if v := strings.TrimSpace(value); v != "" {
+				return v, nil
+			}
 		}
 	}
-	return "", fmt.Errorf("%s carries no version=", versionFile)
+	return "", fmt.Errorf("%s carries no version=", path)
 }
 
 type Updater struct {
@@ -368,6 +406,9 @@ func resolveArtifactURL(manifestURL, name string) string {
 	return strings.TrimSuffix(manifestURL, "latest.json") + name
 }
 
+// writeVersion records the applied version, preferring the bundle (so it travels
+// with a re-zip) and falling back to the per-user state file when the install
+// directory is not writable — the normal case for a Program Files install.
 func writeVersion(dir, version, channel, manifest string) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "version=%s\n", version)
@@ -375,11 +416,38 @@ func writeVersion(dir, version, channel, manifest string) error {
 	if manifest != "" {
 		fmt.Fprintf(&b, "manifest=%s\n", manifest)
 	}
-	tmp := filepath.Join(dir, versionFile+".tmp")
-	if err := os.WriteFile(tmp, []byte(b.String()), 0o644); err != nil {
+	body := []byte(b.String())
+
+	bundlePath := filepath.Join(dir, versionFile)
+	if err := writeFileAtomic(bundlePath, body); err == nil {
+		return nil
+	}
+
+	statePath := stateFilePath()
+	if statePath == "" {
+		return fmt.Errorf("cannot write %s and no per-user state location is known", bundlePath)
+	}
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		return fmt.Errorf("cannot create the state directory: %w", err)
+	}
+	if err := writeFileAtomic(statePath, body); err != nil {
+		return fmt.Errorf("cannot record the version: %w", err)
+	}
+	return nil
+}
+
+// writeFileAtomic writes via a temp file + rename so a crash cannot leave a
+// half-written version file claiming a version that was never installed.
+func writeFileAtomic(path string, body []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(dir, versionFile))
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // extractZip writes the archive under dest. It refuses absolute or parent-escaping

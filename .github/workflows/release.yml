@@ -267,10 +267,19 @@ jobs:
           V="${{ needs.version.outputs.version }}"
           mv dist/SemaClip.msi "dist/SemaClip-$V-win-x64.msi"
           cd dist
-          # The portable zip is the UPDATE PAYLOAD, so it must not carry the
-          # updater: that process is replaced only by an installer, and a running
-          # image cannot be overwritten on Windows.
+          # The portable zip IS the update payload: the sidecar downloads it and
+          # swaps its contents into the install directory. It must not carry the
+          # updater (a running image cannot be overwritten on Windows — the
+          # updater ships with the installer only), but it MUST carry
+          # version.txt, or a client that applies this payload has no record of
+          # what it just installed.
           zip -qr "SemaClip-$V-win-x64-portable.zip" SemaClip -x "SemaClip/SemaClipUpdater.exe"
+          # Fail loudly if the payload cannot stand on its own. A silent omission
+          # here is invisible until a Windows client tries to update.
+          unzip -l "SemaClip-$V-win-x64-portable.zip" | grep -q "SemaClip/version.txt" \
+            || { echo "::error::portable zip has no version.txt — the payload cannot identify itself"; exit 1; }
+          echo "portable payload contents:"
+          unzip -l "SemaClip-$V-win-x64-portable.zip" | tail -n +4 | head -n -2
 
       - name: Collect artifact, sidecar, runtime dylib
         run: |
