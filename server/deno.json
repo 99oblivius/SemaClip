@@ -1,6 +1,6 @@
 {
   "name": "semaclip-server",
-  "version": "2026.141",
+  "version": "26.148",
   "exports": "./main.ts",
   "nodeModulesDir": "auto",
   "tasks": {
@@ -28,13 +28,20 @@
     }
   },
   "lint": {
-    "rules": { "tags": ["recommended"] }
+    "rules": {
+      "tags": [
+        "recommended"
+      ]
+    }
   },
   "compilerOptions": {
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
-    "lib": ["deno.window", "deno.ns"]
+    "lib": [
+      "deno.window",
+      "deno.ns"
+    ]
   },
   "imports": {
     "shared/types": "../shared/types.ts",
@@ -51,5 +58,7 @@
     "@std/path": "jsr:@std/path@^1.0.8",
     "@std/streams": "jsr:@std/streams@^1.0.5"
   },
-  "allowScripts": ["npm:better-sqlite3@12.11.1"]
+  "allowScripts": [
+    "npm:better-sqlite3@12.11.1"
+  ]
 }

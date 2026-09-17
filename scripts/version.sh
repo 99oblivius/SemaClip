@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# Compute the SemaClip version: v{year}.{patch}, where patch counts commits
-# since Jan 1 of the current year. One number that means something locally and
-# still satisfies Deno.autoUpdate (which compares version strings and treats
-# "differs" as an update).
+# Compute the SemaClip version: v{yy}.{patch} where yy = year - 2000 and patch
+# counts commits since Jan 1 of the current year. One number that means something
+# locally, satisfies Deno.autoUpdate (which compares version strings and treats
+# "differs" as an update), AND is encodable as a Windows MSI ProductVersion.
+#
+# WHY yy AND NOT THE FULL YEAR (verified): Windows Installer packs ProductVersion
+# as major(0-255).minor(0-255).build(0-65535), so a CalVer major of 2026 is
+# rejected outright -- `deno desktop -o SemaClip.msi` fails with "the major field
+# 2026 exceeds the maximum of 255". Year-2000 fits (26, and it stays <=255 until
+# 2255) and the commit count fits the minor field (<=255 commits so far this
+# year; the build field's 65535 ceiling is the overflow valve if it ever grows).
 #
 # Writes frontend/package.json's "version" (the header banner reads it via
 # vite.config.ts) and prints the version + the release tag.
@@ -30,13 +37,21 @@ for arg in "$@"; do
 done
 
 year="$(date -u +%Y)"
+yy=$((year - 2000))
 since="${year}-01-01T00:00:00Z"
 
 # Commits authored this year, up to HEAD. This is the {patch} component.
 patch="$(git -C "$repo" rev-list --count --since="$since" HEAD)"
 [ "$patch" -gt 0 ] || patch=1
 
-version="${year}.${patch}"
+# MSI ProductVersion bounds: minor must be <= 255. Beyond that the commit count
+# moves into the build field (<= 65535), keeping the version monotonic-ish and
+# still encodable.
+if [ "$patch" -le 255 ]; then
+  version="${yy}.${patch}"
+else
+  version="${yy}.255.${patch}"
+fi
 if [ "$mode" = "nightly" ]; then
   # The run number keeps consecutive nightlies of the SAME commit distinct —
   # otherwise two runs of one commit collide on a single version and the updater
