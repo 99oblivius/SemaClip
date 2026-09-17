@@ -47,15 +47,21 @@ fi
 tag="v${version}"
 
 if [ "$check_only" != "yes" ]; then
-  python3 - "$repo/frontend/package.json" "$version" <<'PY'
+  # BOTH files must carry the version: frontend/package.json drives the UI
+  # banner (via vite.config.ts) and server/deno.json is what deno desktop bakes
+  # into the binary as Deno.desktopVersion. Deno.autoUpdate compares the
+  # manifest against THAT value, so a drift here means the updater sees the
+  # wrong current version and re-applies patches forever.
+  python3 - "$repo/frontend/package.json" "$repo/server/deno.json" "$version" <<'PY'
 import json, sys
-path, version = sys.argv[1], sys.argv[2]
-with open(path) as fh:
-    data = json.load(fh)
-data["version"] = version
-with open(path, "w") as fh:
-    json.dump(data, fh, indent=2)
-    fh.write("\n")
+pkg_path, deno_path, version = sys.argv[1], sys.argv[2], sys.argv[3]
+for path in (pkg_path, deno_path):
+    with open(path) as fh:
+        data = json.load(fh)
+    data["version"] = version
+    with open(path, "w") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
 PY
 fi
 

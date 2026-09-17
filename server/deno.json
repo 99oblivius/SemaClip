@@ -1,13 +1,31 @@
 {
   "name": "semaclip-server",
-  "version": "0.1.0",
+  "version": "2026.141",
   "exports": "./main.ts",
   "nodeModulesDir": "auto",
   "tasks": {
     "dev": "deno run --allow-all --watch main.ts",
     "start": "deno run --allow-all main.ts",
     "check": "deno check main.ts",
-    "test": "deno test --allow-all"
+    "test": "deno test --allow-all",
+    "desktop": "deno desktop --allow-all --include ../frontend/build --include ../native -o ../dist/SemaClip main.ts"
+  },
+  "desktop": {
+    "app": {
+      "name": "SemaClip",
+      "identifier": "com.semaclip.app",
+      "icons": {
+        "windows": "../assets/icon.ico",
+        "linux": "../assets/icon.png"
+      }
+    },
+    "release": {
+      "baseUrl": "https://99oblivius.github.io/SemaClip/nightly"
+    },
+    "output": {
+      "windows": "../dist/SemaClip",
+      "linux": "../dist/SemaClip"
+    }
   },
   "lint": {
     "rules": { "tags": ["recommended"] }

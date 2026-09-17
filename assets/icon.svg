@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- SemaClip app mark: the waveform glyph from the app's own icon set
+       (frontend/src/lib/components/Icon.svelte, key "waveform"), in the theme's
+       signature blood red (#cc0000) on the foundation dark (#0a0a0b).
+       Deliberately NOT derived from frontend/src/lib/assets/favicon.svg, which
+       is still the stock Svelte logo and would be an odd product icon. -->
+  <rect width="512" height="512" rx="96" fill="#0a0a0b"/>
+  <g transform="translate(128,128) scale(10.6667)"
+     fill="none" stroke="#cc0000" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 12h2M7 8v8M11 5v14M15 9v6M19 11v2M21 12h0"/>
+  </g>
+</svg>
