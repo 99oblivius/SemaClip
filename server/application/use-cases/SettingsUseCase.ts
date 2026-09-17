@@ -17,6 +17,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   engineBinaryPath: null,
   cpuUsage: "medium",
   defaultMaxQualityHeight: 1080,
+  uiScale: "medium",
 };
 
 /** Worker budget per tier: fraction of total cores usable by workers. */
@@ -84,6 +85,12 @@ function coerce(raw: unknown): AppSettings {
   }
   if (o.defaultMaxQualityHeight === null || typeof o.defaultMaxQualityHeight === "number") {
     base.defaultMaxQualityHeight = o.defaultMaxQualityHeight as number | null;
+  }
+  // Validate against the known steps rather than accepting any string: the
+  // frontend indexes UI_SCALE_FACTOR with this, so an unknown value would render
+  // at the default while the settings screen showed something else.
+  if (o.uiScale === "small" || o.uiScale === "medium" || o.uiScale === "large") {
+    base.uiScale = o.uiScale;
   }
   return base;
 }

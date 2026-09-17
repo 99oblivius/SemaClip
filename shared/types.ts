@@ -270,4 +270,24 @@ export interface AppSettings {
    * modal's selector overrides this per download.
    */
   defaultMaxQualityHeight: number | null;
+  /**
+   * Overall UI scale, as a multiplier of the app's 14px base font.
+   *
+   * medium (1.5) is the DEFAULT — the app is dense by design and 1.0 is smaller
+   * than comfortable on a normal monitor. Exposed as small/medium/large rather
+   * than a free percentage so the three states are deliberately chosen and
+   * testable, and applied as a root font-size so every rem-based size and
+   * Tailwind spacing utility scales together.
+   */
+  uiScale: UiScale;
 }
+
+/** Discrete UI scale steps. Values are multipliers of the 14px base, so
+ * small (1.0) is exactly the app's original density. */
+export const UI_SCALE_FACTOR = {
+  small: 1,
+  medium: 1.5,
+  large: 2,
+} as const;
+
+export type UiScale = keyof typeof UI_SCALE_FACTOR;

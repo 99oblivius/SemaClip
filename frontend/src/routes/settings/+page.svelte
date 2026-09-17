@@ -3,12 +3,24 @@
   import { apiClient } from '$lib/api/client';
   import Icon from '$lib/components/Icon.svelte';
   import { fadeIn } from '$lib/actions/gsap';
-  import type { AppSettings, AspectRatio, CaptionStyle } from '$shared/types';
+  import { selectUiScale, confirmUiScaleSaved } from '$lib/stores/ui-scale';
+  import { UI_SCALE_FACTOR, type AppSettings, type AspectRatio, type CaptionStyle, type UiScale } from '$shared/types';
 
   const settingsQuery = createQuery(() => ({
     queryKey: ['settings'],
     queryFn: () => apiClient.getSettings(),
   }));
+
+  // Hand the choice to the shared store, which the layout turns into the root
+  // font size — the dropdown must not touch documentElement itself, and it must
+  // NOT write the query cache either: `dirty` below compares against that cache,
+  // so an optimistic cache write makes the page believe the server already has
+  // the value and Save stays disabled (measured: clicking the dropdown left
+  // saveDisabled true and the value never persisted).
+  function selectScale(next: UiScale) {
+    uiScale = next;
+    selectUiScale(next);
+  }
 
   const devicesQuery = createQuery(() => ({
     queryKey: ['system', 'devices'],
@@ -17,12 +29,17 @@
 
   const updateMutation = createMutation(() => ({
     mutationFn: (settings: Partial<AppSettings>) => apiClient.updateSettings(settings),
-    onSuccess: () => settingsQuery.refetch(),
+    onSuccess: () => {
+      // The pending choice is the persisted one now; let server values win again.
+      confirmUiScaleSaved();
+      settingsQuery.refetch();
+    },
   }));
 
   let gpuDevice = $state<string>('auto');
   let cpuUsage = $state<AppSettings['cpuUsage']>('medium');
   let defaultMaxQualityHeight = $state<number | null>(1080);
+  let uiScale = $state<UiScale>('medium');
   let exportDir = $state('');
   let defaultAspectRatio = $state<AspectRatio>('16:9');
   let captionsEnabled = $state(false);
@@ -39,6 +56,7 @@
       gpuDevice = s.gpuDevice === null ? 'auto' : String(s.gpuDevice);
       cpuUsage = s.cpuUsage ?? 'medium';
       defaultMaxQualityHeight = s.defaultMaxQualityHeight ?? null;
+      uiScale = s.uiScale ?? 'medium';
       exportDir = s.exportDir;
       defaultAspectRatio = s.defaultAspectRatio;
       captionsEnabled = s.defaultCaptions.enabled;
@@ -66,6 +84,7 @@
         backgroundOpacity: captionBgOpacity,
       },
       engineBinaryPath: engineBinaryPath.trim() || null,
+      uiScale,
     });
   }
 
@@ -75,6 +94,7 @@
       (gpuDevice === 'auto' ? null : parseInt(gpuDevice, 10)) !== settingsQuery.data?.gpuDevice ||
       cpuUsage !== (settingsQuery.data?.cpuUsage ?? 'medium') ||
       defaultMaxQualityHeight !== (settingsQuery.data?.defaultMaxQualityHeight ?? null) ||
+      uiScale !== (settingsQuery.data?.uiScale ?? 'medium') ||
       exportDir !== settingsQuery.data?.exportDir ||
       defaultAspectRatio !== settingsQuery.data?.defaultAspectRatio ||
       captionsEnabled !== settingsQuery.data?.defaultCaptions.enabled ||
@@ -90,6 +110,12 @@
     { value: '16:9', label: '16:9' },
     { value: '9:16', label: '9:16' },
     { value: '1:1', label: '1:1' },
+  ];
+
+  const uiScales: { value: UiScale; label: string; hint: string }[] = [
+    { value: 'small', label: 'Small', hint: `${UI_SCALE_FACTOR.small * 100}% — original density, most content on screen` },
+    { value: 'medium', label: 'Medium', hint: `${UI_SCALE_FACTOR.medium * 100}% — default` },
+    { value: 'large', label: 'Large', hint: `${UI_SCALE_FACTOR.large * 100}% — easiest to read` },
   ];
 
   const cpuTiers: { value: AppSettings['cpuUsage']; label: string; hint: string }[] = [
@@ -278,6 +304,34 @@
               </div>
             </div>
           {/if}
+        </div>
+      </section>
+
+      <!-- Appearance -->
+      <section class="flex flex-col gap-3">
+        <h2 class="font-display text-sm font-medium text-ash uppercase tracking-wider">Appearance</h2>
+        <div class="rounded-md border border-border bg-surface p-4">
+          <div class="flex items-start justify-between gap-6">
+            <div class="flex flex-col gap-0.5">
+              <label for="ui-scale" class="text-sm text-ink">Interface scale</label>
+              <span class="text-xs text-ash-dim">
+                {uiScales.find((s) => s.value === uiScale)?.hint ?? ''}
+              </span>
+            </div>
+            <select
+              id="ui-scale"
+              class="rounded border border-border bg-surface-2 px-2 py-1 text-sm text-ink"
+              value={uiScale}
+              onchange={(e) => selectScale(e.currentTarget.value as UiScale)}
+            >
+              {#each uiScales as scale (scale.value)}
+                <option value={scale.value}>{scale.label}</option>
+              {/each}
+            </select>
+          </div>
+          <p class="mt-3 border-t border-border pt-3 text-xs text-ash-dim">
+            Ctrl+scroll and Ctrl+± are disabled — the scale here is the only way the interface changes size.
+          </p>
         </div>
       </section>
 
