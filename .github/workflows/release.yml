@@ -230,24 +230,23 @@ jobs:
           # outright. versions are now v{yy}.{patch} (26.148), which fits.
           deno run --allow-all scripts/build-desktop.ts
 
-      # The .msi is the Windows installer (deno desktop authors it in pure Rust
-      # on this Linux runner). A zip of the plain app directory is ALSO produced
-      # because the .msi registers a per-machine install under %ProgramFiles%,
-      # which some users cannot or will not use -- the zip is the portable
-      # fallback and costs one extra build.
-      - name: Also build the portable Windows zip payload
+      # ONE build emits BOTH artifacts: `deno desktop -o SemaClip.msi` writes the
+      # installer AND leaves the assembled app directory (SemaClip/) beside it.
+      # Measured on Deno 2.9.6: a single win-x64 build produced a 252MB .msi plus
+      # SemaClip/{SemaClip.exe,SemaClip.dll}. An earlier revision of this step ran
+      # the build twice, which cost ~2.5 minutes of runner time for no new output.
+      #
+      # Both are shipped deliberately: the .msi registers a per-machine install
+      # under %ProgramFiles%, and the zip is the portable fallback for users who
+      # cannot or will not use that.
+      - name: Collect the Windows installer + portable zip
         if: matrix.platform == 'win-x64'
         run: |
           set -euo pipefail
-          deno run --allow-all scripts/build-desktop.ts win-x64
-          mv dist/SemaClip.msi "dist/SemaClip-${{ needs.version.outputs.version }}-win-x64.msi"
-          # SEMACLIP_ZIP makes the wrapper emit an app DIRECTORY; its name is
-          # what build-desktop.ts derives from OUT, so zip that exact path rather
-          # than assuming a name (an earlier revision of this step zipped
-          # "portable" while the script wrote "portable-win-x64").
-          SEMACLIP_ZIP=1 OUT="$PWD/dist/portable" deno run --allow-all scripts/build-desktop.ts win-x64
+          V="${{ needs.version.outputs.version }}"
+          mv dist/SemaClip.msi "dist/SemaClip-$V-win-x64.msi"
           cd dist
-          zip -qr "SemaClip-${{ needs.version.outputs.version }}-win-x64-portable.zip" portable-win-x64
+          zip -qr "SemaClip-$V-win-x64-portable.zip" SemaClip
 
       - name: Collect artifact, sidecar, runtime dylib
         run: |

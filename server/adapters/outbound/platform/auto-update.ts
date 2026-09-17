@@ -24,6 +24,14 @@ const CHANNEL = Deno.env.get("SEMACLIP_CHANNEL") === "stable" ? "stable" : "nigh
 /** One update check per 6h — frequent enough for a nightly channel, not a poll. */
 const INTERVAL_MS = 6 * 60 * 60 * 1000;
 
+/**
+ * Base64 Ed25519 public key for signed manifests. Empty = unsigned manifests
+ * (the current state). This MUST be a literal in the source: `deno desktop` does
+ * not carry environment variables into the compiled binary, so a getenv() here
+ * would read undefined in production while appearing to work in dev.
+ */
+const UPDATE_PUBLIC_KEY = "";
+
 export interface UpdateStatus {
   /** Version baked into THIS binary, or null in a dev run. */
   current: string | null;
@@ -87,9 +95,12 @@ export function startAutoUpdate(baseUrl?: string): void {
   }
 
   // Manifest signing: when a public key is configured the manifest must be a
-  // signed envelope. Left unset until a key exists, so unsigned manifests keep
-  // working today — see docs/CODE-SIGNING.md.
-  const publicKey = Deno.env.get("SEMACLIP_UPDATE_PUBKEY");
+  // signed envelope. Read from a COMPILE-TIME constant, never Deno.env —
+  // measured: an env var set during `deno desktop` is NOT baked into the binary,
+  // so a getenv() here returns undefined in every real install and signing would
+  // silently stay off. To enable signing, paste the base64 key below (it is a
+  // public key, so committing it is correct) — see docs/CODE-SIGNING.md.
+  const publicKey = UPDATE_PUBLIC_KEY;
 
   // Fire-and-forget: a failed update check must never prevent the app from
   // serving. autoUpdate() already swallows non-2xx responses internally.
