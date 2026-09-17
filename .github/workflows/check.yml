@@ -25,6 +25,18 @@ jobs:
       - name: Type check
         run: deno check main.ts
         working-directory: server
+      - name: Install ffmpeg
+        run: |
+          set -euo pipefail
+          # Several tests spawn ffmpeg for real (fmp4 muxing, export, engine E2E).
+          # GitHub runners do NOT ship it, so they failed with
+          # "NotFound: Failed to spawn 'ffmpeg': entity not found" on the first
+          # real CI run -- while passing locally on a machine that has it. The
+          # production code no longer depends on PATH (the packaged app bundles
+          # its own), but the TESTS still invoke the bare name.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
       - name: Unit tests
         run: deno test --allow-all
         working-directory: server

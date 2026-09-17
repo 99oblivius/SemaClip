@@ -256,14 +256,7 @@ jobs:
 
           case "$P" in
             linux-x64) ART="dist/SemaClip.AppImage" ;;
-            win-x64)
-              # Already renamed by the portable step, which must move it before the
-              # SECOND build removes its OUT directory. Tolerate both states: a
-              # second `mv` of the same path would fail under `set -e`.
-              [ -f "dist/SemaClip-$V-win-x64.msi" ] \
-                || mv dist/SemaClip.msi "dist/SemaClip-$V-win-x64.msi"
-              ART="dist/SemaClip-$V-win-x64.msi"
-              ;;
+            win-x64) ART="dist/SemaClip-$V-win-x64.msi" ;;
             *) echo "::error::unhandled platform $P"; exit 1 ;;
           esac
 
@@ -274,6 +267,17 @@ jobs:
           fi
           sha256sum "$ART" | awk '{print $1}' > "$ART.sha256"
           echo "artifact $ART ($(wc -c < "$ART") bytes) sha256=$(cat "$ART.sha256")"
+
+          # Every uploaded artifact needs a sidecar, including the Windows
+          # portable zip. The first real CI run failed with
+          # "missing ...-win-x64-portable.zip.sha256" because only the primary
+          # artifact was hashed here while both are uploaded and released.
+          if [ "$P" = "win-x64" ]; then
+            ZIP="dist/SemaClip-$V-win-x64-portable.zip"
+            [ -f "$ZIP" ] || { echo "::error::expected portable zip '$ZIP' missing"; exit 1; }
+            sha256sum "$ZIP" | awk '{print $1}' > "$ZIP.sha256"
+            echo "portable zip $ZIP sha256=$(cat "$ZIP.sha256")"
+          fi
 
           # The runtime dylib (<App>.so / <App>.dll) carries the whole ~560MB
           # payload and is what the launcher swaps. It is published so the NEXT

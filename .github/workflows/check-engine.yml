@@ -27,6 +27,15 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.9.x
+      - name: Install ffmpeg
+        run: |
+          set -euo pipefail
+          # The engine E2E extracts audio with ffmpeg. Runners do not ship it, so
+          # this failed with NotFound on the first real CI run despite passing
+          # locally. See check.yml for the same fix.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
       - name: Fetch native binaries + models
         run: ./scripts/fetch-native.sh
       - name: Engine E2E (real whisper on bundled jfk.wav)
