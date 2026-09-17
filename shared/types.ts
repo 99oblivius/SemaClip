@@ -291,3 +291,24 @@ export const UI_SCALE_FACTOR = {
 } as const;
 
 export type UiScale = keyof typeof UI_SCALE_FACTOR;
+
+/**
+ * ffmpeg availability, as reported by GET /api/tools.
+ *
+ * The app resolves ffmpeg PATH-first (see server/adapters/outbound/ffmpeg/
+ * tool-paths.ts) rather than bundling ~330MB into every installer, so the UI needs
+ * to ask whether it is missing and offer a download. `downloadable` is false when
+ * an explicit override points somewhere that does not exist — in that case a
+ * download would not help and the UI says so instead of offering it.
+ */
+export interface ToolStatus {
+  /** Resolved binary locations; null for a tool that could not be found. */
+  paths: { ffmpeg: string | null; ffprobe: string | null };
+  /** False when the binaries are missing and must be provisioned. */
+  available: boolean;
+  /** True when a user-approved download could supply them. */
+  downloadable: boolean;
+  /** Where an approved download would be installed. */
+  managedDir: string;
+  platform: string;
+}

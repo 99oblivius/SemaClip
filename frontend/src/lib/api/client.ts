@@ -12,6 +12,7 @@ import type {
   AppSettings,
   Axis,
   StreamStatus,
+  ToolStatus,
 } from '$shared/types';
 import type { DownloadState, DownloadView, QualityInfo } from '$lib/api/download';
 
@@ -152,6 +153,14 @@ export const apiClient = {
 
   exportClip: (input: ExportClipInput) =>
     api<ExportResult>(`/clips/${input.clipId}/export`, { method: 'POST', body: JSON.stringify(input) }),
+
+  // ── Tool provisioning (ffmpeg) ──
+  // ffmpeg resolves PATH -> previously-installed -> managed, so the UI asks
+  // whether it is missing and offers a download rather than assuming.
+  getToolStatus: () => api<ToolStatus>('/tools'),
+
+  /** The provisioning endpoint is a POST that streams SSE progress. */
+  toolProvisionUrl: () => `${API_BASE}/tools/ffmpeg`,
 
   // ── Settings ──
   getSettings: () =>

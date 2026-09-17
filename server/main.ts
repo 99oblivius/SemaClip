@@ -3,6 +3,7 @@ import { buildContainer } from "@/composition/container.ts";
 import { ToolRegistry } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
 import { reexecForWebview } from "@/adapters/outbound/platform/webview-fix.ts";
 import { startAutoUpdate } from "@/adapters/outbound/platform/auto-update.ts";
+import { adoptWindowLifecycle } from "@/adapters/outbound/platform/window-lifecycle.ts";
 import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
 
 // MUST run before anything else: the webview backend initialises before this
@@ -124,6 +125,11 @@ async function serveFile(
 // Bind loopback only: the API accepts arbitrary local paths (import-file,
 // PATCH vodPath) and serves files — binding all interfaces would expose
 // filesystem reads and subprocess triggers to the LAN.
+// Before serving: the window must be adopted while it exists, and this is also
+// what makes a window close exit the process instead of leaving a headless server
+// holding the port (measured on Windows: close did nothing).
+adoptWindowLifecycle();
+
 Deno.serve({ port: PORT, hostname: "127.0.0.1" }, app.fetch);
 
 console.log(`SemaClip server running on http://localhost:${PORT}`);

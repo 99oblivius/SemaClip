@@ -1,6 +1,7 @@
 <script lang="ts">
   import '../app.css';
   import Icon from '$lib/components/Icon.svelte';
+  import ToolProvisionModal from '$lib/components/ToolProvisionModal.svelte';
   import { wsStore } from '$lib/stores/ws';
   import { fadeIn } from '$lib/actions/gsap';
   import { QueryClientProvider } from '@tanstack/svelte-query';
@@ -156,5 +157,10 @@
         {@render children()}
       </main>
     </div>
+
+    <!-- App-wide, not per-screen: a missing ffmpeg blocks downloads and exports
+         wherever they are started, so the offer belongs above the routing. It
+         renders nothing unless the binary is actually absent. -->
+    <ToolProvisionModal />
   </div>
 </QueryClientProvider>

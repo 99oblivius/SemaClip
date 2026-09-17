@@ -358,17 +358,33 @@
         </div>
       </section>
 
-      <!-- Updates (Phase 4 placeholder — visible, honest about its state) -->
+      <!-- Updates. Reflects the real update state rather than a phase placeholder:
+           the channel and version come from the build, and the Windows caveat is
+           the one thing a user needs to know (its update is applied by the bundled
+           sidecar on the next launch, not while the app runs). -->
       <section class="flex flex-col gap-3">
         <h2 class="font-display text-sm font-medium text-ash uppercase tracking-wider">Updates</h2>
         <div class="flex flex-col gap-2 rounded-md border border-border bg-surface p-4">
           <div class="flex items-center justify-between">
-            <div class="flex flex-col">
-              <span class="text-sm text-ink">SemaClip v2 (dev)</span>
-              <span class="font-mono text-xs text-ash-dim">Auto-update ships in Phase 4. Windows gets a documented workaround installer.</span>
+            <div class="flex flex-col gap-0.5">
+              <span class="text-sm text-ink">SemaClip {__APP_VERSION__}</span>
+              <span class="font-mono text-xs text-ash-dim">
+                {#if __APP_CHANNEL__ === 'nightly'}
+                  Nightly channel — built from the latest commit, not a tested release.
+                {:else}
+                  Stable channel.
+                {/if}
+              </span>
             </div>
-            <span class="rounded border border-border px-2 py-1 font-mono text-xs text-ash-dim">dev build</span>
+            <span class="rounded border border-border px-2 py-1 font-mono text-xs text-ash-dim">
+              {__APP_CHANNEL__}
+            </span>
           </div>
+          <p class="border-t border-border pt-2 text-xs text-ash-dim">
+            Updates download in the background and are applied on the next launch.
+            On Windows the bundled updater applies them while the app is closed, so
+            a restart is what installs them — you are never interrupted mid-task.
+          </p>
         </div>
       </section>
 
