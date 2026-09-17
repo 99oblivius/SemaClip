@@ -1,4 +1,9 @@
 {
   "version": "26.162-nightly.4",
-  "patches": {}
+  "patches": {
+    "26.162-nightly.3": {
+      "name": "patch-26.162-nightly.3-to-26.162-nightly.4.bin",
+      "sha256": "42267a995da102d6011f647462d0185b8f271236717a7ea65bb43c1b6b8e15d1"
+    }
+  }
 }
