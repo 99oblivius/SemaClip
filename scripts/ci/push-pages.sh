@@ -28,27 +28,56 @@ fi
 repo="$1"; token="$2"; shift 2
 branch="releases"
 
-work="$PWD/.pages-publish"
+# Sources arrive as paths relative to the CALLER's cwd (release.yml passes
+# "dist/nightly/latest.json"), but this script cds into its scratch directory.
+# Resolving to absolute up front is not cosmetic: without it every publish fails
+# with "source not found" after the cd, which is exactly the failure this test
+# caught.
+orig_pwd="$PWD"
+args=()
+while [ "$#" -gt 0 ]; do
+  src="$1"; dest="$2"; shift 2
+  case "$src" in
+    /*) ;;
+    *) src="$orig_pwd/$src" ;;
+  esac
+  [ -f "$src" ] || { echo "FAIL: source not found: $src" >&2; exit 1; }
+  args+=("$src" "$dest")
+done
+set -- "${args[@]}"
+
+work="$orig_pwd/.pages-publish"
 rm -rf "$work"
 mkdir -p "$work"
 cd "$work"
 
 # The branch is created on the first release, so its absence is expected, not an
 # error: start an orphan branch holding only what we are publishing now.
-remote="https://x-access-token:${token}@github.com/${repo}.git"
+#
+# A full remote URL is accepted verbatim (file:// in tests, a GHE host in a
+# self-hosted setup); an "owner/repo" slug becomes the token-authenticated GitHub
+# HTTPS URL. Hardcoding the github.com form would make the script impossible to
+# exercise without hitting the network.
+case "$repo" in
+  *://*|git@*) remote="$repo" ;;
+  *) remote="https://x-access-token:${token}@github.com/${repo}.git" ;;
+esac
 if git clone --depth 1 --branch "$branch" "$remote" repo 2>/dev/null; then
   echo "==> cloned existing $branch branch"
 else
   echo "==> $branch branch does not exist yet; creating it"
   git init -q repo
   git -C repo checkout -q --orphan "$branch"
+  # A clone sets up origin; an init does not. Without this the first-ever publish
+  # fails at the push with "'origin' does not appear to be a git repository" —
+  # the one release where there is no existing branch to fall back on.
+  git -C repo remote add origin "$remote"
 fi
 
 cd repo
 
 while [ "$#" -gt 0 ]; do
   src="$1"; dest="$2"; shift 2
-  [ -f "$src" ] || { echo "FAIL: source not found: $src" >&2; exit 1; }
   mkdir -p "$(dirname "$dest")"
   cp "$src" "$dest"
   echo "==> staged $src -> $dest ($(wc -c < "$dest") bytes)"

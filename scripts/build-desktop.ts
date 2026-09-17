@@ -62,7 +62,15 @@ for (const sub of Object.keys(TRIPLES)) {
 
 const out = Deno.env.get("OUT") ?? join(REPO, "dist", "SemaClip");
 const appImage = Deno.env.get("SEMACLIP_APPIMAGE") === "1";
-const output = appImage ? `${out}.AppImage` : out;
+// Per-target container format. Windows ships a real .msi (owner decision:
+// native installer, authored by deno desktop in pure Rust and cross-compiled
+// from Linux). The version scheme is what makes this possible -- see
+// scripts/version.sh for the Windows Installer ProductVersion bounds.
+const output = platform === "win-x64"
+  ? (Deno.env.get("SEMACLIP_ZIP") === "1" ? `${out}-win-x64` : `${out}.msi`)
+  : appImage
+  ? `${out}.AppImage`
+  : out;
 
 const args = [
   "desktop",

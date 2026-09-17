@@ -106,7 +106,6 @@ jobs:
 
       - name: Assert both version files carry it
         run: python3 scripts/ci/manifest.py version-files "${{ steps.compute.outputs.version }}"
-
       - name: Record the version for the build jobs
         run: |
           set -euo pipefail
@@ -130,13 +129,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Both targets build on ubuntu-latest: `deno desktop` cross-compiles,
-          # and scripts/fetch-native.sh can populate a win-x64 payload from a
-          # Linux host. A Windows runner would add cost and change nothing.
+          # Both targets build on ubuntu-latest: `deno desktop` cross-compiles, and
+          # scripts/fetch-native.sh can populate a win-x64 payload from a Linux
+          # host. A Windows runner would add cost and change nothing.
+          #
+          # Only `platform` is carried: scripts/build-desktop.ts owns the mapping
+          # from this slug to the Rust triple, so listing the triple here too would
+          # be a second source of truth for a value that must agree with the native
+          # tree — the exact drift this repo keeps re-learning.
           - platform: linux-x64
-            target: x86_64-unknown-linux-gnu
           - platform: win-x64
-            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
         with:
@@ -159,9 +161,9 @@ jobs:
           # from dl.deno.land and the laufey-webview backend — tens of MB per job
           # per platform, inheriting upstream flakiness each time.
           path: ${{ env.DENO_DIR }}
-          key: deno-${{ env.DENO_VERSION }}-${{ matrix.target }}-${{ hashFiles('server/deno.lock', 'frontend/package-lock.json') }}
+          key: deno-${{ env.DENO_VERSION }}-${{ matrix.platform }}-${{ hashFiles('server/deno.lock', 'frontend/package-lock.json') }}
           restore-keys: |
-            deno-${{ env.DENO_VERSION }}-${{ matrix.target }}-
+            deno-${{ env.DENO_VERSION }}-${{ matrix.platform }}-
 
       - name: Frontend build
         run: |
@@ -194,45 +196,54 @@ jobs:
           fi
           echo "baked version: $version"
 
-      - name: Package (linux)
-        if: matrix.platform == 'linux-x64'
-        working-directory: server
+      - name: Package for ${{ matrix.platform }}
+        env:
+          # scripts/build-desktop.ts derives BOTH `--target` and the native tree
+          # from this one value, because the app resolves its binaries by the
+          # RUNTIME os (Deno.build.os), not the build host. Getting the two out of
+          # sync is the failure mode that produces a build which compiles and then
+          # silently falls back to PATH on the user's machine.
+          SEMACLIP_TARGET: ${{ matrix.platform }}
+          # Absolute: the wrapper runs deno desktop with cwd=server/, so a relative
+          # OUT would resolve there rather than at the repo root.
+          OUT: ${{ github.workspace }}/dist/SemaClip
+          # Linux users get a single-file AppImage; Windows ships the directory.
+          # With SEMACLIP_APPIMAGE=1 the wrapper emits the .AppImage AND leaves the
+          # unpacked directory beside it (measured: SemaClip.AppImage 277MB plus
+          # SemaClip/SemaClip.so 577MB), so the dylib the patch job diffs comes out
+          # of the same single build — no second packaging run.
+          SEMACLIP_APPIMAGE: ${{ matrix.platform == 'linux-x64' && '1' || '' }}
         run: |
           set -euo pipefail
-          # --include is REQUIRED: the app reads ../frontend/build and ../native
-          # through import.meta.url-relative paths, which resolve inside the
-          # compiled VFS (mounted at /tmp/deno-compile-app/).
-          # The .AppImage extension also makes deno desktop leave the unpacked app
-          # directory beside the bundle — that directory holds the runtime dylib
-          # the updater swaps, which is what the patch job diffs.
-          deno desktop --allow-all \
-            --include ../frontend/build --include ../native \
-            --target ${{ matrix.target }} \
-            -o ../dist/SemaClip.AppImage main.ts
-
-      - name: Package (windows)
-        if: matrix.platform == 'win-x64'
-        working-directory: server
-        run: |
-          set -euo pipefail
-          # NOT a .msi. `deno desktop` refuses to build one from this version
-          # scheme: "the major field 2026 exceeds the maximum of 255" — Windows
+          # The wrapper also --excludes the OTHER platforms' native subtrees, which
+          # matters three ways: the download shrinks, and bsdiff's input — the thing
+          # its ~17x memory factor multiplies — shrinks with it. Measured: the
+          # Linux payload is 277MB (AppImage) / 577MB (runtime dylib) with the
+          # exclusions, against 473MB / 560MB before them.
+          #
+          # Produce an .msi on this Linux runner — deno desktop authors it in
+          # pure Rust and cross-compiles, so no Windows host is needed.
+          #
+          # The version scheme had to change for this to be possible: Windows
           # Installer packs ProductVersion as major(0-255).minor(0-255).build
-          # (0-65535). Verified on Deno 2.9.6, with and without the -nightly
-          # suffix. The app directory builds fine and carries the real version, so
-          # Windows ships as a zip of that directory. See docs/RELEASING.md ->
-          # "Windows artifact" for the ways to get a real installer.
-          deno desktop --allow-all \
-            --include ../frontend/build --include ../native \
-            --target ${{ matrix.target }} \
-            -o ../dist/SemaClip main.ts
+          # (0-65535), so the original v{year}.{patch} (major 2026) was rejected
+          # outright. versions are now v{yy}.{patch} (26.148), which fits.
+          deno run --allow-all scripts/build-desktop.ts
 
-      - name: Zip the Windows app directory
+      # The .msi is the Windows installer (deno desktop authors it in pure Rust
+      # on this Linux runner). A zip of the plain app directory is ALSO produced
+      # because the .msi registers a per-machine install under %ProgramFiles%,
+      # which some users cannot or will not use -- the zip is the portable
+      # fallback and costs one extra build.
+      - name: Also build the portable Windows zip payload
         if: matrix.platform == 'win-x64'
         run: |
           set -euo pipefail
+          deno run --allow-all scripts/build-desktop.ts win-x64
+          mv dist/SemaClip.msi "dist/SemaClip-${{ needs.version.outputs.version }}-win-x64.msi"
+          SEMACLIP_ZIP=1 OUT="$PWD/dist/portable" deno run --allow-all scripts/build-desktop.ts win-x64
           cd dist
-          zip -qr "SemaClip-${{ needs.version.outputs.version }}-win-x64.zip" SemaClip
+          zip -qr "SemaClip-${{ needs.version.outputs.version }}-win-x64-portable.zip" portable
 
       - name: Collect artifact, sidecar, runtime dylib
         run: |
@@ -271,7 +282,7 @@ jobs:
 
           printf '%s\n' \
             "version=$V" "tag=${{ needs.version.outputs.tag }}" \
-            "platform=$P" "target=${{ matrix.target }}" \
+            "platform=$P" \
             > "dist/build-meta-$P.txt"
 
       - uses: actions/upload-artifact@v4
@@ -280,9 +291,13 @@ jobs:
           # Carries the runtime dylib as well as the installer: the patch job
           # diffs that dylib, and re-downloading ~560MB from a release asset to
           # get it would be slower and would require the release to exist first.
+          # Paths are named explicitly rather than globbing dist/*, because the
+          # unpacked app directory (containing a ~577MB dylib) sits in dist/ too
+          # and must not be uploaded twice: it travels as the Windows zip, and as
+          # the extracted runtime dylib on Linux.
           path: |
-            dist/*.AppImage
-            dist/*.AppImage.sha256
+            dist/SemaClip.AppImage
+            dist/SemaClip.AppImage.sha256
             dist/*-win-x64.zip
             dist/*-win-x64.zip.sha256
             dist/*-runtime.*
@@ -394,21 +409,26 @@ jobs:
             "${{ env.CHANNEL_DIR }}/latest.json"
 
       # ── Ed25519 manifest signing: WIRED BUT NOT ACTIVE ──────────────────────
-      # No key exists yet, and main.ts does not pass a `publicKey`, so today's
-      # clients verify nothing. Passing an optional `publicKey` to
-      # Deno.autoUpdate({...}) turns the manifest into
+      # No key exists yet, and SEMACLIP_UPDATE_PUBKEY is unset, so today's clients
+      # verify nothing. server/adapters/outbound/platform/auto-update.ts reads
+      # SEMACLIP_UPDATE_PUBKEY and passes it to Deno.autoUpdate({...}) as
+      # `publicKey`, which turns the manifest into
       #   {"signed": "<the manifest json as a string>",
       #    "signature": "<base64 ed25519 sig over the signed string>"}
+      # The key is read from the BAKED-IN ENV of the built app, so signing cannot
+      # be switched on for existing installs by changing the manifest alone: an
+      # install that does not carry the pubkey keeps accepting unsigned manifests.
       # To activate:
-      #   1. generate a key, put the base64 of its 32 raw private bytes in the
+      #   1. generate a key; put base64 of its 32 raw private bytes in the
       #      repository secret SEMACLIP_ED25519_KEY;
-      #   2. set the matching public key in main.ts's Deno.autoUpdate call;
-      #   3. expose the secret as a JOB-level env (`env:` next to `runs-on` — a
-      #      step cannot read `secrets` in its own `if:`, which is why the guard
-      #      is written against env);
-      #   4. uncomment the two steps below.
-      # NOTE: scripts/ci/sign-manifest.py has never been run against a real key —
-      # it is unverified until step 3 of docs/RELEASING.md is done with one.
+      #   2. rebuild the app with SEMACLIP_UPDATE_PUBKEY set to the public key, so
+      #      new installs verify (see docs/RELEASING.md step 3 — an existing
+      #      install never starts verifying);
+      #   3. expose the secret as a JOB-level env (`env:` beside `runs-on`, because
+      #      a step cannot read `secrets` in its own `if:` — hence the env guard);
+      #   4. uncomment the two steps below, in BOTH this job and `patch`.
+      # scripts/ci/sign-manifest.py has never been run against a real key: it is
+      # unverified until step 3 of docs/RELEASING.md is done with one.
       #
       # - name: Sign the manifest (Ed25519)
       #   if: env.SEMACLIP_ED25519_KEY != ''
