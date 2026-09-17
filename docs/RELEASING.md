@@ -13,8 +13,24 @@ Everything here was measured against Deno 2.9.6. `deno desktop` is
 
 | | | |
 |---|---|---|
-| Stable | `v2026.141` | `2026` = UTC year, `141` = commits authored this year up to HEAD |
-| Nightly | `v2026.141-nightly.42` | `42` = `GITHUB_RUN_NUMBER`, so two runs of the same commit stay distinct |
+| Stable | `v26.148` | `26` = year − 2000, `148` = commits authored this year up to HEAD |
+| Nightly | `v26.149-nightly.42` | `42` = `GITHUB_RUN_NUMBER`, so two runs of the same commit stay distinct |
+
+**`yy` is not a stylistic choice — it is what makes the Windows installer build
+at all.** Windows Installer packs `ProductVersion` as
+`major(0-255).minor(0-255).build(0-65535)`, so the original full-year scheme was
+rejected outright by `deno desktop`:
+
+```
+error: deno.json `version` "2026.141" cannot be used as an MSI ProductVersion:
+the major field 2026 exceeds the maximum of 255.
+```
+
+`26.148` fits (and keeps fitting until 2255). The commit count fits the minor
+field while it is ≤255; past that `version.sh` moves the count into the build
+field (`26.255.<patch>`), which stays encodable. One version serves the app, the
+updater and the installer — there is no separate MSI version to keep in sync. Do
+not "restore" the full year.
 
 The script writes the version into **both** `frontend/package.json` (the UI
 banner, via `vite.config.ts`) and `server/deno.json` (baked into the binary as
@@ -56,10 +72,10 @@ name a patch that 404s.
 
 ```json
 {
-  "version": "2026.142-nightly.43",
+  "version": "26.149-nightly.43",
   "patches": {
-    "2026.141-nightly.42": {
-      "name": "patch-2026.141-nightly.42-to-2026.142-nightly.43.bin",
+    "26.148-nightly.42": {
+      "name": "patch-26.148-nightly.42-to-26.149-nightly.43.bin",
       "sha256": "64 lowercase hex characters"
     }
   }
@@ -121,14 +137,19 @@ cp dist/SemaClip/SemaClip.so "dist/SemaClip-$V-linux-x64-runtime.so"
 #    before getting here.
 SEMACLIP_NATIVE_PLATFORM=win-x64 ./scripts/fetch-native.sh
 SEMACLIP_TARGET=win-x64 OUT="$PWD/dist/SemaClip" deno run --allow-all scripts/build-desktop.ts
-( cd dist && zip -qr "SemaClip-$V-win-x64.zip" SemaClip && sha256sum "SemaClip-$V-win-x64.zip" > "SemaClip-$V-win-x64.zip.sha256" )
+# the wrapper emits SemaClip.msi AND the unpacked dist/SemaClip/ directory
+mv dist/SemaClip.msi "dist/SemaClip-$V-win-x64.msi"
+( cd dist && sha256sum "SemaClip-$V-win-x64.msi" > "SemaClip-$V-win-x64.msi.sha256" \
+    && zip -qr "SemaClip-$V-win-x64-portable.zip" SemaClip \
+    && sha256sum "SemaClip-$V-win-x64-portable.zip" > "SemaClip-$V-win-x64-portable.zip.sha256" )
 cp dist/SemaClip/SemaClip.dll "dist/SemaClip-$V-win-x64-runtime.dll"
 ( cd dist && sha256sum "SemaClip-$V-win-x64-runtime.dll" > "SemaClip-$V-win-x64-runtime.dll.sha256" )
 
 # 8. release
 gh release create "v$V" --prerelease --target "$(git rev-parse HEAD)" \
   --title "SemaClip $V (nightly)" dist/SemaClip.AppImage dist/SemaClip.AppImage.sha256 \
-  "dist/SemaClip-$V-win-x64.zip" "dist/SemaClip-$V-win-x64.zip.sha256" \
+  "dist/SemaClip-$V-win-x64.msi" "dist/SemaClip-$V-win-x64.msi.sha256" \
+  "dist/SemaClip-$V-win-x64-portable.zip" "dist/SemaClip-$V-win-x64-portable.zip.sha256" \
   "dist/SemaClip-$V-linux-x64-runtime.so" "dist/SemaClip-$V-linux-x64-runtime.so.sha256" \
   "dist/SemaClip-$V-win-x64-runtime.dll" "dist/SemaClip-$V-win-x64-runtime.dll.sha256"
 
@@ -154,7 +175,7 @@ patching `signed` produces a signature no client accepts.
 ### Adding a bsdiff patch afterwards
 
 ```sh
-V="2026.142-nightly.43"; PREV="2026.141-nightly.42"
+V="26.149-nightly.43"; PREV="26.148-nightly.42"
 gh release download "v$PREV" --pattern '*-linux-x64-runtime.so' --dir work/old
 gh release download "v$V"    --pattern '*-linux-x64-runtime.so' --dir work/new
 bsdiff "work/old/SemaClip-$PREV-linux-x64-runtime.so" \
@@ -189,17 +210,17 @@ pending detail.
   `canApply: false` rather than showing "update ready" forever. An external
   updater over the staged path is the accepted workaround
   (`server/adapters/updater/windows-update.ts`) and is not built yet.
-- **Windows ships as a zip, not an installer.** `deno desktop` refuses to build a
-  `.msi` from this version scheme:
-  > `deno.json version "2026.141" cannot be used as an MSI ProductVersion: the major field 2026 exceeds the maximum of 255`
-  Windows Installer packs `ProductVersion` as `major(0-255).minor(0-255).build(0-65535)`,
-  so CalVer has no valid encoding. Verified on Deno 2.9.6, with and without the
-  `-nightly` suffix. Options, none free: (a) map the version to an MSI-legal
-  encoding at package time, keeping CalVer everywhere else; (b) ship Inno Setup —
-  build the app **directory** and feed it to Inno on a Windows runner, which is
-  the old plan's approach and adds a Windows job plus an installer script to
-  maintain; (c) stay on the zip. The zip is unsigned either way, so SmartScreen
-  warns.
+- **Windows gets a real installer, and it is the reason the version scheme
+  changed.** `deno desktop` authors a per-machine `.msi` in pure Rust and
+  cross-compiles it from a Linux runner, so no Windows host is needed. That only
+  works because the version is `v{yy}.{patch}` — Windows Installer packs
+  `ProductVersion` as `major(0-255).minor(0-255).build(0-65535)`, and a CalVer
+  major of 2026 is rejected outright. The `.msi` registers a per-machine install
+  under `%ProgramFiles%`, which some users cannot or will not use, so the plain
+  app directory also ships zipped as `SemaClip-<ver>-win-x64-portable.zip`. Both
+  are unsigned, so SmartScreen warns either way.
+- **`deno desktop` is experimental.** That is why release jobs pin Deno exactly
+  (`v2.9.6`) while `check.yml` deliberately floats on `v2.9.x` as early warning.
 - **bsdiff memory.** bsdiff's footprint is roughly **17x the input size**. The
   runtime dylib is ~577MB after the per-platform exclusions, so one `bsdiff` needs
   ~9.8GB+. `ubuntu-latest` has 7GB, where the failure is an OOM kill deep into the
@@ -216,8 +237,6 @@ pending detail.
   the failed launch and the automatic rollback. The `verify` job proves a patch
   applies and reproduces the target byte-for-byte, but CI has no display and no
   `webkit2gtk`, so it does not boot the app.
-- **`deno desktop` is experimental.** That is why release jobs pin Deno exactly
-  (`v2.9.6`) while `check.yml` deliberately floats on `v2.9.x` as early warning.
 - **Unsigned releases.** Manifests are unsigned (no key exists) and binaries are
   unsigned, so Windows shows a SmartScreen warning and macOS would refuse the app
   outright (there is no notarization for this app yet).

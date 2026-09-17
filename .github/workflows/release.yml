@@ -241,9 +241,13 @@ jobs:
           set -euo pipefail
           deno run --allow-all scripts/build-desktop.ts win-x64
           mv dist/SemaClip.msi "dist/SemaClip-${{ needs.version.outputs.version }}-win-x64.msi"
+          # SEMACLIP_ZIP makes the wrapper emit an app DIRECTORY; its name is
+          # what build-desktop.ts derives from OUT, so zip that exact path rather
+          # than assuming a name (an earlier revision of this step zipped
+          # "portable" while the script wrote "portable-win-x64").
           SEMACLIP_ZIP=1 OUT="$PWD/dist/portable" deno run --allow-all scripts/build-desktop.ts win-x64
           cd dist
-          zip -qr "SemaClip-${{ needs.version.outputs.version }}-win-x64-portable.zip" portable
+          zip -qr "SemaClip-${{ needs.version.outputs.version }}-win-x64-portable.zip" portable-win-x64
 
       - name: Collect artifact, sidecar, runtime dylib
         run: |
@@ -253,7 +257,14 @@ jobs:
 
           case "$P" in
             linux-x64) ART="dist/SemaClip.AppImage" ;;
-            win-x64)   ART="dist/SemaClip-$V-win-x64.zip" ;;
+            win-x64)
+              # Already renamed by the portable step, which must move it before the
+              # SECOND build removes its OUT directory. Tolerate both states: a
+              # second `mv` of the same path would fail under `set -e`.
+              [ -f "dist/SemaClip-$V-win-x64.msi" ] \
+                || mv dist/SemaClip.msi "dist/SemaClip-$V-win-x64.msi"
+              ART="dist/SemaClip-$V-win-x64.msi"
+              ;;
             *) echo "::error::unhandled platform $P"; exit 1 ;;
           esac
 
@@ -298,8 +309,13 @@ jobs:
           path: |
             dist/SemaClip.AppImage
             dist/SemaClip.AppImage.sha256
-            dist/*-win-x64.zip
-            dist/*-win-x64.zip.sha256
+            # The portable zip is "…-win-x64-portable.zip"; a "*-win-x64.zip"
+            # pattern no longer matches anything, which would leave publish
+            # looking for an artifact the build never uploaded.
+            dist/*-win-x64-portable.zip
+            dist/*-win-x64-portable.zip.sha256
+            dist/*-win-x64.msi
+            dist/*-win-x64.msi.sha256
             dist/*-runtime.*
             dist/build-meta-*.txt
           if-no-files-found: error
@@ -330,8 +346,10 @@ jobs:
           for f in \
             "dist/SemaClip.AppImage" \
             "dist/SemaClip.AppImage.sha256" \
-            "dist/SemaClip-$V-win-x64.zip" \
-            "dist/SemaClip-$V-win-x64.zip.sha256" \
+            "dist/SemaClip-$V-win-x64.msi" \
+            "dist/SemaClip-$V-win-x64.msi.sha256" \
+            "dist/SemaClip-$V-win-x64-portable.zip" \
+            "dist/SemaClip-$V-win-x64-portable.zip.sha256" \
             "dist/SemaClip-$V-linux-x64-runtime.so" \
             "dist/SemaClip-$V-linux-x64-runtime.so.sha256" \
             "dist/SemaClip-$V-win-x64-runtime.dll" \
@@ -341,7 +359,11 @@ jobs:
           done
           # Hash before upload, not just after: publish must not advertise a
           # sidecar it never checked against the bytes it is about to send.
-          for art in "dist/SemaClip.AppImage" "dist/SemaClip-$V-win-x64.zip"; do
+          for art in \
+            "dist/SemaClip.AppImage" \
+            "dist/SemaClip-$V-win-x64.msi" \
+            "dist/SemaClip-$V-win-x64-portable.zip"
+          do
             want="$(cat "$art.sha256")"
             got="$(sha256sum "$art" | awk '{print $1}')"
             [ "$want" = "$got" ] || { echo "::error::$art hash mismatch ($want != $got)"; exit 1; }
@@ -372,14 +394,16 @@ jobs:
             --notes "Nightly build $V from ${GITHUB_SHA:0:12}.
 
           Linux: \`SemaClip.AppImage\` — chmod +x, then run. Needs \`webkit2gtk\` installed.
-          Windows: \`SemaClip-$V-win-x64.zip\` — unzip and run \`SemaClip.exe\`. Not an installer; see docs/RELEASING.md.
+          Windows: \`SemaClip-$V-win-x64.msi\` — the installer. \`SemaClip-$V-win-x64-portable.zip\` — no-install fallback, unzip and run \`SemaClip.exe\`.
           Every artifact has a \`.sha256\` sidecar.
 
           Windows auto-update does not work (the Deno launcher never swaps the DLL in). Linux does. See docs/RELEASING.md." \
             "dist/SemaClip.AppImage" \
             "dist/SemaClip.AppImage.sha256" \
-            "dist/SemaClip-$V-win-x64.zip" \
-            "dist/SemaClip-$V-win-x64.zip.sha256" \
+            "dist/SemaClip-$V-win-x64.msi" \
+            "dist/SemaClip-$V-win-x64.msi.sha256" \
+            "dist/SemaClip-$V-win-x64-portable.zip" \
+            "dist/SemaClip-$V-win-x64-portable.zip.sha256" \
             "dist/SemaClip-$V-linux-x64-runtime.so" \
             "dist/SemaClip-$V-linux-x64-runtime.so.sha256" \
             "dist/SemaClip-$V-win-x64-runtime.dll" \
@@ -662,14 +686,20 @@ jobs:
             --repo "$GITHUB_REPOSITORY" --dir back \
             --pattern 'SemaClip.AppImage' \
             --pattern 'SemaClip.AppImage.sha256' \
-            --pattern "SemaClip-$V-win-x64.zip" \
-            --pattern "SemaClip-$V-win-x64.zip.sha256" \
+            --pattern "SemaClip-$V-win-x64.msi" \
+            --pattern "SemaClip-$V-win-x64.msi.sha256" \
+            --pattern "SemaClip-$V-win-x64-portable.zip" \
+            --pattern "SemaClip-$V-win-x64-portable.zip.sha256" \
             --pattern "SemaClip-$V-linux-x64-runtime.so" \
             --pattern "SemaClip-$V-linux-x64-runtime.so.sha256"
           ls -la back
 
           fail=0
-          for art in "SemaClip.AppImage" "SemaClip-$V-win-x64.zip"; do
+          for art in \
+            "SemaClip.AppImage" \
+            "SemaClip-$V-win-x64.msi" \
+            "SemaClip-$V-win-x64-portable.zip"
+          do
             if [ ! -f "back/$art" ] || [ ! -f "back/$art.sha256" ]; then
               echo "::error::release is missing $art or its sidecar"
               fail=1
