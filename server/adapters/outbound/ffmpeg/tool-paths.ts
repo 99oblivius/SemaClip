@@ -1,38 +1,82 @@
 /**
- * Resolve the ffmpeg/ffprobe binaries this process should run.
+ * Locate ffmpeg/ffprobe, and fetch them on demand when the machine has neither.
  *
- * A compiled desktop build does NOT embed ffmpeg, and the adapters historically
- * spawned the bare names `ffmpeg`/`ffprobe`, which only work when the user
- * happens to have them on PATH. That is the difference between a standalone
- * binary and one that silently cannot download, probe, transcode or export on
- * anyone else's machine.
+ * WHY NOT BUNDLE. An earlier design embedded a static ffmpeg pair in the app
+ * (`native/ffmpeg/<os>-<arch>/`) to make the binary "standalone". That was the
+ * wrong call, and the cost was concrete: it added ~330MB to a ~550MB payload,
+ * which made CI artifact downloads truncate, made bsdiff patches need more RAM
+ * than a runner has, and made first launch spend ~20s extracting a virtual
+ * filesystem. Bundling a 164MB ffmpeg into every installer is also the outlier —
+ * Electron, Tauri, OBS and HandBrake all resolve an existing ffmpeg and ask the
+ * user before fetching one. SemaClip needs ffmpeg at job/export time, never at
+ * launch, so there is nothing to buy by shipping it.
  *
- * Resolution order (first hit wins):
- *   1. An explicit override — SEMACLIP_FFMPEG / SEMACLIP_FFPROBE. Highest
- *      priority so a user can point at a system or custom build.
- *   2. The bundled native tree, `native/ffmpeg/<os-dir>/`, which is what the
- *      packaged app ships and what `scripts/fetch-native.sh` populates. Both
- *      binaries normally live in the same directory, so one directory hit
- *      resolves both.
- *   3. The bare name, i.e. PATH. Keeps dev runs working on a machine that has
- *      ffmpeg installed but no fetched native tree.
+ * RESOLUTION ORDER (first hit wins):
+ *   1. SEMACLIP_FFMPEG / SEMACLIP_FFPROBE — explicit override, also what the
+ *      Settings screen targets when someone points at a custom build.
+ *   2. The managed directory in app data, where an approved download lands.
+ *   3. PATH — a system ffmpeg beats downloading anything: already installed,
+ *      already updated by the distro, costs no disk.
+ * Order matters: a managed build is preferred over PATH so an approved download
+ * keeps being used, but PATH comes before "offer a download" so a machine that
+ * already has ffmpeg is never asked to fetch a second copy.
  *
- * Path probing is async and must happen BEFORE the container is built, because
- * every adapter takes its binary path at construction time.
+ * The registry is mutable by design. Adapters take paths at construction time, so
+ * a path resolved before a download would go stale — read `registry.ffmpeg` at
+ * spawn time and a post-download `refresh()` is all it takes.
  */
-import { dirname, fromFileUrl, join } from "@std/path";
+import { dirname, join } from "node:path";
 
 export interface ToolPaths {
   ffmpeg: string;
   ffprobe: string;
-  /** Where the binaries came from — logged at boot so a wrong pick is visible. */
-  source: "env" | "bundled" | "path";
+  source: "env" | "managed" | "path";
 }
 
-/** Per-OS subdir under native/ffmpeg, matching the whisper tree's convention. */
-function osDir(): string {
+/** One downloadable build per target platform, pinned to a dated release tag. */
+export interface ToolArchive {
+  url: string;
+  /** Directory the archive's bin/ and lib/ live under once extracted. */
+  inner: string;
+  ext: "tar.xz" | "zip";
+}
+
+/**
+ * BtbN's static builds, pinned to a DATED tag. Dated tags carry build-hash asset
+ * names; the `master-latest` names exist only under the moving `latest` tag and
+ * 404 at a dated one (verified).
+ *
+ * The `-shared` variants are chosen deliberately: 65-82MB against 144-185MB for
+ * the fully static ones. Size matters for a user-initiated download, and the
+ * extractor keeps the accompanying lib/ tree so the binaries still run.
+ */
+const ARCHIVES: Record<string, ToolArchive> = {
+  "linux-x64": {
+    url: "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-16-19-44/ffmpeg-N-126593-gbc46eab87c-linux64-gpl-shared.tar.xz",
+    inner: "ffmpeg-N-126593-gbc46eab87c-linux64-gpl-shared",
+    ext: "tar.xz",
+  },
+  "linux-arm64": {
+    url: "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-16-19-44/ffmpeg-N-126593-gbc46eab87c-linuxarm64-gpl-shared.tar.xz",
+    inner: "ffmpeg-N-126593-gbc46eab87c-linuxarm64-gpl-shared",
+    ext: "tar.xz",
+  },
+  "win-x64": {
+    url: "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-16-19-44/ffmpeg-N-126593-gbc46eab87c-win64-gpl-shared.zip",
+    inner: "ffmpeg-N-126593-gbc46eab87c-win64-gpl-shared",
+    ext: "zip",
+  },
+};
+
+export function hostPlatform(): string {
   if (Deno.build.os === "windows") return "win-x64";
-  return Deno.build.os === "darwin" ? "macos-arm64" : "linux-x64";
+  return Deno.build.arch === "aarch64" ? "linux-arm64" : "linux-x64";
+}
+
+export function archiveFor(platform = hostPlatform()): ToolArchive {
+  const archive = ARCHIVES[platform];
+  if (!archive) throw new Error(`no ffmpeg build is known for platform ${platform}`);
+  return archive;
 }
 
 function exeName(base: string): string {
@@ -41,18 +85,27 @@ function exeName(base: string): string {
 
 async function isExecutable(path: string): Promise<boolean> {
   try {
-    const stat = await Deno.stat(path);
-    return stat.isFile;
+    return (await Deno.stat(path)).isFile;
   } catch {
     return false;
   }
 }
 
 /**
- * @param nativeRoot URL of the `native/` directory (caller owns the layout, so
- *   this module never guesses where the repo is).
+ * Probes PATH the way a shell would, without spawning anything. A bare-name spawn
+ * would also work, but it throws ENOENT from wherever the spawn happens — this
+ * lets the UI ask about a download before any work starts.
  */
-export async function resolveToolPaths(nativeRoot: URL): Promise<ToolPaths> {
+async function onPath(name: string): Promise<boolean> {
+  const path = Deno.env.get("PATH") ?? "";
+  const separator = Deno.build.os === "windows" ? ";" : ":";
+  for (const dir of path.split(separator)) {
+    if (dir && await isExecutable(join(dir, name))) return true;
+  }
+  return false;
+}
+
+async function discover(managedDir: string): Promise<ToolPaths> {
   const ffmpeg = exeName("ffmpeg");
   const ffprobe = exeName("ffprobe");
 
@@ -62,14 +115,86 @@ export async function resolveToolPaths(nativeRoot: URL): Promise<ToolPaths> {
     return { ffmpeg: envFfmpeg, ffprobe: envFfprobe, source: "env" };
   }
 
-  const bundledDir = fromFileUrl(new URL(`ffmpeg/${osDir()}/`, nativeRoot));
-  const bundledFfmpeg = join(bundledDir, ffmpeg);
-  const bundledFfprobe = join(bundledDir, ffprobe);
-  if (await isExecutable(bundledFfmpeg) && await isExecutable(bundledFfprobe)) {
-    return { ffmpeg: bundledFfmpeg, ffprobe: bundledFfprobe, source: "bundled" };
+  const managedFfmpeg = join(managedDir, "bin", ffmpeg);
+  const managedFfprobe = join(managedDir, "bin", ffprobe);
+  if (await isExecutable(managedFfmpeg) && await isExecutable(managedFfprobe)) {
+    return { ffmpeg: managedFfmpeg, ffprobe: managedFfprobe, source: "managed" };
   }
 
+  if (await onPath(ffmpeg) && await onPath(ffprobe)) {
+    return { ffmpeg, ffprobe, source: "path" };
+  }
+
+  // Nothing usable. Report the bare names so any spawn fails loudly, and let the
+  // caller offer the download — `available()` is the check to gate on.
   return { ffmpeg, ffprobe, source: "path" };
+}
+
+export interface ToolStatus {
+  paths: ToolPaths;
+  /** False when the binaries are missing and must be provisioned. */
+  available: boolean;
+  /** True when a user-approved download could supply them. */
+  downloadable: boolean;
+  /** Where an approved download would be installed. */
+  managedDir: string;
+  platform: string;
+}
+
+/**
+ * Resolves and remembers the tool paths. Construct once at boot, hand it to every
+ * adapter, and call `refresh()` after provisioning.
+ */
+export class ToolRegistry {
+  #paths: ToolPaths;
+  #available: boolean;
+  readonly #managedDir: string;
+
+  private constructor(paths: ToolPaths, available: boolean, managedDir: string) {
+    this.#paths = paths;
+    this.#available = available;
+    this.#managedDir = managedDir;
+  }
+
+  /** `dataDir` is app data; downloads live under `<dataDir>/tools/ffmpeg/…`. */
+  static async create(dataDir: string): Promise<ToolRegistry> {
+    const managedDir = join(dataDir, "tools", "ffmpeg", hostPlatform());
+    const paths = await discover(managedDir);
+    const available = paths.source !== "path" ||
+      (await onPath(exeName("ffmpeg")) && await onPath(exeName("ffprobe")));
+    return new ToolRegistry(paths, available, managedDir);
+  }
+
+  get ffmpeg(): string {
+    return this.#paths.ffmpeg;
+  }
+
+  get ffprobe(): string {
+    return this.#paths.ffprobe;
+  }
+
+  get paths(): ToolPaths {
+    return { ...this.#paths };
+  }
+
+  /** Re-resolve after a download or a settings change. */
+  async refresh(): Promise<ToolPaths> {
+    this.#paths = await discover(this.#managedDir);
+    this.#available = this.#paths.source !== "path" ||
+      (await onPath(exeName("ffmpeg")) && await onPath(exeName("ffprobe")));
+    return this.paths;
+  }
+
+  status(): ToolStatus {
+    return {
+      paths: this.paths,
+      available: this.#available,
+      // An env override means the user already decided where ffmpeg lives.
+      downloadable: !this.#available && this.#paths.source !== "env",
+      managedDir: this.#managedDir,
+      platform: hostPlatform(),
+    };
+  }
 }
 
 /** Directory holding a resolved binary — Linux needs it on LD_LIBRARY_PATH. */

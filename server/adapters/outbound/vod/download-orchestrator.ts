@@ -15,7 +15,7 @@
  */
 
 import type { StreamMetadataRepository } from "@/application/ports/outbound.ts";
-import type { ToolPaths } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
+import type { ToolRegistry } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
 import {
   extractVodId,
   resolveQualities,
@@ -130,9 +130,9 @@ function updateEta(part: PartRuntime, cumulativeBytes: number): void {
 export class DownloadOrchestrator {
   constructor(
     private readonly metadata: StreamMetadataRepository,
-    /** Resolved ffmpeg/ffprobe — the packaged app bundles them, so a bare
-     *  `ffprobe` would not exist on a user's machine. */
-    private readonly tools: ToolPaths,
+    /** Resolved at spawn time via the registry: a download can land mid-session,
+     *  and a path captured at construction would go stale. */
+    private readonly tools: ToolRegistry,
   ) {}
 
   /** Streams with an orchestrator run in THIS process — reconcile() must

@@ -1,6 +1,6 @@
 import { createApp } from "@/adapters/inbound/http/routes.ts";
 import { buildContainer } from "@/composition/container.ts";
-import { resolveToolPaths } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
+import { ToolRegistry } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
 import { reexecForLinuxWebview } from "@/adapters/outbound/platform/linux-webview.ts";
 import { startAutoUpdate } from "@/adapters/outbound/platform/auto-update.ts";
 import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
@@ -28,8 +28,6 @@ const ENGINE_BINARY = Deno.env.get("SEMACLIP_ENGINE") ?? "semaclip-engine";
  * engine binary (Python mock) when bundling hasn't happened — but logs it.
  */
 const nativeRoot = new URL("../native/whisper/", import.meta.url);
-/** The native/ ROOT (tools live alongside whisper/, not inside it). */
-const nativeBase = new URL("../native/", import.meta.url);
 const nativeSubdir = Deno.build.os === "windows" ? "win-x64" : "linux-x64";
 let detectionWhisper: WhisperPaths | undefined;
 try {
@@ -48,10 +46,10 @@ try {
   console.log("Engine: external binary mode (SEMACLIP_ENGINE) — native whisper.cpp tree not found");
 }
 
-// ffmpeg/ffprobe: the packaged app bundles its own; a dev run falls back to
-// PATH. Resolved before the container because adapters take the path at
-// construction time.
-const tools = await resolveToolPaths(nativeBase);
+// ffmpeg/ffprobe are NOT bundled: a system copy on PATH is used as-is, and a
+// machine without one is offered a download from the UI (see tool-paths.ts).
+// Resolved before the container because adapters take a path at construction.
+const tools = await ToolRegistry.create(DATA_DIR);
 
 const container = await buildContainer({
   dbPath: DB_PATH,
@@ -133,7 +131,10 @@ console.log(`  DB:       ${DB_PATH}`);
 console.log(`  Cache:    ${CACHE_DIR}`);
 console.log(`  Export:   ${EXPORT_DIR}`);
 console.log(`  Engine:   ${ENGINE_BINARY}`);
-console.log(`  Tools:    ffmpeg=${tools.ffmpeg} (${tools.source})`);
+console.log(`  Tools:    ffmpeg=${tools.ffmpeg} (${tools.paths.source})`);
+if (!tools.status().available) {
+  console.warn(`  Tools:    ffmpeg is missing — the UI will offer to download it (${tools.status().managedDir})`);
+}
 
 // Update check. Inert under `deno run` (no baked-in version) and when no
 // release URL is configured, so this changes nothing in development.

@@ -1,4 +1,5 @@
-import type { ToolPaths } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
+import { provisionFfmpeg } from "@/adapters/outbound/ffmpeg/provision.ts";
+import type { ToolRegistry } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
 import { Hono } from "hono";
 import { wsHandler } from "@/adapters/inbound/ws/handler.ts";
 import type {
@@ -89,8 +90,8 @@ export interface HttpDeps {
   settings: SettingsUseCase;
   presets: SqliteExportPresetRepository;
   vod: VodDownloadPort;
-  /** Resolved ffmpeg/ffprobe (bundled in the packaged app, else PATH). */
-  tools: ToolPaths;
+  /** Resolved ffmpeg/ffprobe plus the ability to provision them on request. */
+  tools: ToolRegistry;
   downloadState: (streamId: string) => Promise<DownloadStateType>;
   downloadRevision: (streamId: string) => number;
   /** Record a view change that has no state write (artifact deletion). */
@@ -832,6 +833,47 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   });
 
   // ── Settings ──
+  // ── ffmpeg presence + on-demand provisioning ─────────────────────────────
+  // The app does not bundle ffmpeg (~330MB of payload, and the outlier: every
+  // comparable tool resolves an existing binary). The UI asks first, then this
+  // installs into app data. `available` gates every job/export path.
+  app.get("/api/tools", (c) => c.json(deps.tools.status()));
+
+  app.post("/api/tools/ffmpeg", async (c) => {
+    const status = deps.tools.status();
+    if (status.available) {
+      return c.json({ skipped: true, reason: "ffmpeg is already available", paths: status.paths });
+    }
+    if (!status.downloadable) {
+      return c.json({
+        error: "ffmpeg is not available and cannot be downloaded (an override is set)",
+      }, 409);
+    }
+    // Streamed as SSE: this is a 65-82MB transfer and a silent multi-minute POST
+    // with no progress reads as a hang.
+    const stream = new ReadableStream({
+      start: async (controller) => {
+        const send = (event: unknown) => {
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+        };
+        try {
+          const result = await provisionFfmpeg(status.managedDir, {
+            onProgress: (p) => send({ type: "progress", ...p }),
+          });
+          await deps.tools.refresh();
+          send({ type: "done", paths: { ffmpeg: result.ffmpeg, ffprobe: result.ffprobe } });
+        } catch (err) {
+          send({ type: "error", message: err instanceof Error ? err.message : String(err) });
+        } finally {
+          controller.close();
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store" },
+    });
+  });
+
   app.get("/api/settings", async (c) => c.json(await deps.settings.get()));
   app.put("/api/settings", async (c) => {
     const body = await c.req.json();

@@ -18,7 +18,7 @@ import { TwitchDlAdapter } from "@/adapters/outbound/vod/mod.ts";
 import { DownloadOrchestrator } from "@/adapters/outbound/vod/download-orchestrator.ts";
 import { MediaActionsUseCase } from "@/application/use-cases/MediaActions.ts";
 import { FFmpegAdapter } from "@/adapters/outbound/ffmpeg/mod.ts";
-import type { ToolPaths } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
+import type { ToolRegistry } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
 import {
   ImportStreamByFileUseCase,
   ImportStreamByUrlUseCase,
@@ -78,8 +78,8 @@ export interface AppConfig {
   exportDir: string;
   engineBinaryPath: string;
   gpuDevice: number | null;
-  /** Resolved ffmpeg/ffprobe (bundled or PATH). See ffmpeg/tool-paths.ts. */
-  tools: ToolPaths;
+  /** Resolved ffmpeg/ffprobe + the ability to provision them. See tool-paths.ts. */
+  tools: ToolRegistry;
   /** When set, the in-process TS detection engine is used with these native paths. */
   detectionWhisper?: WhisperPaths | undefined;
 }

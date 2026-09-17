@@ -5,11 +5,12 @@
  * Wraps `deno desktop` for two reasons the raw command cannot express:
  *
  *  1. PER-PLATFORM PAYLOAD. `--include ../native` embeds EVERY per-OS subdir, so
- *     a Linux build shipped 21MB of Windows whisper binaries and a Windows build
- *     shipped 330MB of Linux ffmpeg — dead weight in every download and in every
- *     bsdiff patch. The other platform's subtrees are excluded here.
+ *     a Linux build shipped Windows whisper binaries as dead weight in every
+ *     download and every patch. The other platform's subtrees are excluded here.
  *     NOTE: `native/whisper/models/` is shared by both platforms and must NOT be
  *     excluded; only the `<os>-<arch>` subdirs are per-platform.
+ *     (ffmpeg is NOT bundled at all — see server/adapters/outbound/ffmpeg/tool-paths.ts
+ *     for why the 330MB payload that caused was removed.)
  *
  *  2. CROSS-TARGET CORRECTNESS. `deno desktop` needs `--target` when building for
  *     a platform other than the host, and the app resolves its binaries by the
@@ -57,7 +58,7 @@ if (!triple) {
 const exclusions: string[] = [];
 for (const sub of Object.keys(TRIPLES)) {
   if (sub === platform) continue;
-  exclusions.push(`../native/ffmpeg/${sub}`, `../native/whisper/${sub}`);
+  exclusions.push(`../native/whisper/${sub}`);
 }
 
 const out = Deno.env.get("OUT") ?? join(REPO, "dist", "SemaClip");
