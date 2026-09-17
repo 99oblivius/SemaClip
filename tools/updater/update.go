@@ -180,6 +180,12 @@ func (u *Updater) Check() (CheckResult, error) {
 }
 
 func (u *Updater) fetch(url string) ([]byte, error) {
+	// file:// exists so a release candidate can be exercised end to end on a real
+	// machine before anything is published — the update path is the one thing that
+	// cannot be proven by unit tests, and "publish it and hope" is not a test.
+	if path, ok := localPath(url); ok {
+		return os.ReadFile(path)
+	}
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -275,6 +281,10 @@ func (u *Updater) download(entry ManifestEntry, dest string) error {
 	if url == "" {
 		url = resolveArtifactURL(u.Cfg.ManifestURL, entry.Name)
 	}
+	// A local payload skips HTTP entirely (same QA path as fetch).
+	if path, ok := localPath(url); ok {
+		return copyVerified(path, dest, entry.SHA256)
+	}
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -305,6 +315,47 @@ func (u *Updater) download(entry ManifestEntry, dest string) error {
 	got := hex.EncodeToString(h.Sum(nil))
 	if !strings.EqualFold(got, entry.SHA256) {
 		return fmt.Errorf("sha256 mismatch: expected %s, got %s", entry.SHA256, got)
+	}
+	return nil
+}
+
+// localPath reports whether url names a local file, and where it is.
+// Handles file:///C:/x, file://C:/x and a bare drive path.
+func localPath(url string) (string, bool) {
+	const scheme = "file://"
+	if !strings.HasPrefix(strings.ToLower(url), scheme) {
+		return "", false
+	}
+	p := url[len(scheme):]
+	p = strings.TrimPrefix(p, "/")
+	return filepath.FromSlash(p), true
+}
+
+// copyVerified copies src to dest, refusing the copy unless its sha256 matches.
+// Returns the mismatch BEFORE reporting success, so a local QA payload cannot
+// slip an unverified file past the same check the network path enforces.
+func copyVerified(src, dest, want string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("download: %w", err)
+	}
+	defer in.Close()
+	out, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	h := sha256.New()
+	_, copyErr := io.Copy(io.MultiWriter(out, h), in)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return fmt.Errorf("download interrupted: %w", copyErr)
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(got, want) {
+		return fmt.Errorf("sha256 mismatch: expected %s, got %s", want, got)
 	}
 	return nil
 }
