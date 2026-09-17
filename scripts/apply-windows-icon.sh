@@ -74,15 +74,28 @@ else
   RUN=()
 fi
 
-# Wine prints MESA/dri warnings on a headless host; they are noise, so keep only
-# real errors and let the post-check decide success.
-"${RUN[@]}" "$RCEDIT" "$EXE" --set-icon "$ICO" 2>&1 \
-  | grep -viE 'MESA-EGL|pci id for fd|failed to create dri|^wine:|fixme:' || true
+# Capture rcedit's own output AND its exit code. Filtering the pipeline with
+# `| grep ... || true` (an earlier version) threw away both, so a real failure
+# surfaced only as "still has no icon resources" with no cause — the diagnostic
+# was as broken as the thing it was diagnosing.
+OUT="$(mktemp)"
+set +e
+"${RUN[@]}" "$RCEDIT" "$EXE" --set-icon "$ICO" >"$OUT" 2>&1
+RC=$?
+set -e
+# Wine on a headless runner emits X/ole/MESA noise that is expected and
+# harmless. Keep everything else: if rcedit itself complained, that is the cause.
+NOISE='MESA-EGL|pci id for fd|failed to create dri|nodrv_CreateWindow|X server is running|start_rpcss|Failed to open RpcSs|apartment_|CoMarshalInterface|StdMarshalImpl|MarshalInterface|explorer process failed|^wine: created the configuration|configuration in .* has been updated|^[0-9a-f]{4}:err:(ole|winediag)'
+INTERESTING="$(grep -viE "$NOISE" "$OUT" | grep -v '^$' || true)"
 
 AFTER="$(count_icons "$EXE")"
 if [ "${AFTER:-0}" -le 0 ]; then
   # Loud, not silent: an unapplied icon is exactly the defect this exists to fix.
-  echo "::error::rcedit ran but $EXE still has no icon resources"
+  echo "::error::rcedit did not apply the icon to $EXE (exit $RC)"
+  [ -n "$INTERESTING" ] && echo "rcedit output: $INTERESTING"
+  rm -f "$OUT"
   exit 1
 fi
+rm -f "$OUT"
+[ "$RC" -ne 0 ] && echo "note: rcedit exited $RC but the icon landed anyway"
 echo "windows icon applied: $EXE ($BEFORE -> $AFTER resources)"

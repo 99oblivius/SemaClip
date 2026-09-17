@@ -210,6 +210,9 @@ jobs:
           curl -sSL --fail --max-time 120 \
             -o "$RUNNER_TEMP/rcedit.exe" \
             "https://github.com/electron/rcedit/releases/download/$REDIT_VERSION/rcedit-x64.exe"
+          # BOTH of these are needed BY THE PACKAGING STEP, which runs after this
+          # one -- $GITHUB_ENV is the right mechanism for that. They must NOT be
+          # relied on within this step, where only shell variables exist yet.
           echo "RCEDIT_PATH=$RUNNER_TEMP/rcedit.exe" >> "$GITHUB_ENV"
           sudo -S -p '' apt-get update -qq
           sudo -S -p '' apt-get install -y --no-install-recommends wine64
