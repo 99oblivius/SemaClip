@@ -56,7 +56,15 @@ mkdir -p "$WHISPER_DIR/$OS_DIR" "$WHISPER_DIR/models"
 
 echo "==> whisper.cpp $WHISPER_TAG → $OS_DIR"
 ARCHIVE="$WHISPER_DIR/$ASSET"
-curl -sL --fail --max-time 600 -o "$ARCHIVE" "https://github.com/ggml-org/whisper.cpp/releases/download/$WHISPER_TAG/$ASSET"
+attempt=1
+until curl -sL --fail --max-time 600 -o "$ARCHIVE" \
+    "https://github.com/ggml-org/whisper.cpp/releases/download/$WHISPER_TAG/$ASSET"; do
+  rm -f "$ARCHIVE"
+  [ "$attempt" -ge 3 ] && { echo "FAIL: whisper download failed after $attempt attempts" >&2; exit 1; }
+  echo "  whisper download attempt $attempt failed; retrying" >&2
+  attempt=$((attempt + 1))
+  sleep 5
+done
 case "$ASSET" in
   *.tar.gz)
     tar xzf "$ARCHIVE" -C "$WHISPER_DIR"
@@ -101,8 +109,19 @@ INNER_FF=$(echo "$FF_PLATFORM" | cut -d'|' -f3)
 mkdir -p "$FFMPEG_DIR/$OS_DIR_FF"
 echo "==> ffmpeg (static) → ffmpeg/$OS_DIR_FF"
 ARCHIVE_FF="$FFMPEG_DIR/$ASSET_FF"
-curl -sL --fail --max-time 900 -o "$ARCHIVE_FF" \
-  "https://github.com/BtbN/FFmpeg-Builds/releases/download/$FFMPEG_TAG/$ASSET_FF"
+# Retry from scratch: these are 60-190MB assets and a single curl to them over a
+# throttled CI link fails with exit 22 mid-transfer, killing the whole build.
+# curl's --retry does not cover a truncated body; deleting before each attempt
+# also avoids resuming into a corrupt partial.
+attempt=1
+until curl -sL --fail --max-time 1200 -o "$ARCHIVE_FF" \
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/$FFMPEG_TAG/$ASSET_FF"; do
+  rm -f "$ARCHIVE_FF"
+  [ "$attempt" -ge 3 ] && { echo "FAIL: ffmpeg download failed after $attempt attempts" >&2; exit 1; }
+  echo "  ffmpeg download attempt $attempt failed; retrying" >&2
+  attempt=$((attempt + 1))
+  sleep 5
+done
 case "$ASSET_FF" in
   *.tar.xz) tar xJf "$ARCHIVE_FF" -C "$FFMPEG_DIR" ;;
   *.zip)    unzip -qo "$ARCHIVE_FF" -d "$FFMPEG_DIR" ;;
