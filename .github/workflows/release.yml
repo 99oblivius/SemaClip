@@ -418,38 +418,40 @@ jobs:
           V="${{ needs.version.outputs.version }}"
           TAG="${{ needs.version.outputs.tag }}"
 
-          # A retry must be SAFE. A cancelled or failed run can leave a release that
-          # exists but never finished uploading (measured: the concurrency group killed
-          # a run mid-upload, and the retry then died with "ReleaseAsset.name already
-          # exists"). A release with NO assets is a stub from such a run and is safe to
-          # replace; a release WITH assets is published work and must never be
-          # overwritten, so that case still refuses and asks for a fresh version.
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
-              --jq '.assets | length' >/tmp/existing_assets 2>/dev/null; then
-            have="$(cat /tmp/existing_assets)"
-            if [ "$have" = "0" ]; then
-              echo "::warning::release $TAG exists with no assets — replacing a stub from a cancelled run"
-              gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
-            else
-              echo "::error::release $TAG already exists with $have asset(s) — the version job must produce a fresh tag"
-              exit 1
-            fi
-          fi
+          # Publishing is a script, not an inline `gh release create`. MEASURED: that
+          # command uploads every asset CONCURRENTLY and the asset endpoint rejects
+          # concurrent uploads to one release, which produced four consecutive failures
+          # (HTTP 500 then HTTP 400 on a ~105MB portable zip, with the rate limit
+          # untouched, one release, no quota involved). It is also all-or-nothing: one
+          # rejected asset rolls back the whole release.
+          #
+          # scripts/ci/publish-release.sh creates the release empty, then uploads each
+          # asset serially with retries, skips assets already present at the right size
+          # so a re-run resumes, and verifies every expected name against the release
+          # afterwards. A stub release from an interrupted run is replaced; a release
+          # that already has assets is never touched.
+          V="${{ needs.version.outputs.version }}"
+          TAG="${{ needs.version.outputs.tag }}"
 
-          # A normal release: there is no channel to keep out of the "latest" slot.
-          # The runtime dylibs are attached because the next release's patch job needs
-          # the previous version to diff from; without them patches cannot exist.
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "SemaClip $V" \
-            --notes "Pre-alpha build $V from ${GITHUB_SHA:0:12}. Development is continuous: this is the next build along one line, not a beta or a stable release.
+          {
+            echo "Pre-alpha build $V from ${GITHUB_SHA:0:12}. Development is continuous:"
+            echo "this is the next build along one line, not a beta or a stable release."
+            echo
+            echo "Linux: \`SemaClip.AppImage\` — mark it executable, then run. It needs"
+            echo "\`webkit2gtk\` installed."
+            echo
+            echo "Windows: \`SemaClip-$V-win-x64.msi\` is the installer."
+            echo "\`SemaClip-$V-win-x64-portable.zip\` needs no install: unzip it and run"
+            echo "\`SemaClip.exe\`."
+            echo
+            echo "Every artifact has a \`.sha256\` sidecar, so a download can be verified"
+            echo "with \`sha256sum -c\`."
+            echo
+            echo "Windows updates are applied by the bundled updater while the app is"
+            echo "closed. See docs/RELEASING.md."
+          } > /tmp/release-notes.md
 
-          Linux: \`SemaClip.AppImage\` — chmod +x, then run. Needs \`webkit2gtk\` installed.
-          Windows: \`SemaClip-$V-win-x64.msi\` — the installer. \`SemaClip-$V-win-x64-portable.zip\` — no-install fallback, unzip and run \`SemaClip.exe\`.
-          Every artifact has a \`.sha256\` sidecar.
-
-          Windows auto-update does not work (the Deno launcher never swaps the DLL in). Linux does. See docs/RELEASING.md." \
+          bash scripts/ci/publish-release.sh "$TAG" "SemaClip $V" /tmp/release-notes.md \
             "dist/SemaClip.AppImage" \
             "dist/SemaClip.AppImage.sha256" \
             "dist/SemaClip-$V-win-x64.msi" \
@@ -460,9 +462,6 @@ jobs:
             "dist/SemaClip-$V-linux-x64-runtime.so.sha256" \
             "dist/SemaClip-$V-win-x64-runtime.dll" \
             "dist/SemaClip-$V-win-x64-runtime.dll.sha256"
-
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
-            --jq '.assets[].name' | sed 's/^/published: /'
 
       - name: Write latest.json
         run: |
