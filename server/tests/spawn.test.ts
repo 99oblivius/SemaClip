@@ -4,7 +4,7 @@
  * pattern actually used in this codebase.
  */
 import { assert, assertEquals } from "@std/assert";
-import { run, runStatus } from "@/adapters/outbound/process/spawn.ts";
+import { run, runStatus, spawnChild } from "@/adapters/outbound/process/spawn.ts";
 
 Deno.test("run: captures stdout as Uint8Array (callers TextDecoder it)", async () => {
   const r = await run("echo", { args: ["hello"] });
@@ -147,4 +147,59 @@ Deno.test("run: forwards an abort signal mid-run", async () => {
   setTimeout(() => ac.abort(), 80);
   const r = await run("sleep", { args: ["30"], signal: ac.signal });
   assertEquals(r.success, false);
+});
+
+// ── Claimed streams must not be duplicated in memory ──────────────────────────
+// The reported symptom: starting a download on Windows froze navigation and the app.
+// Cause: spawnChild pushed every stdout chunk into a collector array while the fMP4
+// muxer ALSO read the same stream via getReader(), so a multi-GB download held a second
+// full copy in RAM. A claimed stream must stop collecting.
+
+Deno.test("a CLAIMED stdout stream is not also buffered by the collector", async () => {
+  // Emit a known number of bytes, fully consume them through the reader, then ask
+  // output() — it must NOT return a second copy of what was already read.
+  const bytes = 512 * 1024;
+  const script = `const b = Buffer.alloc(65536, 7); for (let i = 0; i < ${bytes / 65536}; i++) process.stdout.write(b);`;
+  const handle = spawnChild("node", { args: ["-e", script] });
+
+  const reader = handle.stdout!.getReader();
+  let read = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    read += value!.length;
+  }
+  assertEquals(read, bytes, "the consumer must receive every byte");
+
+  const out = await handle.output();
+  assertEquals(
+    out.stdout.length,
+    0,
+    "a claimed stream must not ALSO be retained: duplicating a download in memory is " +
+      "the freeze this test exists to prevent",
+  );
+});
+
+Deno.test("an UNCLAIMED stream is still collected, so output() works as before", async () => {
+  const handle = spawnChild("node", { args: ["-e", "process.stdout.write('collected')"] });
+  const out = await handle.output();
+  assertEquals(new TextDecoder().decode(out.stdout), "collected");
+});
+
+Deno.test("stderr keeps a live tail for error reporting when claimed", async () => {
+  // The ffmpeg adapter reads stderr as it arrives AND reads the collected tail in its
+  // thrown error. After a claim the collected copy is dropped, so the CALLER must keep
+  // its own tail — assert the live stream still delivers everything.
+  const script = "process.stderr.write('boom\\n'); process.exit(3)";
+  const handle = spawnChild("node", { args: ["-e", script] });
+  const reader = handle.stderr!.getReader();
+  let text = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    text += new TextDecoder().decode(value);
+  }
+  assertEquals(text.includes("boom"), true);
+  const st = await handle.status;
+  assertEquals(st.code, 3);
 });

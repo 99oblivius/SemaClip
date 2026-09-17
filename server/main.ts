@@ -9,7 +9,6 @@ import { startAutoUpdate } from "@/adapters/outbound/platform/auto-update.ts";
 import {
   adoptWindowLifecycle,
   chromeState,
-  setWindowTitle,
 } from "@/adapters/outbound/platform/window-lifecycle.ts";
 import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
 
@@ -163,9 +162,11 @@ reportWebviewLaunchEnvironment();
 // with no way to do either. Set SEMACLIP_FRAMELESS=1 to ask for it deliberately.
 const frameless = Deno.env.get("SEMACLIP_FRAMELESS") === "1";
 const APP_TITLE = `SemaClip ${appVersion()}`;
+// ONE construction, with the title applied to the window it adopts. Calling any
+// separate title setter here would construct a SECOND window: the runtime adopts the
+// implicit one on the first construction and opens a new window on every one after
+// that, which is what produced a blank extra window on both platforms.
 adoptWindowLifecycle({ frameless, title: APP_TITLE });
-// The webview would otherwise title the window with the URL it navigated to.
-setWindowTitle(APP_TITLE);
 {
   const c = chromeState();
   console.log(

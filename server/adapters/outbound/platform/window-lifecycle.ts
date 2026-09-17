@@ -1,54 +1,81 @@
 /**
- * Window lifecycle and custom chrome.
+ * Window lifecycle and custom chrome. ONE window, ONE owner.
+ *
+ * ── THE BLANK WINDOW (measured, reported on BOTH platforms) ──────────────────
+ * Startup opened an extra blank window titled with the app name, because the docs are
+ * explicit: "The first `new Deno.BrowserWindow()` you construct adopts that initial
+ * window; every construction after that opens a new one."
+ *
+ * This module used to construct a window in THREE separate functions — adopt, set
+ * title, close. Setting the title therefore spawned a SECOND window and applied the
+ * title to THAT one, while the window showing the app kept its old title. Construction
+ * now happens exactly once per process and every later operation goes through the
+ * stored handle.
  *
  * ── CLOSING ───────────────────────────────────────────────────────────────────
  * MEASURED SYMPTOM (Windows): closing the window with Alt+F4 or the titlebar button
  * left the process running with no window, so the app appeared to ignore the close.
  * The cause is ours, not the backend's: `Deno.serve` holds a listening socket and the
  * desktop runtime keeps the process alive while any async task is pending, so the
- * server outlived its window and nothing exited. THE RULE: when the last window
- * closes, the app is over. A desktop app that keeps a headless HTTP server running
- * after its window is gone is indistinguishable from a hang, and it holds the port so
- * the next launch fails with AddrInUse.
+ * server outlived its window and nothing exited. THE RULE: when the window closes, the
+ * app is over. A desktop app that keeps a headless HTTP server running after its window
+ * is gone is indistinguishable from a hang, and it holds the port so the next launch
+ * fails with AddrInUse.
  *
  * ── CUSTOM CHROME ─────────────────────────────────────────────────────────────
- * The app wants a draggable header with real window buttons and no OS decoration.
- * Measured against the runtime's own prototype (deno desktop, Deno 2.9.6) rather than
+ * Measured against the running runtime's own prototype (Deno 2.9.6) rather than
  * assumed from the docs:
  *
  *   available:   bind close executeJs focus getNativeWindow getOpacity getPosition
  *                getSize hide isAlwaysOnTop isClosed isResizable isVisible navigate
  *                openDevtools reload setAlwaysOnTop setApplicationMenu setOpacity
- *                setPosition setResizable setSize setTitle show showContextMenu
- *                unbind windowId + on{blur,click,close,contextmenuclick,dblclick,
- *                focus,keydown,keyup,load,menuclick,mousedown,mouseenter,mouseleave,
- *                mousemove,mouseup,move,resize,wheel}
+ *                setPosition setResizable setSize setTitle show showContextMenu unbind
+ *                windowId + on{blur,click,close,contextmenuclick,dblclick,focus,keydown,
+ *                keyup,load,menuclick,mousedown,mouseenter,mouseleave,mousemove,mouseup,
+ *                move,resize,wheel}
  *
  *   ABSENT:      minimize, maximize, unmaximize, isMinimizable, isMaximizable,
  *                isFrameless, getTitle
  *
- * So a frameless window can carry a drag region, a close button and any paint we
- * like, but it CANNOT minimise or maximise: the capability is not in the window class,
- * and a frameless window has no OS titlebar to fall back on. That is a real loss for
- * users who expect those buttons, so `frameless` stays OFF by default and is enabled
- * only when explicitly asked for. The chrome is built to work either way: with native
- * decorations it adds the app's own header inside the content area, without them it
- * also provides the drag region and the close button.
+ * So a frameless window can carry a drag region, a close button and any paint we like,
+ * but it CANNOT minimise or maximise: the capability is not in the window class and a
+ * frameless window has no OS titlebar to fall back on. `frameless` is therefore off
+ * unless explicitly requested, and the chrome works either way.
  *
  * ── WHY ADOPTION, NOT CREATION ────────────────────────────────────────────────
- * The desktop runtime opens a window implicitly at startup and the FIRST
- * `new Deno.BrowserWindow()` ADOPTS it; `frameless` is documented as creation-only, so
- * it cannot be applied to that implicit window after the fact. Creating a second window
- * to get a frameless one would leave the original on screen, which is the phantom
- * window bug already fixed once. One window, adopted, with whatever options it accepts.
+ * The runtime opens a window implicitly at startup and the first construction adopts
+ * it. `frameless` is creation-only, so it can only be applied at that moment; creating a
+ * second window to get a frameless one would leave the original on screen, which is
+ * precisely the blank-window bug above.
  *
  * Guarded on DENO_SERVE_ADDRESS (set by the desktop runtime, absent under `deno run`)
- * for the same reason the webview workaround is: in development there is no window to
- * manage and the server must simply keep running.
+ * so development keeps working: under `deno run` there is no window to manage.
  */
 
-/** Set once the implicit startup window has been adopted. */
+type Win = {
+  addEventListener(type: string, fn: (e: { preventDefault(): void }) => void): void;
+  setTitle?(title: string): void;
+  close?(): void;
+};
+
+/** The ONE window this process owns. Null until adopted, and never replaced. */
+let windowHandle: Win | null = null;
+
+/** True once adoption has been attempted, whether or not it succeeded. */
 let adopted = false;
+
+/** How many windows this process has asked the runtime to construct. Must never exceed 1. */
+let constructed = 0;
+
+/**
+ * Constructions performed so far.
+ *
+ * Exposed so the invariant is testable: a second construction is not a request for
+ * "the" window, it is a request for ANOTHER window, which is how the blank one appeared.
+ */
+export function windowConstructCount(): number {
+  return constructed;
+}
 
 /** What this build asked for, so the UI can render chrome that matches the window. */
 export interface ChromeState {
@@ -64,8 +91,8 @@ export interface ChromeState {
 const state: ChromeState = {
   frameless: false,
   nativeDecorations: true,
-  // Measured absent from BrowserWindow. Kept as explicit fields rather than omitted so
-  // the UI asks a question instead of assuming an answer.
+  // Measured absent from BrowserWindow. Explicit fields rather than omitted, so the UI
+  // asks a question instead of assuming an answer.
   canMinimize: false,
   canMaximize: false,
 };
@@ -81,58 +108,77 @@ export interface ChromeOptions {
   title?: string;
 }
 
-type Win = {
-  addEventListener(type: string, fn: (e: { preventDefault(): void }) => void): void;
-  setTitle?(title: string): void;
-  close?(): void;
-};
+type WindowCtor = new (opts?: Record<string, unknown>) => Win;
+
+function BrowserWindowCtor(): WindowCtor | undefined {
+  return (Deno as { BrowserWindow?: WindowCtor }).BrowserWindow;
+}
+
+/** True when running inside the desktop runtime rather than `deno run`. */
+function inDesktopRuntime(): boolean {
+  return Boolean(Deno.env.get("DENO_SERVE_ADDRESS"));
+}
 
 /**
  * Adopts the implicit startup window, sets its title, and exits the process when it
  * closes. Safe to call unconditionally: inert under `deno run`.
+ *
+ * Constructs at most ONE window, ever. Every later operation uses the stored handle,
+ * because constructing again would open a second window.
  */
 export function adoptWindowLifecycle(options: ChromeOptions = {}): void {
-  if (!Deno.env.get("DENO_SERVE_ADDRESS")) return;
+  if (!inDesktopRuntime()) return;
   if (adopted) return;
+  adopted = true;
 
-  const BrowserWindow = (Deno as { BrowserWindow?: new (opts?: Record<string, unknown>) => Win })
-    .BrowserWindow;
-  if (!BrowserWindow) return;
+  const Ctor = BrowserWindowCtor();
+  if (!Ctor) return;
 
+  let win: Win;
   try {
-    // Pass the creation-only options on the ADOPTING construction: it is the only
-    // moment they can be applied to the implicit window.
-    const win = new BrowserWindow({
+    // THE one construction. It adopts the window the runtime already opened.
+    win = new Ctor({
       ...(options.frameless ? { frameless: true } : {}),
       ...(options.title ? { title: options.title } : {}),
     });
-    adopted = true;
-    state.frameless = Boolean(options.frameless);
-    state.nativeDecorations = !state.frameless;
-
-    win.addEventListener("close", () => {
-      // The server is the only thing keeping the process alive; exiting here is what
-      // makes the window's close button actually close the app.
-      Deno.exit(0);
-    });
+    constructed += 1;
   } catch {
     // No implicit window (a headless desktop launch, e.g. CI smoke tests). The server
     // stays up in that case, which is what a test harness wants.
+    return;
+  }
+
+  windowHandle = win;
+  state.frameless = Boolean(options.frameless);
+  state.nativeDecorations = !state.frameless;
+
+  win.addEventListener("close", () => {
+    // The server is the only thing keeping the process alive; exiting here is what makes
+    // the window's close button actually close the app.
+    Deno.exit(0);
+  });
+
+  // Apply the title to the window just adopted, never to a new one.
+  if (options.title) {
+    try {
+      win.setTitle?.(options.title);
+    } catch {
+      // A title is cosmetic; a failure must not stop the app from running.
+    }
   }
 }
 
 /**
- * Sets the window title. Never a URL: the webview would otherwise show the address it
- * navigated to (127.0.0.1:<port>) as the window title, the most browser-like tell in
- * the app. Returns true when the title was applied.
+ * Sets the window title, on the ALREADY-ADOPTED window.
+ *
+ * Never constructs: a construction here would open a second window, which is the bug
+ * this module exists to prevent. Returns false when there is no window (a dev run) or the
+ * runtime refused.
  */
 export function setWindowTitle(title: string): boolean {
-  if (!Deno.env.get("DENO_SERVE_ADDRESS")) return false;
-  const BrowserWindow = (Deno as { BrowserWindow?: new () => Win }).BrowserWindow;
-  if (!BrowserWindow) return false;
+  if (!inDesktopRuntime() || !windowHandle) return false;
   try {
-    const win = new BrowserWindow();
-    win.setTitle?.(title);
+    windowHandle.setTitle?.(title);
     return true;
   } catch {
     return false;
@@ -142,17 +188,14 @@ export function setWindowTitle(title: string): boolean {
 /**
  * Closes the window, which (via the close handler above) ends the process.
  *
- * This exists so the app's own chrome has a real close action: with `frameless` on
- * there is no OS button left, and a titlebar-less window with no way to close would be
- * unusable.
+ * Exists so the app's own chrome has a real close action: with `frameless` on there is no
+ * OS button left, and a titlebar-less window with no way to close would be unusable. Uses
+ * the stored handle, never a new construction.
  */
 export function closeWindow(): boolean {
-  if (!Deno.env.get("DENO_SERVE_ADDRESS")) return false;
-  const BrowserWindow = (Deno as { BrowserWindow?: new () => Win }).BrowserWindow;
-  if (!BrowserWindow) return false;
+  if (!inDesktopRuntime() || !windowHandle) return false;
   try {
-    const win = new BrowserWindow();
-    win.close?.();
+    windowHandle.close?.();
     return true;
   } catch {
     return false;

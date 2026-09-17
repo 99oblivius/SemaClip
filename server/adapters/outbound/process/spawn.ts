@@ -213,7 +213,10 @@ export interface ByteStream {
 }
 
 /** Adapts a node Readable to the web-style reader the codebase expects. */
-function toByteStream(source: NodeJS.ReadableStream | null): ByteStream | null {
+function toByteStream(
+  source: NodeJS.ReadableStream | null,
+  streamState: { onClaim?: () => void } = {},
+): ByteStream | null {
   if (!source) return null;
   const queue: Uint8Array[] = [];
   let done = false;
@@ -248,9 +251,16 @@ function toByteStream(source: NodeJS.ReadableStream | null): ByteStream | null {
     },
   });
 
+  const onClaim: () => void = (streamState as { onClaim?: () => void }).onClaim ?? (() => {});
+
   return {
-    getReader: makeReader,
+    getReader() {
+      // The consumer now owns this stream: stop collecting a copy of it.
+      onClaim();
+      return makeReader();
+    },
     [Symbol.asyncIterator]() {
+      onClaim();
       // One reader, iterated: a second reader would fight the first for chunks.
       const r = makeReader();
       return {
@@ -273,11 +283,27 @@ function toByteStream(source: NodeJS.ReadableStream | null): ByteStream | null {
 export function spawnChild(cmd: string, opts: RunOptions = {}): ChildHandle {
   const child = spawn(cmd, opts.args ?? [], launchOptions(cmd, opts));
 
+  // ── UNBOUNDED BUFFERING: the freeze ────────────────────────────────────────
+  // These collectors duplicate every byte the child writes. That is fine for a short
+  // command, and catastrophic for the fMP4 muxer, whose STDOUT IS THE MUXED VIDEO: the
+  // caller reads it through getReader() while this pushed the same bytes into an array
+  // that nothing would ever read. A multi-GB download therefore grew a second copy of
+  // itself in memory, which is what froze the UI and the download on Windows.
+  //
+  // A stream that a consumer CLAIMS (getReader or for-await) stops being collected, so
+  // exactly one copy exists. Streams nobody claims keep the old behaviour, because
+  // `output()` would otherwise return nothing.
   const out: Buffer[] = [];
   const errs: Buffer[] = [];
+  let collectOut = true;
+  let collectErr = true;
   let spawnError: Error | null = null;
-  child.stdout?.on("data", (d: Buffer) => out.push(d));
-  child.stderr?.on("data", (d: Buffer) => errs.push(d));
+  child.stdout?.on("data", (d: Buffer) => {
+    if (collectOut) out.push(d);
+  });
+  child.stderr?.on("data", (d: Buffer) => {
+    if (collectErr) errs.push(d);
+  });
   child.on("error", (e: Error) => {
     spawnError = e;
   });
@@ -301,8 +327,24 @@ export function spawnChild(cmd: string, opts: RunOptions = {}): ChildHandle {
         // best-effort (the download pipeline aborts and moves on).
       }
     },
-    stdout: opts.stdout === "inherit" ? null : toByteStream(child.stdout),
-    stderr: opts.stderr === "inherit" ? null : toByteStream(child.stderr),
+    stdout: opts.stdout === "inherit"
+      ? null
+      : toByteStream(child.stdout, {
+        onClaim: () => {
+          collectOut = false;
+          // Drop what was collected before the claim: the consumer is reading the live
+          // stream, so the copy is dead weight.
+          out.length = 0;
+        },
+      }),
+    stderr: opts.stderr === "inherit"
+      ? null
+      : toByteStream(child.stderr, {
+        onClaim: () => {
+          collectErr = false;
+          errs.length = 0;
+        },
+      }),
     async output(): Promise<RunOutput> {
       const code = await settled;
       if (spawnError) errs.push(Buffer.from((spawnError as Error).message));
