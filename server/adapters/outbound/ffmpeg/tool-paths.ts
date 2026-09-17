@@ -30,7 +30,12 @@ import { dirname, join } from "node:path";
 export interface ToolPaths {
   ffmpeg: string;
   ffprobe: string;
-  source: "env" | "managed" | "path";
+  /**
+   * Where the binaries came from. "missing" is a real source value, not an error:
+   * it says discovery found nothing, which is the only thing availability may be
+   * derived from.
+   */
+  source: "env" | "managed" | "path" | "missing";
 }
 
 /** One downloadable build per target platform, pinned to a dated release tag. */
@@ -125,9 +130,10 @@ async function discover(managedDir: string): Promise<ToolPaths> {
     return { ffmpeg, ffprobe, source: "path" };
   }
 
-  // Nothing usable. Report the bare names so any spawn fails loudly, and let the
-  // caller offer the download — `available()` is the check to gate on.
-  return { ffmpeg, ffprobe, source: "path" };
+  // Nothing usable. source "missing" is DISTINCT from "path" on purpose: returning
+  // "path" here made "found on PATH" and "found nothing" the same value, so any
+  // consumer deriving availability from it disagreed with the real answer.
+  return { ffmpeg, ffprobe, source: "missing" };
 }
 
 export interface ToolStatus {
@@ -160,9 +166,9 @@ export class ToolRegistry {
   static async create(dataDir: string): Promise<ToolRegistry> {
     const managedDir = join(dataDir, "tools", "ffmpeg", hostPlatform());
     const paths = await discover(managedDir);
-    const available = paths.source !== "path" ||
-      (await onPath(exeName("ffmpeg")) && await onPath(exeName("ffprobe")));
-    return new ToolRegistry(paths, available, managedDir);
+    // Discovery already established whether the binaries exist; re-deriving it here
+    // was the second owner of the same fact and is what produced the contradiction.
+    return new ToolRegistry(paths, paths.source !== "missing", managedDir);
   }
 
   get ffmpeg(): string {
@@ -180,8 +186,7 @@ export class ToolRegistry {
   /** Re-resolve after a download or a settings change. */
   async refresh(): Promise<ToolPaths> {
     this.#paths = await discover(this.#managedDir);
-    this.#available = this.#paths.source !== "path" ||
-      (await onPath(exeName("ffmpeg")) && await onPath(exeName("ffprobe")));
+    this.#available = this.#paths.source !== "missing";
     return this.paths;
   }
 

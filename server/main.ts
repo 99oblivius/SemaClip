@@ -129,14 +129,31 @@ adoptWindowLifecycle();
 
 Deno.serve({ port: PORT, hostname: "127.0.0.1" }, app.fetch);
 
-console.log(`SemaClip server running on http://localhost:${PORT}`);
+// Report the address that is ACTUALLY serving. Inside a desktop app the runtime
+// binds Deno.serve to DENO_SERVE_ADDRESS and ignores PORT entirely, so printing
+// "localhost:5174" described a port nothing was listening on — misleading on every
+// packaged launch, and it sent the earlier phantom-window investigation after the
+// wrong address.
+const serveAddress = Deno.env.get("DENO_SERVE_ADDRESS");
+console.log(
+  serveAddress
+    ? `SemaClip server running on http://${serveAddress.replace(/^tcp:/, "")} (desktop)`
+    : `SemaClip server running on http://localhost:${PORT}`,
+);
 console.log(`  DB:       ${DB_PATH}`);
 console.log(`  Cache:    ${CACHE_DIR}`);
 console.log(`  Export:   ${EXPORT_DIR}`);
 console.log(`  Engine:   ${ENGINE_BINARY}`);
-console.log(`  Tools:    ffmpeg=${tools.ffmpeg} (${tools.paths.source})`);
-if (!tools.status().available) {
-  console.warn(`  Tools:    ffmpeg is missing — the UI will offer to download it (${tools.status().managedDir})`);
+// One line, one answer: the previous version printed the resolved NAME with its
+// source and then a separate availability check, which could (and did) contradict
+// itself on screen.
+{
+  const st = tools.status();
+  console.log(
+    st.available
+      ? `  Tools:    ffmpeg=${tools.ffmpeg} (${st.paths.source})`
+      : `  Tools:    ffmpeg missing — the UI offers to download it (${st.managedDir})`,
+  );
 }
 
 // Update check. Inert under `deno run` (no baked-in version) and when no

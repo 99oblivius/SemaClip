@@ -302,8 +302,11 @@ export type UiScale = keyof typeof UI_SCALE_FACTOR;
  * download would not help and the UI says so instead of offering it.
  */
 export interface ToolStatus {
-  /** Resolved binary locations; null for a tool that could not be found. */
-  paths: { ffmpeg: string | null; ffprobe: string | null };
+  /**
+   * Resolved binary locations plus WHERE they came from. "missing" means discovery
+   * found nothing, so the pair is only ever names to attempt — check `available`.
+   */
+  paths: { ffmpeg: string | null; ffprobe: string | null; source?: "env" | "managed" | "path" | "missing" };
   /** False when the binaries are missing and must be provisioned. */
   available: boolean;
   /** True when a user-approved download could supply them. */
