@@ -1,9 +1,11 @@
 {
-  "version": "26.170-nightly.12",
-  "patches": {
-    "26.169-nightly.11": {
-      "name": "patch-26.169-nightly.11-to-26.170-nightly.12.bin",
-      "sha256": "36957698b23cc2214a5b1723685ae6a94162133e110541e7b8abacc5a38d603c"
+  "version": "26.172-nightly.13",
+  "patches": {},
+  "artifacts": {
+    "win-x64": {
+      "name": "SemaClip-26.172-nightly.13-win-x64-portable.zip",
+      "sha256": "070507f0628c8dd0222984d334daac93516ca9ea768017e8a77f7b8eb56eeafb",
+      "url": "https://github.com/99oblivius/SemaClip/releases/download/v26.172-nightly.13/SemaClip-26.172-nightly.13-win-x64-portable.zip"
     }
   }
 }
