@@ -27,15 +27,64 @@ EXE="$(find "$APPDIR" -maxdepth 1 -name '*.exe' -print -quit)"
 
 # A launcher with no icon resource yet. If it already has one the step is a no-op
 # (idempotent), so re-running a build does not double-apply.
+# Counts RT_GROUP_ICON resources by parsing the PE resource directory directly.
+# Deliberately NOT via LIEF: CI does not install it, so an earlier version of this
+# check hit its ImportError path and always returned 0 — reporting "the icon did
+# not apply" while rcedit had actually succeeded. A verification that depends on
+# a package CI lacks is worse than no verification, because it produces a
+# confident false negative.
 count_icons() {
   python3 - "$1" <<'PY' 2>/dev/null || echo 0
-import sys
-try:
-    import lief
-except ImportError:
+import struct, sys
+
+data = open(sys.argv[1], "rb").read()
+if data[:2] != b"MZ":
     print(0); sys.exit(0)
-pe = lief.PE.parse(sys.argv[1])
-print(len(pe.resources_manager.icons) if pe and pe.has_resources else 0)
+pe = struct.unpack_from("<I", data, 0x3C)[0]
+if data[pe:pe+4] != b"PE\0\0":
+    print(0); sys.exit(0)
+# The optional header begins at pe+24 (after the 4-byte signature and 20-byte
+# COFF header). Its data directories sit 112 bytes in for PE32+ and 96 for PE32,
+# so the offsets are relative to pe+24 -- getting this wrong reads a zero
+# resource RVA and every file looks icon-less.
+opt = pe + 24
+magic = struct.unpack_from("<H", data, opt)[0]
+dd = opt + (112 if magic == 0x20B else 96)
+rva, _size = struct.unpack_from("<II", data, dd + 2 * 8)  # index 2 = resources
+if rva == 0:
+    print(0); sys.exit(0)
+
+# Section table: find the section containing the resource RVA.
+nsec = struct.unpack_from("<H", data, pe + 6)[0]
+opt_size = struct.unpack_from("<H", data, pe + 20)[0]
+sec = pe + 24 + opt_size
+for i in range(nsec):
+    off = sec + i * 40
+    vsize, vaddr, rawsize, rawptr = struct.unpack_from("<IIII", data, off + 8)
+    if vaddr <= rva < vaddr + max(vsize, rawsize):
+        base = rawptr + (rva - vaddr)
+        break
+else:
+    print(0); sys.exit(0)
+
+def entries(dir_off):
+    named, ids = struct.unpack_from("<HH", data, dir_off + 12)
+    return dir_off + 16, named + ids
+
+# Level 1: resource types. RT_GROUP_ICON is 14, RT_ICON is 3.
+pos, total = entries(base)
+groups = 0
+for _ in range(total):
+    _id, _off = struct.unpack_from("<II", data, pos)
+    if (_id & 0x7FFFFFFF) == 14:
+        # RT_GROUP_ICON present: the shell has an icon to read. One is enough --
+        # the group references the RT_ICON images, and counting those instead
+        # would report 4 for a single applied icon.
+        lvl2 = base + (_off & 0x7FFFFFFF)
+        _p2, n2 = entries(lvl2)
+        groups += max(n2, 1)
+    pos += 8
+print(groups)
 PY
 }
 
