@@ -48,12 +48,25 @@
       </span>
       <div class="flex-1"></div>
       <!-- Pre-alpha notice: dead-centre of the bar so it is unmissable on every
-           navigation. Uses the theme's blood-red accent (scarce by design). -->
-      <span
-        class="pointer-events-none absolute left-1/2 -translate-x-1/2 rounded border border-accent/60 bg-accent/10 px-2 py-0.5 font-mono text-[10px] font-bold tracking-wide text-accent"
-        title="This software is pre-alpha: features are missing and things will break."
-      >
-        pre-alpha v{__APP_VERSION__} — missing features, will break
+           navigation. Uses the theme's blood-red accent (scarce by design).
+           A nightly build carries an extra amber channel chip beside it, since
+           a nightly is a different (less trustworthy) artifact than a tagged
+           release and the two must not be confusable at a glance. -->
+      <span class="pointer-events-none absolute left-1/2 flex -translate-x-1/2 items-center gap-1.5">
+        <span
+          class="rounded border border-accent/60 bg-accent/10 px-2 py-0.5 font-mono text-[10px] font-bold tracking-wide text-accent"
+          title="This software is pre-alpha: features are missing and things will break."
+        >
+          pre-alpha v{__APP_VERSION__} — missing features, will break
+        </span>
+        {#if __APP_CHANNEL__ === 'nightly'}
+          <span
+            class="rounded border border-warning/60 bg-warning/10 px-2 py-0.5 font-mono text-[10px] font-bold tracking-wide text-warning"
+            title="Nightly build: produced automatically from the latest commit on main and not a tested release."
+          >
+            nightly
+          </span>
+        {/if}
       </span>
       <span
         class="flex items-center gap-1.5 font-mono text-[10px] {$wsStore.connected ? 'text-success' : 'text-warning'}"
