@@ -134,7 +134,13 @@ export function projectDownloadView(input: ProjectInput): DownloadView {
   // `active` = a download is happening. It must be true the instant a run
   // starts, before the first part flips to running (a container that waits
   // for a part reads as "nothing happening" for the first poll window).
-  const active = state.phase === "running" || artifacts.some((a) => a.status === "running");
+  // "starting" counts as active: a container must appear the moment a download is
+  // registered, which is the point of the phase — the client's first poll can arrive
+  // before the downloader writes its first real state.
+  const active =
+    state.phase === "running" ||
+    state.phase === "starting" ||
+    artifacts.some((a) => a.status === "running");
   const view: DownloadView = {
     streamId: input.streamId,
     phase: state.phase,

@@ -51,7 +51,8 @@ export interface ArtifactView {
 
 export interface DownloadView {
   streamId: string;
-  phase: "idle" | "running" | "done" | "failed";
+  /** "starting" is a download that has been registered and is about to run. */
+  phase: "starting" | "idle" | "running" | "done" | "failed";
   /** ANY artifact running — the single "show progress" flag. */
   active: boolean;
   /** Server-composed status line for the container header. */

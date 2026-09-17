@@ -47,7 +47,13 @@ export interface DownloadPart {
 }
 
 export interface DownloadState {
-  phase: "idle" | "running" | "done" | "failed";
+  /**
+   * "starting" covers the window between a caller registering a run and the
+   * downloader writing its first real state. It is ACTIVE (a container renders for it)
+   * but is NOT "running", so run()'s own guard against a concurrent download still
+   * admits the run it is about to start.
+   */
+  phase: "starting" | "idle" | "running" | "done" | "failed";
   parts: DownloadPart[];
   overall: { percent: number; etaSec: number | null };
   /** Seconds of proxy media playable so far. */
@@ -187,9 +193,19 @@ export class DownloadOrchestrator {
       // An existing live state is left alone: this is called at the start of a run, and
       // a resume must not wipe the progress it is resuming from.
       if (!this.liveStates.has(streamId)) {
+        // A distinct "starting" phase, NOT "running": run() refuses a stream whose
+        // phase is already running (its guard against a second concurrent download),
+        // and ImportStream calls markRunLive(true) immediately BEFORE run(). Seeding
+        // "running" here made every URL import fail with "A download is already
+        // running for this stream" — the download never happened, so no progress
+        // container could ever appear.
+        //
+        // "starting" is still truthfully active (the container renders on active ||
+        // failed), so the visibility fix stands while the guard stays intact. run()
+        // takes ownership and writes the real "running" state a moment later.
         this.liveStates.set(streamId, {
           ...this.idle(),
-          phase: "running",
+          phase: "starting",
           startedAt: new Date().toISOString(),
         });
         this.bumpRevision(streamId);
