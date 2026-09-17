@@ -8,7 +8,7 @@
     "start": "deno run --allow-all main.ts",
     "check": "deno check main.ts",
     "test": "deno test --allow-all",
-    "desktop": "deno desktop --allow-all --include ../frontend/build --include ../native -o ../dist/SemaClip main.ts"
+    "desktop": "deno run --allow-all ../scripts/build-desktop.ts"
   },
   "desktop": {
     "app": {

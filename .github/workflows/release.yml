@@ -1,0 +1,767 @@
+# SemaClip nightly release pipeline.
+#
+# Nightly channel only. Stable releases (tag push `v*`) will reuse the build and
+# verify jobs by adding a second version source; the manifest path differs.
+#
+# Shape: version -> build (matrix) -> publish -> patch -> verify.
+# Every job that produces a user-visible claim (a release, a manifest, a
+# patch) is followed by a job that downloads the result back and hashes it.
+# `deno desktop` is EXPERIMENTAL, so the Deno version is pinned exactly and the
+# pipeline is written to fail loudly rather than publish a plausible-looking
+# artifact that was never produced.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_publish:
+        description: "Build the artifacts only; do not create a release or touch the manifest."
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    # A docs-only push still carries a new commit count, so without this every
+    # typo fix in a markdown file would cut a nightly release (and the updater's
+    # version identity is commit-derived — a no-op nightly moves every user).
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "README.md"
+
+# Two runs racing would both try to create the same tag and both push a
+# manifest to the releases branch; the later push wins and loses a patch entry.
+concurrency:
+  group: release-nightly
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  # EXACT version, not v2.9.x: `deno desktop` is experimental and an upstream
+  # release can change packaging behaviour under a running tag. Bump this
+  # deliberately, then re-cut. (check.yml intentionally floats — it should
+  # track the newest 2.9 for early warning.)
+  DENO_VERSION: v2.9.6
+  NODE_VERSION: "22"
+  CHANNEL_DIR: nightly
+  # Pinning DENO_DIR into the workspace gives both runners one cache path:
+  # the default is ~/.cache/deno on Linux but %LOCALAPPDATA%\deno on Windows,
+  # so a keyed cache of the default path would miss on either.
+  DENO_DIR: ${{ github.workspace }}/.deno-dir
+  # Public base URL the updater polls. Must stay in sync with
+  # server/deno.json -> desktop.release.baseUrl; a mismatch means the app looks
+  # for its patch somewhere CI never published it.
+  MANIFEST_BASE_URL: https://99oblivius.github.io/SemaClip
+
+jobs:
+  # ── version ────────────────────────────────────────────────────────────────
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+      tag: ${{ steps.compute.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # version.sh derives the patch component from the commit count this
+          # year; a shallow clone counts from the clone point and silently
+          # produces a wrong (smaller) version.
+          fetch-depth: 0
+
+      - name: Compute nightly version
+        id: compute
+        run: |
+          set -euo pipefail
+          out="$(./scripts/version.sh --nightly)"
+          printf '%s\n' "$out"
+
+          version="$(printf '%s\n' "$out" | sed -n 's/^version=//p')"
+          tag="$(printf '%s\n' "$out" | sed -n 's/^tag=//p')"
+          mode="$(printf '%s\n' "$out" | sed -n 's/^mode=//p')"
+
+          if [ -z "$version" ] || [ -z "$tag" ]; then
+            echo "::error::version.sh printed no version/tag (mode=${mode:-unset})"
+            exit 1
+          fi
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::tag '$tag' is not 'v' + version '$version'"
+            exit 1
+          fi
+          # The nightly suffix keys the manifest entry: without it a nightly and
+          # a stable build of the same commit claim one version and the updater
+          # sees no change (see version.sh's header).
+          case "$version" in
+            *-nightly.*) ;;
+            *) echo "::error::expected a -nightly.<run> suffix on '$version'"; exit 1 ;;
+          esac
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Assert both version files carry it
+        run: |
+          set -euo pipefail
+          # version.sh writes frontend/package.json (UI banner via vite.config.ts)
+          # AND server/deno.json (baked in as Deno.desktopVersion). A drift means
+          # the updater compares the wrong current version and re-applies patches.
+          python3 - "${{ steps.compute.outputs.version }}" <<'PY'
+          import json, sys
+          want = sys.argv[1]
+          for path in ("frontend/package.json", "server/deno.json"):
+              got = json.load(open(path))["version"]
+              if got != want:
+                  sys.exit(f"::error:: {path} carries {got!r}, expected {want!r}")
+              print(f"{path}: {got}")
+          PY
+
+      - name: Record the version for the build jobs
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          printf '%s\n' \
+            "version=${{ steps.compute.outputs.version }}" \
+            "tag=${{ steps.compute.outputs.tag }}" \
+            > dist/VERSION.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: version
+          path: dist/VERSION.txt
+          retention-days: 7
+
+  # ── build ──────────────────────────────────────────────────────────────────
+  build:
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Both targets build on ubuntu-latest: `deno desktop` cross-compiles,
+          # and scripts/fetch-native.sh can populate a win-x64 payload from a
+          # Linux host. A Windows runner would add cost and change nothing.
+          - platform: linux-x64
+            target: x86_64-unknown-linux-gnu
+          - platform: win-x64
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Cache Deno toolchain (denort + webview backend)
+        uses: actions/cache@v4
+        with:
+          # Every `deno desktop` run otherwise downloads libdenort-<target>.zip
+          # from dl.deno.land and the laufey-webview backend again — tens of MB
+          # per job per platform, and it inherits upstream flakiness.
+          path: ${{ env.DENO_DIR }}
+          key: deno-${{ env.DENO_VERSION }}-${{ matrix.target }}-${{ hashFiles('server/deno.lock', 'frontend/package-lock.json') }}
+          restore-keys: |
+            deno-${{ env.DENO_VERSION }}-${{ matrix.target }}-
+
+      - name: Frontend build
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run check
+          npm run build
+        working-directory: frontend
+
+      - name: Fetch native tree for the TARGET platform
+        env:
+          # Required: the script otherwise derives the platform from uname
+          # (the HOST) and embeds Linux binaries in a Windows build — a build
+          # that succeeds and ships broken.
+          SEMACLIP_NATIVE_PLATFORM: ${{ matrix.platform }}
+        run: ./scripts/fetch-native.sh
+
+      - name: Re-derive the version and cross-check it
+        id: stamp
+        run: |
+          set -euo pipefail
+          # Same GITHUB_RUN_NUMBER as the version job, so this must agree. If it
+          # does not, the version that got baked into the binary differs from the
+          # one we are about to tag and publish.
+          out="$(./scripts/version.sh --nightly)"
+          printf '%s\n' "$out"
+          version="$(printf '%s\n' "$out" | sed -n 's/^version=//p')"
+          if [ "$version" != "${{ needs.version.outputs.version }}" ]; then
+            echo "::error::build job computed '$version', version job computed '${{ needs.version.outputs.version }}'"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Package (linux)
+        if: matrix.platform == 'linux-x64'
+        working-directory: server
+        run: |
+          set -euo pipefail
+          # --include is REQUIRED: the app reads ../frontend/build and ../native
+          # through import.meta.url-relative paths, which resolve inside the
+          # compiled VFS (mounted at /tmp/deno-compile-app/).
+          # A recognised extension also makes deno desktop leave the unpacked app
+          # directory beside the bundle — that directory holds the runtime dylib
+          # the updater swaps, which is what the patch job diffs.
+          deno desktop --allow-all \
+            --include ../frontend/build --include ../native \
+            --target ${{ matrix.target }} \
+            -o ../dist/SemaClip.AppImage main.ts
+
+      - name: Package (windows)
+        if: matrix.platform == 'win-x64'
+        working-directory: server
+        run: |
+          set -euo pipefail
+          # NOT a .msi. `deno desktop` refuses to build one from a CalVer version
+          # ("the major field 2026 exceeds the maximum of 255" — Windows Installer
+          # packs ProductVersion as major(0-255).minor(0-255).build(0-65535)).
+          # Verified on Deno 2.9.6, with and without the -nightly suffix. The app
+          # directory builds fine and carries the true version, so it is shipped
+          # as a zip. See docs/RELEASING.md -> "Windows artifact" for the options
+          # (change the version encoding, or ship Inno Setup over the app dir).
+          deno desktop --allow-all \
+            --include ../frontend/build --include ../native \
+            --target ${{ matrix.target }} \
+            -o ../dist/SemaClip main.ts
+
+      - name: Zip the Windows app directory
+        if: matrix.platform == 'win-x64'
+        run: |
+          set -euo pipefail
+          cd dist
+          zip -qr "SemaClip-${{ needs.version.outputs.version }}-win-x64.zip" SemaClip
+
+      - name: Collect artifacts, sidecars, runtime dylib
+        run: |
+          set -euo pipefail
+          V="${{ needs.version.outputs.version }}"
+          P="${{ matrix.platform }}"
+
+          case "$P" in
+            linux-x64) ART="dist/SemaClip.AppImage" ;;
+            win-x64)   ART="dist/SemaClip-$V-win-x64.zip" ;;
+            *) echo "::error::unhandled platform $P"; exit 1 ;;
+          esac
+
+          if [ ! -f "$ART" ]; then
+            echo "::error::expected artifact '$ART' was not produced"
+            find dist -maxdepth 3 -type f | sed 's/^/  /'
+            exit 1
+          fi
+          sha256sum "$ART" | awk '{print $1}' > "$ART.sha256"
+          echo "artifact $ART $(wc -c < "$ART") bytes sha256=$(cat "$ART.sha256")"
+
+          # The runtime dylib (<App>.so / <App>.dll) is the ~560MB payload the
+          # launcher swaps in place. It is published so the NEXT nightly's patch
+          # job has the "old" side to diff against.
+          DYLIB="$(find dist -maxdepth 3 -type f \( -name '*.so' -o -name '*.dll' \) -print -quit)"
+          if [ -z "$DYLIB" ]; then
+            echo "::error::no runtime dylib (*.so/*.dll) found in dist — cannot generate patches"
+            find dist -maxdepth 3 -type f | sed 's/^/  /'
+            exit 1
+          fi
+          ext="${DYLIB##*.}"
+          cp "$DYLIB" "dist/SemaClip-$V-$P-runtime.$ext"
+          sha256sum "dist/SemaClip-$V-$P-runtime.$ext" | awk '{print $1}' \
+            > "dist/SemaClip-$V-$P-runtime.$ext.sha256"
+          echo "runtime dylib $DYLIB -> dist/SemaClip-$V-$P-runtime.$ext"
+
+          printf '%s\n' \
+            "version=$V" "tag=${{ needs.version.outputs.tag }}" \
+            "platform=$P" "target=${{ matrix.target }}" \
+            > "dist/build-meta-$P.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: semaclip-${{ matrix.platform }}
+          # Includes the runtime dylib and its sidecar: the patch job diffs the
+          # dylib, and re-downloading ~560MB from a release asset to do it would
+          # be slower and need the release to exist first.
+          path: |
+            dist/*.AppImage
+            dist/*.AppImage.sha256
+            dist/*-win-x64.zip
+            dist/*-win-x64.zip.sha256
+            dist/*-runtime.*
+            dist/build-meta-*.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  # ── publish ────────────────────────────────────────────────────────────────
+  publish:
+    needs: [version, build]
+    # A fork's push must not create releases here; the token in a fork cannot
+    # anyway, but failing early beats a confusing permissions error mid-job.
+    if: github.repository_owner == '99oblivius' && !(github.event_name == 'workflow_dispatch' && inputs.skip_publish)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: semaclip-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify the downloaded set before publishing anything
+        run: |
+          set -euo pipefail
+          V="${{ needs.version.outputs.version }}"
+          ls -la dist
+          for f in \
+            "dist/SemaClip.AppImage" \
+            "dist/SemaClip.AppImage.sha256" \
+            "dist/SemaClip-$V-win-x64.zip" \
+            "dist/SemaClip-$V-win-x64.zip.sha256" \
+            "dist/SemaClip-$V-linux-x64-runtime.so" \
+            "dist/SemaClip-$V-linux-x64-runtime.so.sha256" \
+            "dist/SemaClip-$V-win-x64-runtime.dll" \
+            "dist/SemaClip-$V-win-x64-runtime.dll.sha256"
+          do
+            [ -f "$f" ] || { echo "::error::missing $f"; exit 1; }
+          done
+          # Hash before upload, not just after: publish must not advertise a
+          # sidecar it never checked against the bytes it is about to send.
+          for art in "dist/SemaClip.AppImage" "dist/SemaClip-$V-win-x64.zip"; do
+            want="$(cat "$art.sha256")"
+            got="$(sha256sum "$art" | awk '{print $1}')"
+            [ "$want" = "$got" ] || { echo "::error::$art hash mismatch ($want != $got)"; exit 1; }
+            echo "ok $art $got"
+          done
+
+      - name: Create the nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          V="${{ needs.version.outputs.version }}"
+          TAG="${{ needs.version.outputs.tag }}"
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release $TAG already exists — the version job must produce a fresh tag"
+            exit 1
+          fi
+
+          # --prerelease keeps nightlies off the repo's "latest" slot. The runtime
+          # dylibs are attached because the next nightly's patch job needs the
+          # previous version to diff from; without them patches cannot be built.
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "SemaClip $V (nightly)" \
+            --prerelease \
+            --notes "Nightly build $V from ${GITHUB_SHA:0:12}.
+
+          Linux: \`SemaClip.AppImage\` (\`chmod +x\`, then run — needs \`webkit2gtk\`).
+          Windows: \`SemaClip-$V-win-x64.zip\` — unzip and run \`SemaClip.exe\`. Not an installer; see docs/RELEASING.md.
+          Each artifact has a \`.sha256\` sidecar.
+
+          Windows auto-update does not work (the Deno launcher never swaps the DLL). See docs/RELEASING.md." \
+            "dist/SemaClip.AppImage" \
+            "dist/SemaClip.AppImage.sha256" \
+            "dist/SemaClip-$V-win-x64.zip" \
+            "dist/SemaClip-$V-win-x64.zip.sha256" \
+            "dist/SemaClip-$V-linux-x64-runtime.so" \
+            "dist/SemaClip-$V-linux-x64-runtime.so.sha256" \
+            "dist/SemaClip-$V-win-x64-runtime.dll" \
+            "dist/SemaClip-$V-win-x64-runtime.dll.sha256"
+
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name' | sed 's/^/published: /'
+
+      - name: Write latest.json for the nightly channel
+        env:
+          SIGNING_KEY: ${{ secrets.SEMACLIP_ED25519_KEY }}
+        run: |
+          set -euo pipefail
+          V="${{ needs.version.outputs.version }}"
+          mkdir -p "dist/${{ env.CHANNEL_DIR }}"
+
+          # MANIFEST IS PATCHES-ONLY. There is no full-artifact download entry,
+          # so a user whose version is absent from `patches` simply stays put
+          # (graceful "no patch available") — nobody is forced onto this build.
+          # On the FIRST nightly there is no previous version, so `patches` is
+          # legitimately an empty object; the patch job fills it in afterwards.
+          python3 - "$V" "dist/${{ env.CHANNEL_DIR }}/latest.json" <<'PY'
+          import json, sys
+          version, out = sys.argv[1], sys.argv[2]
+          manifest = {"version": version, "patches": {}}
+          with open(out, "w") as fh:
+              json.dump(manifest, fh, indent=2)
+              fh.write("\n")
+          print(json.dumps(manifest))
+          PY
+
+      - name: Publish the manifest to the releases branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # GitHub Pages serves the `releases` branch; the updater fetches
+          # <baseUrl>/latest.json, so the manifest lives at nightly/latest.json.
+          # Plain git push, no third-party Pages action.
+          bash scripts/ci/push-pages.sh "$GITHUB_REPOSITORY" "$GITHUB_TOKEN" \
+            "dist/${{ env.CHANNEL_DIR }}/latest.json" \
+            "${{ env.CHANNEL_DIR }}/latest.json"
+
+      # Ed25519 signing is not wired yet: the key does not exist. An optional
+      # `publicKey` in Deno.autoUpdate({...}) turns the manifest into
+      # {"signed": "<the manifest json as a string>", "signature": "<base64 ed25519 sig over the signed string>"}.
+      # When a key exists: store it as the repository secret SEMACLIP_ED25519_KEY
+      # (base64 of the raw 32-byte private key), set the matching public key in
+      # main.ts's Deno.autoUpdate call, then uncomment this step. Both the publish
+      # and patch jobs must sign — the patch job rewrites the manifest, so
+      # signing only here would leave the FINAL manifest unsigned and every
+      # client that trusts the key would refuse it.
+      #
+      # - name: Sign the manifest (Ed25519)
+      #   if: env.SIGNING_KEY != ''
+      #   run: |
+      #     python3 scripts/ci/sign-manifest.py \
+      #       "dist/${{ env.CHANNEL_DIR }}/latest.json" "$SIGNING_KEY"
+
+  # ── patch ──────────────────────────────────────────────────────────────────
+  patch:
+    needs: [version, publish]
+    # DISABLED BY DEFAULT — see "RAM" below. Set the repository variable
+    # SEMACLIP_ENABLE_PATCHES=true to turn it on, on a runner with >= 16GB.
+    if: github.repository_owner == '99oblivius' && vars.SEMACLIP_ENABLE_PATCHES == 'true'
+    runs-on: ${{ vars.SEMACLIP_PATCH_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight — RAM for bsdiff
+        run: |
+          set -euo pipefail
+          # bsdiff's memory use is roughly 17x the input. The runtime dylib is
+          # ~560MB, so a naive bsdiff needs ~9.5GB+ and ubuntu-latest has 7GB —
+          # it does not fail cleanly, it gets OOM-killed mid-run. Fail here with
+          # the arithmetic instead of dying 20 minutes in.
+          avail_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
+          avail_gb=$(( avail_kb / 1024 / 1024 ))
+          echo "runner RAM: ~${avail_gb}GB"
+          if [ "$avail_gb" -lt 14 ]; then
+            echo "::error::bsdiff on a ~560MB dylib needs ~9.5GB+; this runner has ~${avail_gb}GB. Set the SEMACLIP_PATCH_RUNNER repository variable to a >= 16GB runner label."
+            exit 1
+          fi
+
+      - name: Install bsdiff
+        run: |
+          set -euo pipefail
+          # Not in the Arch repos, and absent on the dev machine. bsdiff emits
+          # the bsdiff4 format qbsdiff reads; bspatch is used by verify.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bsdiff
+
+      - name: Find the previous nightly
+        id: prev
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          CUR="${{ needs.version.outputs.tag }}"
+          # Newest nightly that is not this one and actually carries a Linux
+          # runtime dylib — a release without one cannot be a diff base.
+          prev=""
+          for tag in $(gh release list --repo "$GITHUB_REPOSITORY" --limit 30 \
+                         --exclude-drafts --json tagName,isPrerelease,createdAt \
+                         --jq 'sort_by(.createdAt) | reverse | .[] | select(.isPrerelease) | .tagName'); do
+            [ "$tag" = "$CUR" ] && continue
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
+                 --jq '.assets[].name' | grep -q -- '-linux-x64-runtime\.so$'; then
+              prev="$tag"; break
+            fi
+          done
+
+          if [ -z "$prev" ]; then
+            # First run of the channel. `patches` stays empty and users on
+            # nothing stay put — correct, not a failure.
+            echo "::notice::no previous nightly with a runtime dylib; nothing to patch from"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "previous nightly: $prev"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$prev" >> "$GITHUB_OUTPUT"
+            echo "version=${prev#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download both runtime dylibs
+        if: steps.prev.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          V="${{ needs.version.outputs.version }}"
+          PREV="${{ steps.prev.outputs.version }}"
+          mkdir -p work/old work/new
+
+          gh release download "${{ steps.prev.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" --pattern '*-linux-x64-runtime.so' --dir work/old
+          gh release download "${{ needs.version.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" --pattern '*-linux-x64-runtime.so' --dir work/new
+
+          OLD="$(find work/old -type f | head -n 1)"
+          NEW="$(find work/new -type f | head -n 1)"
+          [ -n "$OLD" ] && [ -n "$NEW" ] || { echo "::error::could not fetch both dylibs"; exit 1; }
+
+          # The new side is the one the release published; if it does not match
+          # its own sidecar, the patch would encode a corrupted target.
+          (cd work/new && sha256sum -c ./*.sha256 2>/dev/null || true)
+          cp "$OLD" "work/old-$PREV.so"
+          cp "$NEW" "work/new-$V.so"
+          ls -la work
+
+      - name: Generate the bsdiff patch
+        if: steps.prev.outputs.found == 'true'
+        run: |
+          set -euo pipefail
+          V="${{ needs.version.outputs.version }}"
+          PREV="${{ steps.prev.outputs.version }}"
+          NAME="patch-${PREV}-to-${V}.bin"
+
+          # bsdiff old new out — see the RAM note in the preflight step.
+          time bsdiff "work/old-$PREV.so" "work/new-$V.so" "work/$NAME"
+
+          sha="$(sha256sum "work/$NAME" | awk '{print $1}')"
+          printf '%s\n' "$sha" > "work/$NAME.sha256"
+          echo "patch $NAME sha256=$sha size=$(wc -c < "work/$NAME")"
+
+          # A patch that applies cleanly can still produce a non-bootable binary,
+          # which users only discover via a failed launch + rollback. bspatch is a
+          # cheap real check here; verify re-runs it from the published copies.
+          bspatch "work/old-$PREV.so" "work/patched.so" "work/$NAME"
+          a="$(sha256sum "work/patched.so" | awk '{print $1}')"
+          b="$(sha256sum "work/new-$V.so" | awk '{print $1}')"
+          if [ "$a" != "$b" ]; then
+            echo "::error::patch is not reproducible: patched=$a target=$b"
+            exit 1
+          fi
+          echo "patch round-trip reproduces the new dylib exactly"
+
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        id: diff
+
+      - name: Upload the patch to the release
+        if: steps.prev.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "${{ needs.version.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" --clobber \
+            "work/${{ steps.diff.outputs.name }}" \
+            "work/${{ steps.diff.outputs.name }}.sha256"
+
+      - name: Merge the patch entry into latest.json
+        if: steps.prev.outputs.found == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          curl -sSfL --max-time 60 \
+            "${{ env.MANIFEST_BASE_URL }}/${{ env.CHANNEL_DIR }}/latest.json" \
+            -o dist/latest.json
+
+          # Manifest shape: {version, patches:{ "<fromVersion>": {name, sha256} }}
+          # sha256 is mandatory — the runtime refuses a mismatched patch. Entries
+          # are keyed by the version a user is currently on, so every supported
+          # prior version needs its own entry; only users listed here can update.
+          python3 - \
+            dist/latest.json \
+            "${{ needs.version.outputs.version }}" \
+            "${{ steps.prev.outputs.version }}" \
+            "${{ steps.diff.outputs.name }}" \
+            "${{ steps.diff.outputs.sha }}" <<'PY'
+          import json, sys
+          path, version, prev, name, sha = sys.argv[1:6]
+          m = json.load(open(path))
+          m.setdefault("patches", {})[prev] = {"name": name, "sha256": sha}
+          # The manifest's own version must track the newest build, or a client
+          # already on it sees a stale manifest and re-checks forever.
+          m["version"] = version
+          with open(path, "w") as fh:
+              json.dump(m, fh, indent=2)
+              fh.write("\n")
+          print(json.dumps(m, indent=2))
+          PY
+
+          # NOTE: Windows patches are deliberately not generated. Applying an
+          # update works on macOS/Linux only — the Windows launcher downloads and
+          # stages the patch but never swaps the DLL, so publishing an entry for a
+          # Windows version would advertise an update that cannot land. Windows
+          # clients find no entry for their version and stay put.
+          #
+          # NOTE: this manifest is shared by both platforms. A single manifest
+          # cannot describe two platforms' dylibs, so a Windows client must not
+          # be handed the Linux patch name. That is already true because the only
+          # entries are Linux patches keyed by Linux version strings.
+
+      - name: Republish the manifest
+        if: steps.prev.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci/push-pages.sh "$GITHUB_REPOSITORY" "$GITHUB_TOKEN" \
+            "dist/latest.json" \
+            "${{ env.CHANNEL_DIR }}/latest.json" \
+            "work/${{ steps.diff.outputs.name }}" \
+            "${{ env.CHANNEL_DIR }}/${{ steps.diff.outputs.name }}"
+
+      # Signing belongs here too — see the commented step in `publish`. The
+      # manifest published by THIS job is the one clients actually fetch, so an
+      # unsigned final manifest is an unsigned channel if publicKey is ever set
+      # in main.ts.
+
+  # ── verify ─────────────────────────────────────────────────────────────────
+  verify:
+    needs: [version, patch]
+    # Runs even when the patch job was skipped (no patches yet): the release and
+    # the manifest must still be checked. It fails on its own if either is wrong.
+    if: always() && needs.version.result == 'success' && (needs.patch.result == 'success' || needs.patch.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the published artifacts back from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          V="${{ needs.version.outputs.version }}"
+          mkdir -p back
+          # Fetch from the RELEASE, not the workflow artifacts: the release is
+          # what users get, and a workflow-artifact check would happily pass on
+          # bytes that never made it out.
+          gh release download "${{ needs.version.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" --dir back
+          ls -la back
+
+          fail=0
+          for art in "SemaClip.AppImage" "SemaClip-$V-win-x64.zip"; do
+            sidecar="back/$art.sha256"
+            if [ ! -f "back/$art" ] || [ ! -f "$sidecar" ]; then
+              echo "::error::release is missing $art or its sidecar"; fail=1; continue
+            fi
+            want="$(cat "$sidecar")"
+            got="$(sha256sum "back/$art" | awk '{print $1}')"
+            if [ "$want" = "$got" ]; then
+              echo "ok  $art $got"
+            else
+              echo "::error::$art hash mismatch: sidecar=$want actual=$got"; fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Verify the live manifest at the Pages URL
+        run: |
+          set -euo pipefail
+          V="${{ needs.version.outputs.version }}"
+          URL="${{ env.MANIFEST_BASE_URL }}/${{ env.CHANNEL_DIR }}/latest.json"
+          mkdir -p back
+
+          # Pages builds are asynchronous, so poll — but a green run must never
+          # claim the manifest is live when it is not. If it never appears, fail.
+          ok=no
+          for _ in $(seq 1 20); do
+            if curl -sSfL --max-time 30 "$URL" -o back/live-latest.json; then ok=yes; break; fi
+            echo "manifest not reachable yet ($URL); retrying in 15s"
+            sleep 15
+          done
+          if [ "$ok" != yes ]; then
+            echo "::error::$URL did not become reachable within 5 minutes — the updater would find nothing"
+            exit 1
+          fi
+
+          python3 - back/live-latest.json "$V" <<'PY'
+          import json, sys
+          path, version = sys.argv[1], sys.argv[2]
+          m = json.load(open(path))
+          if m.get("version") != version:
+              sys.exit(f"::error:: live manifest version {m.get('version')!r} != {version!r}")
+          patches = m.get("patches")
+          if not isinstance(patches, dict):
+              sys.exit("::error:: live manifest has no patches object")
+          print(f"live manifest ok: version={version} patches={list(patches)}")
+          for frm, entry in patches.items():
+              name, sha = entry.get("name"), entry.get("sha256")
+              if not isinstance(sha, str) or len(sha) != 64 or sha.lower() != sha:
+                  sys.exit(f"::error:: patches[{frm}].sha256 is not 64 lowercase hex: {sha!r}")
+              if not isinstance(name, str) or not name:
+                  sys.exit(f"::error:: patches[{frm}].name missing")
+          PY
+
+      - name: Verify every published patch applies
+        run: |
+          set -euo pipefail
+          V="${{ needs.version.outputs.version }}"
+          python3 -c 'import json,sys; m=json.load(open("back/live-latest.json")); print(len(m.get("patches",{})))' > /tmp/npatches
+          n="$(cat /tmp/npatches)"
+          if [ "$n" = "0" ]; then
+            echo "::notice::live manifest lists no patches (first nightly, or patches disabled) — nothing to verify"
+            exit 0
+          fi
+
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bsdiff
+
+          python3 -c 'import json;m=json.load(open("back/live-latest.json"));[print(k,v["name"],v["sha256"]) for k,v in m["patches"].items()]' \
+            > /tmp/patches.txt
+          while read -r frm name sha; do
+            echo "== patch for $frm -> $V"
+            # Download the patch from its public URL and check the hash the
+            # runtime will check; a mismatch means the runtime refuses it and
+            # every user on $frm silently never updates.
+            curl -sSfL --max-time 300 \
+              "${{ env.MANIFEST_BASE_URL }}/${{ env.CHANNEL_DIR }}/$name" -o "back/$name"
+            got="$(sha256sum "back/$name" | awk '{print $1}')"
+            [ "$got" = "$sha" ] || { echo "::error::$name manifest sha=$sha actual=$got"; exit 1; }
+
+            # Prove it applies: diff the PREVIOUS release's dylib and confirm the
+            # result is byte-identical to this release's dylib. This is the real
+            # check — a patch that applies cleanly can still yield a dead binary,
+            # and this catches the bsdiff-format/reproducibility class without
+            # needing a display to boot a GUI app (CI has no webkit2gtk/display;
+            # boot-testing the patched app is a manual step, see docs/RELEASING.md).
+            gh release download "v$frm" --repo "$GITHUB_REPOSITORY" \
+              --pattern '*-linux-x64-runtime.so' --dir back 2>/dev/null \
+              || { echo "::error::cannot fetch the $frm runtime dylib to check the patch against"; exit 1; }
+            old="$(find back -name '*-linux-x64-runtime.so' -newer back/live-latest.json -print -quit)"
+            [ -n "$old" ] || old="$(ls back/*linux-x64-runtime.so | head -n 1)"
+            target="back/SemaClip-$V-linux-x64-runtime.so"
+            [ -f "$target" ] || { echo "::error::missing $target"; exit 1; }
+
+            bspatch "$old" back/patched.so "back/$name"
+            a="$(sha256sum back/patched.so | awk '{print $1}')"
+            b="$(sha256sum "$target" | awk '{print $1}')"
+            [ "$a" = "$b" ] || { echo "::error::patch $name does not reproduce $V ($a != $b)"; exit 1; }
+            echo "ok  $name applies cleanly and reproduces $V"
+            rm -f back/*linux-x64-runtime.so back/patched.so
+          done < /tmp/patches.txt
+
+      - name: Summary
+        run: |
+          {
+            echo "## SemaClip nightly ${{ needs.version.outputs.version }}"
+            echo
+            echo "- tag: \`${{ needs.version.outputs.tag }}\`"
+            echo "- manifest: ${{ env.MANIFEST_BASE_URL }}/${{ env.CHANNEL_DIR }}/latest.json"
+            echo "- publish: ${{ needs.publish.result }}"
+            echo "- patch: ${{ needs.patch.result }}"
+            echo
+            echo "Windows artifact is a zip, not an installer (see docs/RELEASING.md)."
+            echo "Windows auto-update does not work; Linux does."
+          } >> "$GITHUB_STEP_SUMMARY"

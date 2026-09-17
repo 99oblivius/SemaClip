@@ -1,5 +1,12 @@
 # Phase 0 gate: type-check, unit tests, frontend build.
 # Nightly/release pipelines (Phase 4) depend on this workflow being green.
+#
+# `deno-version: v2.9.x` FLOATS ON PURPOSE and must stay floating even though
+# release.yml pins v2.9.6 exactly: this job is the early-warning system for an
+# upstream Deno 2.9 release breaking the type-check or the test suite, and a
+# pinned version here would remove that signal. Release jobs pin because
+# `deno desktop` is experimental — a new 2.9 patch can change packaging
+# behaviour mid-release. Do not "fix" the inconsistency.
 name: check
 
 on:
