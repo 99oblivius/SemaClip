@@ -31,6 +31,7 @@ export interface DetectionEngineConfig {
   whisper: WhisperPaths;
   /** ffmpeg binary for audio extraction. */
   ffmpegPath: string;
+  ffprobePath: string;
 }
 
 export class DetectionEngineAdapter {
@@ -249,7 +250,7 @@ export class DetectionEngineAdapter {
 
   private async probeDuration(vodPath: string): Promise<number | null> {
     try {
-      const cmd = new Deno.Command("ffprobe", {
+      const cmd = new Deno.Command(this.config.ffprobePath, {
         args: ["-v", "quiet", "-print_format", "json", "-show_format", vodPath],
         stdout: "piped", stderr: "null",
       });

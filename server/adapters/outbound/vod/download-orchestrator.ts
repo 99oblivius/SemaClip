@@ -15,6 +15,7 @@
  */
 
 import type { StreamMetadataRepository } from "@/application/ports/outbound.ts";
+import type { ToolPaths } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
 import {
   extractVodId,
   resolveQualities,
@@ -127,7 +128,12 @@ function updateEta(part: PartRuntime, cumulativeBytes: number): void {
 }
 
 export class DownloadOrchestrator {
-  constructor(private readonly metadata: StreamMetadataRepository) {}
+  constructor(
+    private readonly metadata: StreamMetadataRepository,
+    /** Resolved ffmpeg/ffprobe — the packaged app bundles them, so a bare
+     *  `ffprobe` would not exist on a user's machine. */
+    private readonly tools: ToolPaths,
+  ) {}
 
   /** Streams with an orchestrator run in THIS process — reconcile() must
    *  not touch their running phase (orphaned vs live distinction). */
@@ -437,6 +443,7 @@ export class DownloadOrchestrator {
         signal: controller.signal,
         lookahead: kind === "proxy" ? 3 : 4,
         indexPath,
+        ffmpegPath: this.tools.ffmpeg,
         onProgress: (p) => {
           this.noteVideoProgress(part, p, opts.quality);
           if (kind === "proxy") {
@@ -724,7 +731,8 @@ export class DownloadOrchestrator {
             signal: opts.signal ?? undefined,
             resumeSec,
             indexPath,
-            onProgress: (p) => {
+            ffmpegPath: this.tools.ffmpeg,
+          onProgress: (p) => {
               const part = rt.get("proxy")!;
               this.noteVideoProgress(part, p, target);
               state.proxyFrontierSec = p.downloadedSec;
@@ -777,6 +785,7 @@ export class DownloadOrchestrator {
         signal: opts.signal ?? undefined,
         resumeSec: proxyResume,
         indexPath: proxyIndexPath,
+        ffmpegPath: this.tools.ffmpeg,
         onProgress: (p) => {
           const part = rt.get("proxy")!;
           this.noteVideoProgress(part, p, proxy);
@@ -823,6 +832,7 @@ export class DownloadOrchestrator {
           lookahead: 4,
           resumeSec: hqResume,
           indexPath: hqIndexPath,
+          ffmpegPath: this.tools.ffmpeg,
           onProgress: (p) => {
             const part = rt.get("hq")!;
             this.noteVideoProgress(part, p, hq);
@@ -914,7 +924,7 @@ export class DownloadOrchestrator {
   /** Actual media seconds on disk (ffprobe) — the resume base. 0 on any
    *  failure (missing/corrupt file → fresh download). */
   private async fileSeconds(path: string): Promise<number> {
-    const cmd = new Deno.Command("ffprobe", {
+    const cmd = new Deno.Command(this.tools.ffprobe, {
       args: ["-v", "quiet", "-print_format", "json", "-show_format", path],
       stdout: "piped", stderr: "null",
     });
@@ -944,7 +954,7 @@ export class DownloadOrchestrator {
     if (now - lastMuxAt.t < 20_000) return state.proxyMp4 ?? state.hqMp4;
     lastMuxAt.t = now;
     const mp4 = mp4Twin(tsPath);
-    const ok = await remuxToMp4(tsPath, mp4);
+    const ok = await remuxToMp4(tsPath, mp4, { ffmpegPath: this.tools.ffmpeg });
     return ok ? mp4 : null;
   }
 

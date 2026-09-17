@@ -8,15 +8,16 @@
 import { join } from "node:path";
 
 export interface RemuxOptions {
-  ffmpegPath?: string | undefined;
+  /** Resolved by resolveToolPaths — never a bare name in a packaged build. */
+  ffmpegPath: string;
 }
 
 /** Remux src.ts → dst.mp4 (stream copy + faststart). Non-throwing: returns
  *  true when the mp4 was written, false when ffmpeg failed — the .ts stays
  *  the source of truth either way. */
-export async function remuxToMp4(srcTs: string, dstMp4: string, opts: RemuxOptions = {}): Promise<boolean> {
+export async function remuxToMp4(srcTs: string, dstMp4: string, opts: RemuxOptions): Promise<boolean> {
   const tmp = `${dstMp4}.part`;
-  const cmd = new Deno.Command(opts.ffmpegPath ?? "ffmpeg", {
+  const cmd = new Deno.Command(opts.ffmpegPath, {
     args: ["-y", "-i", srcTs, "-c", "copy", "-movflags", "+faststart", "-f", "mp4", tmp],
     stdout: "null", stderr: "null",
   });

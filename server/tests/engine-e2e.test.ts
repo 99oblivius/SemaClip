@@ -36,6 +36,7 @@ Deno.test({
       vadModelFile: "ggml-silero-v5.1.2.bin",
     },
     ffmpegPath: "ffmpeg",
+    ffprobePath: "ffprobe",
   });
   engine.attachBus(bus);
 

@@ -18,6 +18,7 @@ import { TwitchDlAdapter } from "@/adapters/outbound/vod/mod.ts";
 import { DownloadOrchestrator } from "@/adapters/outbound/vod/download-orchestrator.ts";
 import { MediaActionsUseCase } from "@/application/use-cases/MediaActions.ts";
 import { FFmpegAdapter } from "@/adapters/outbound/ffmpeg/mod.ts";
+import type { ToolPaths } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
 import {
   ImportStreamByFileUseCase,
   ImportStreamByUrlUseCase,
@@ -77,6 +78,8 @@ export interface AppConfig {
   exportDir: string;
   engineBinaryPath: string;
   gpuDevice: number | null;
+  /** Resolved ffmpeg/ffprobe (bundled or PATH). See ffmpeg/tool-paths.ts. */
+  tools: ToolPaths;
   /** When set, the in-process TS detection engine is used with these native paths. */
   detectionWhisper?: WhisperPaths | undefined;
 }
@@ -104,11 +107,15 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
   const metadataRepo = new SqliteStreamMetadataRepository(db);
   const streamStorage = new DenoStreamStorage(config.dataDir);
   const vodDownloader = new TwitchDlAdapter();
-  const ffmpeg = new FFmpegAdapter();
+  const ffmpeg = new FFmpegAdapter(config.tools.ffmpeg, config.tools.ffprobe);
   // v2 engine: in-process TS detection + bundled native runtimes (whisper.cpp).
   // The old Python subprocess adapter remains for the pre-bundling dev path.
   const engine = config.detectionWhisper
-    ? new DetectionEngineAdapter({ whisper: config.detectionWhisper, ffmpegPath: "ffmpeg" })
+    ? new DetectionEngineAdapter({
+      whisper: config.detectionWhisper,
+      ffmpegPath: config.tools.ffmpeg,
+      ffprobePath: config.tools.ffprobe,
+    })
     : new PythonEngineAdapter(config.engineBinaryPath, bus, config.gpuDevice);
   if (config.detectionWhisper) {
     (engine as DetectionEngineAdapter).attachBus(bus);
@@ -116,7 +123,7 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
 
   // Use cases
   const importByFile = new ImportStreamByFileUseCase(streamRepo, fs, ffmpeg);
-  const downloadOrchestrator = new DownloadOrchestrator(metadataRepo);
+  const downloadOrchestrator = new DownloadOrchestrator(metadataRepo, config.tools);
   const mediaActions = new MediaActionsUseCase(streamRepo, metadataRepo, fs, downloadOrchestrator, config.cacheDir);
   const importByUrl = new ImportStreamByUrlUseCase(streamRepo, vodDownloader, fs, bus, config.cacheDir, downloadOrchestrator);
   const deleteStream = new DeleteStreamUseCase(streamRepo, jobRepo, metadataRepo, streamStorage);
@@ -215,6 +222,7 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
       settings,
       presets,
       vod: vodDownloader,
+      tools: config.tools,
       downloadState: (id: string) => downloadOrchestrator.getState(id),
       downloadRevision: (id: string) => id === "__global__" ? downloadOrchestrator.globalRev : downloadOrchestrator.revision(id),
       touchDownload: (id: string) => downloadOrchestrator.touch(id),

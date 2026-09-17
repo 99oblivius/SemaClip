@@ -32,7 +32,8 @@ export interface Fmp4DownloadOptions {
   /** Resume: seconds already muxed into the output file. Chunks fully below
    *  this point are skipped. */
   resumeSec?: number;
-  ffmpegPath?: string | undefined;
+  /** Resolved by resolveToolPaths — never a bare name in a packaged build. */
+  ffmpegPath: string;
   /**
    * Sidecar path for the fragment index. Written INCREMENTALLY as fragments
    * complete — the media route reads it to clamp Range responses to a
@@ -152,7 +153,7 @@ export async function downloadFmp4(
     void indexWriter?.flush();
   };
 
-  const ffmpeg = new Deno.Command(opts.ffmpegPath ?? "ffmpeg", {
+  const ffmpeg = new Deno.Command(opts.ffmpegPath, {
     args: [
       "-hide_banner", "-loglevel", "error",
       "-f", "mpegts", "-i", "pipe:0",

@@ -1,5 +1,6 @@
 import { createApp } from "@/adapters/inbound/http/routes.ts";
 import { buildContainer } from "@/composition/container.ts";
+import { resolveToolPaths } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
 import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
 const PORT = parseInt(Deno.env.get("PORT") ?? "5174", 10);
 /** Platform app-data default; SEMACLIP_DATA overrides (isolated test runs). */
@@ -18,6 +19,8 @@ const ENGINE_BINARY = Deno.env.get("SEMACLIP_ENGINE") ?? "semaclip-engine";
  * engine binary (Python mock) when bundling hasn't happened — but logs it.
  */
 const nativeRoot = new URL("../native/whisper/", import.meta.url);
+/** The native/ ROOT (tools live alongside whisper/, not inside it). */
+const nativeBase = new URL("../native/", import.meta.url);
 const nativeSubdir = Deno.build.os === "windows" ? "win-x64" : "linux-x64";
 let detectionWhisper: WhisperPaths | undefined;
 try {
@@ -36,6 +39,11 @@ try {
   console.log("Engine: external binary mode (SEMACLIP_ENGINE) — native whisper.cpp tree not found");
 }
 
+// ffmpeg/ffprobe: the packaged app bundles its own; a dev run falls back to
+// PATH. Resolved before the container because adapters take the path at
+// construction time.
+const tools = await resolveToolPaths(nativeBase);
+
 const container = await buildContainer({
   dbPath: DB_PATH,
   dataDir: DATA_DIR,
@@ -44,6 +52,7 @@ const container = await buildContainer({
   engineBinaryPath: ENGINE_BINARY,
   gpuDevice: null,
   detectionWhisper,
+  tools,
 });
 
 const app = createApp(container.httpDeps, container.bus);
@@ -115,3 +124,4 @@ console.log(`  DB:       ${DB_PATH}`);
 console.log(`  Cache:    ${CACHE_DIR}`);
 console.log(`  Export:   ${EXPORT_DIR}`);
 console.log(`  Engine:   ${ENGINE_BINARY}`);
+console.log(`  Tools:    ffmpeg=${tools.ffmpeg} (${tools.source})`);

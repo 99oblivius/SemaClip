@@ -1,3 +1,4 @@
+import type { ToolPaths } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
 import { Hono } from "hono";
 import { wsHandler } from "@/adapters/inbound/ws/handler.ts";
 import type {
@@ -88,6 +89,8 @@ export interface HttpDeps {
   settings: SettingsUseCase;
   presets: SqliteExportPresetRepository;
   vod: VodDownloadPort;
+  /** Resolved ffmpeg/ffprobe (bundled in the packaged app, else PATH). */
+  tools: ToolPaths;
   downloadState: (streamId: string) => Promise<DownloadStateType>;
   downloadRevision: (streamId: string) => number;
   /** Record a view change that has no state write (artifact deletion). */
@@ -591,7 +594,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     if (durationSec !== null) args.unshift("-t", String(durationSec));
     args.unshift("-i", vodPath);
 
-    const cmd = new Deno.Command("ffmpeg", { args, stdout: "piped", stderr: "null" });
+    const cmd = new Deno.Command(deps.tools.ffmpeg, { args, stdout: "piped", stderr: "null" });
     const proc = cmd.spawn();
     const reader = proc.stdout.getReader();
 
@@ -697,7 +700,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
 
           // Media duration is needed both for cache staleness and for the
           // waveform extent — probe it before deciding to trust the cache.
-          const probe = new Deno.Command("ffprobe", {
+          const probe = new Deno.Command(deps.tools.ffprobe, {
             args: ["-v", "quiet", "-print_format", "json", "-show_format", mediaPath],
             stdout: "piped", stderr: "piped",
           });

@@ -71,6 +71,7 @@ Deno.test("downloadFmp4: muxes a real HLS VOD into one playable fMP4", async () 
     const progress: number[] = [];
     try {
       const index = await downloadFmp4(`${srv.url}/${playlistPath.split("/").pop()}`, out, {
+        ffmpegPath: "ffmpeg",
         onProgress: (p) => progress.push(p.percent),
       });
       // The index must describe the file ffmpeg actually produced.
@@ -118,6 +119,7 @@ Deno.test("downloadFmp4: cancel keeps a partial file with only COMPLETE fragment
     try {
       const dl = downloadFmp4(`${srv.url}/${playlistPath.split("/").pop()}`, out, {
         signal: controller.signal,
+        ffmpegPath: "ffmpeg",
         onProgress: (p) => {
           if (p.percent > 0.2) controller.abort();
         },
