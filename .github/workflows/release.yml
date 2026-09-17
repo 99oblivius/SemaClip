@@ -589,9 +589,9 @@ jobs:
           printf '%s\n' "$sha" > "work/$NAME.sha256"
 
           # A patch that applies cleanly can still produce a non-bootable binary,
-          # which users only discover via a failed launch + rollback. bspatch is
-          # the cheap real check; verify re-runs it from the published copies.
-          bspatch "work/old-$PREV.so" "work/patched.so" "work/$NAME"
+          # which users only discover via a failed launch + rollback. Applying it
+          # is the cheap real check; verify re-runs it from the published copies.
+          qbspatch "work/old-$PREV.so" "work/patched.so" "work/$NAME"
           a="$(sha256sum "work/patched.so" | awk '{print $1}')"
           b="$(sha256sum "work/new-$V.so" | awk '{print $1}')"
           if [ "$a" != "$b" ]; then
@@ -773,8 +773,11 @@ jobs:
             exit 0
           fi
 
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends bsdiff  # bspatch only
+          # qbspatch, matching the generator. Using the apt `bsdiff` package here
+          # would mean the patch is produced by one implementation and verified by
+          # another, so a format mismatch could pass verification or fail it
+          # spuriously. One crate on both sides.
+          cargo install qbsdiff --features cmd --locked
 
           python3 -c 'import json;m=json.load(open("back/live-latest.json"));[print(k,v["name"],v["sha256"]) for k,v in m["patches"].items()]' \
             > /tmp/patches.txt
@@ -805,7 +808,7 @@ jobs:
             target="back/SemaClip-$V-linux-x64-runtime.so"
             [ -f "$target" ] || { echo "::error::missing $target"; exit 1; }
 
-            bspatch "$old" back/patched.so "back/$name"
+            qbspatch "$old" back/patched.so "back/$name"
             a="$(sha256sum back/patched.so | awk '{print $1}')"
             b="$(sha256sum "$target" | awk '{print $1}')"
             [ "$a" = "$b" ] || { echo "::error::patch $name does not reproduce $V ($a != $b)"; exit 1; }
@@ -825,7 +828,7 @@ jobs:
             echo
             echo "Verified: release assets hash-match their sidecars, the live manifest"
             echo "parses and names this version, and every listed patch applies (checked"
-            echo "by bspatch against the previous published dylib)."
+            echo "by qbspatch against the previous published dylib)."
             echo
             echo "NOT verified here: the patched app actually booting (no display in CI)."
             echo "Windows ships as a zip, not an installer, and Windows auto-update does"
