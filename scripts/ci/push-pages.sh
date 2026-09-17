@@ -2,7 +2,7 @@
 # Publish files to the GitHub Pages branch that serves the update manifests.
 #
 # Usage: scripts/ci/push-pages.sh <owner/repo> <token> <src> <dest-in-branch> [<src> <dest> ...]
-#   e.g. scripts/ci/push-pages.sh 99oblivius/SemaClip "$GITHUB_TOKEN" \
+#   e.g. scripts/ci/push-pages.sh 99oblivius/SemaClip "$GH_TOKEN" \
 #          dist/nightly/latest.json nightly/latest.json \
 #          work/patch-x.bin nightly/patch-x.bin
 #

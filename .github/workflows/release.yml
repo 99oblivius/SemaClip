@@ -431,7 +431,7 @@ jobs:
           # GitHub Pages serves the `releases` branch, and the updater fetches
           # <baseUrl>/latest.json — so the manifest lands at nightly/latest.json.
           # Plain git push; no third-party Pages action.
-          bash scripts/ci/push-pages.sh "$GITHUB_REPOSITORY" "$GITHUB_TOKEN" \
+          bash scripts/ci/push-pages.sh "$GITHUB_REPOSITORY" "$GH_TOKEN" \
             "dist/${{ env.CHANNEL_DIR }}/latest.json" \
             "${{ env.CHANNEL_DIR }}/latest.json"
 
@@ -672,7 +672,7 @@ jobs:
           # Manifest and patch go up in ONE commit: a manifest that names a patch
           # which 404s is refused by the runtime, so the two must never be
           # observable separately.
-          bash scripts/ci/push-pages.sh "$GITHUB_REPOSITORY" "$GITHUB_TOKEN" \
+          bash scripts/ci/push-pages.sh "$GITHUB_REPOSITORY" "$GH_TOKEN" \
             "dist/latest.json" \
             "${{ env.CHANNEL_DIR }}/latest.json" \
             "work/${{ steps.diff.outputs.name }}" \
