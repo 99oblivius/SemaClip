@@ -172,17 +172,21 @@ Never re-serialize a signed manifest after signing it. `sign-manifest.py`
 serializes once and emits the exact string it signed. Regenerating the JSON and
 patching `signed` produces a signature no client accepts.
 
-### Adding a bsdiff patch afterwards
+### Adding a patch afterwards
 
 ```sh
 V="26.149-nightly.43"; PREV="26.148-nightly.42"
 gh release download "v$PREV" --pattern '*-linux-x64-runtime.so' --dir work/old
 gh release download "v$V"    --pattern '*-linux-x64-runtime.so' --dir work/new
-bsdiff "work/old/SemaClip-$PREV-linux-x64-runtime.so" \
-       "work/new/SemaClip-$V-linux-x64-runtime.so" "work/patch-$PREV-to-$V.bin"
+# qbsdiff, NOT classic bsdiff: same bsdiff4 format (it is the crate the Deno
+# runtime itself uses to APPLY patches), and memory-saving. Measured peaks on a
+# 560MB dylib pair: 3.29GB typical / 3.84GB worst case, against classic bsdiff's
+# ~9.8GB. -P disables the parallel search so memory stays predictable.
+qbsdiff -P "work/old/SemaClip-$PREV-linux-x64-runtime.so" \
+           "work/new/SemaClip-$V-linux-x64-runtime.so" "work/patch-$PREV-to-$V.bin"
 
 # prove it before publishing: a patch can apply cleanly and still be wrong
-bspatch "work/old/SemaClip-$PREV-linux-x64-runtime.so" /tmp/patched.so "work/patch-$PREV-to-$V.bin"
+qbspatch "work/old/SemaClip-$PREV-linux-x64-runtime.so" /tmp/patched.so "work/patch-$PREV-to-$V.bin"
 sha256sum /tmp/patched.so "work/new/SemaClip-$V-linux-x64-runtime.so"   # must match
 
 # merge into the LIVE manifest, not a stale local copy
@@ -195,8 +199,15 @@ bash scripts/ci/push-pages.sh 99oblivius/SemaClip "$GH_TOKEN" \
   dist/latest.json nightly/latest.json "work/patch-$PREV-to-$V.bin" "nightly/patch-$PREV-to-$V.bin"
 ```
 
-**`bsdiff` is not installed on this machine and is not in the Arch repos.** It is
-only needed for this step; CI installs it, or use the `bsdiff4` Python package.
+**Only needed for this step.** Install the generator with:
+
+```sh
+cargo install qbsdiff --features cmd
+```
+
+The `--features cmd` is required — the binaries sit behind a non-default feature,
+so a plain `cargo install qbsdiff` succeeds and produces **no binaries at all**,
+which looks like it worked until the patch step fails.
 
 ## What is deliberately not working
 
@@ -221,13 +232,14 @@ pending detail.
   are unsigned, so SmartScreen warns either way.
 - **`deno desktop` is experimental.** That is why release jobs pin Deno exactly
   (`v2.9.6`) while `check.yml` deliberately floats on `v2.9.x` as early warning.
-- **bsdiff memory.** bsdiff's footprint is roughly **17x the input size**. The
-  runtime dylib is ~577MB after the per-platform exclusions, so one `bsdiff` needs
-  ~9.8GB+. `ubuntu-latest` has 7GB, where the failure is an OOM kill deep into the
-  run rather than a clean error. Consequently the workflow's `patch` job is **off
-  by default**; enabling it needs a runner with ≥16GB via the
-  `SEMACLIP_PATCH_RUNNER` repository variable, and the job fails fast with the
-  arithmetic if the RAM is not there. Until then, patches are a manual step.
+- **Patch generation is no longer gated.** It originally was, because classic
+  `bsdiff` needs roughly **17x the input size** (~9.8GB for the ~577MB runtime
+  dylib) against `ubuntu-latest`'s 7GB, where the failure is an OOM kill deep into
+  the run rather than a clean error. That is solved: the generator is now
+  **`qbsdiff`**, the same crate the Deno runtime uses to *apply* patches, measured
+  at **3.3GB typical / 3.8GB worst case** on a 560MB pair. The `patch` job runs by
+  default; `SEMACLIP_PATCH_RUNNER` still overrides the runner if wanted, and the
+  preflight fails fast below 6GB rather than OOMing.
 - **The payload is huge.** ~277MB `.AppImage`, ~577MB runtime dylib, and the
   Windows zip carries its own ~800MB dylib. That is the bundled whisper models,
   whisper binaries and static ffmpeg/ffprobe, not the app. Patches exist precisely
@@ -287,7 +299,7 @@ manifest) rather than left in place.
 | `version` | runs `version.sh --nightly`, asserts tag/version agreement and that both version files carry it |
 | `build` | matrix `linux-x64` + `win-x64` on `ubuntu-latest`: frontend build, native fetch, `build-desktop.ts`, sidecars, runtime dylib |
 | `publish` | verifies hashes, creates the prerelease, writes `latest.json` (empty `patches`), pushes Pages |
-| `patch` | **disabled by default** — bsdiff from the previous nightly, merges the entry, republishes manifest + patch in one commit |
+| `patch` | **on by default** — qbsdiff delta from the previous nightly, merges the entry, republishes manifest + patch in one commit |
 | `verify` | downloads the release assets back and hashes them; polls the live manifest; runs `bspatch` for every listed patch and compares to the target dylib |
 
 `verify` is a real check, not a smoke test: it fetches over the same public URLs a

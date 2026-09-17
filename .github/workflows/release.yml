@@ -464,39 +464,50 @@ jobs:
   # ── patch ──────────────────────────────────────────────────────────────────
   patch:
     needs: [version, publish]
-    # OFF BY DEFAULT. Enabling it needs a runner with >= 16GB RAM — see the
-    # preflight step and the RAM note in docs/RELEASING.md. Turn it on with the
-    # repository variable SEMACLIP_ENABLE_PATCHES=true and point
-    # SEMACLIP_PATCH_RUNNER at a large runner label. `verify` handles the skip.
-    if: github.repository_owner == '99oblivius' && vars.SEMACLIP_ENABLE_PATCHES == 'true'
+    # ON now: the patch generator is qbsdiff, not bsdiff. qbsdiff is the same
+    # crate the Deno runtime uses to APPLY patches (so the format is compatible by
+    # construction) and it is memory-saving rather than bsdiff's ~17x input.
+    # MEASURED on a 560MB dylib pair: 3.29GB peak for a typical version delta,
+    # 3.84GB for two wholly unrelated 560MB files — inside ubuntu-latest's ~7GB.
+    # Still overridable with SEMACLIP_PATCH_RUNNER if a bigger runner is wanted.
+    if: github.repository_owner == '99oblivius' && vars.SEMACLIP_ENABLE_PATCHES != 'false'
     runs-on: ${{ vars.SEMACLIP_PATCH_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Preflight — RAM for bsdiff
+      - name: Preflight — RAM for the patch generator
         run: |
           set -euo pipefail
-          # bsdiff's memory use is roughly 17x the input. The runtime dylib is
-          # ~560MB, so one naive bsdiff needs ~9.5GB+. ubuntu-latest has 7GB, and
-          # the failure mode is an OOM kill deep into the run, not a clean error.
+          # Measured qbsdiff peak on a 560MB dylib pair: 3.29GB (typical delta),
+          # 3.84GB (two unrelated files — the worst case). Require 6GB so there is
+          # headroom for the rest of the job. An OOM here would kill the run deep
+          # in, not fail cleanly, so checking up front is worth the two lines.
           total_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
           total_gb=$(( total_kb / 1024 / 1024 ))
           echo "runner RAM: ~${total_gb}GB"
-          if [ "$total_gb" -lt 14 ]; then
-            echo "::error::bsdiff on a ~560MB dylib needs ~9.5GB+; this runner has ~${total_gb}GB. Set the SEMACLIP_PATCH_RUNNER repository variable to a >= 16GB runner label, or lower the payload."
+          if [ "$total_gb" -lt 6 ]; then
+            echo "::error::qbsdiff peaks at ~3.8GB on a 560MB dylib pair; this runner has ~${total_gb}GB. Set SEMACLIP_PATCH_RUNNER to a runner with >= 6GB."
             exit 1
           fi
 
-      - name: Install bsdiff
+      - name: Install qbsdiff
         run: |
           set -euo pipefail
-          # bsdiff emits the bsdiff4 format that qbsdiff reads; bspatch (same
-          # package) is used to prove the patch applies. Absent on the dev machine
-          # and not in the Arch repos, so this only ever runs in CI.
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends bsdiff
+          # qbsdiff/qbspatch, NOT the classic bsdiff. Two reasons:
+          #   1. MEMORY: classic bsdiff needs ~17x the input (~9.5GB for a 560MB
+          #      dylib) which OOMs a standard runner; qbsdiff is memory-saving
+          #      (measured 3.3-3.8GB, see the preflight above).
+          #   2. FORMAT: qbsdiff is the crate the Deno runtime itself uses to apply
+          #      patches, so compatibility is by construction.
+          # The binaries sit behind a NON-DEFAULT "cmd" feature — without
+          # --features cmd the install succeeds and produces no binaries at all,
+          # which would look like a working step and fail later at the patch.
+          # Verified locally: qbspatch reproduces the target byte-identically.
+          cargo install qbsdiff --features cmd --locked
+          qbsdiff --help >/dev/null
+          qbspatch --help >/dev/null
 
       - name: Find the previous nightly
         id: prev
@@ -559,7 +570,7 @@ jobs:
           ls -la work
           echo "old=$(wc -c < "work/old-$PREV.so") new=$(wc -c < "work/new-$V.so") bytes"
 
-      - name: Generate the bsdiff patch
+      - name: Generate the patch
         id: diff
         if: steps.prev.outputs.found == 'true'
         run: |
@@ -568,8 +579,10 @@ jobs:
           PREV="${{ steps.prev.outputs.version }}"
           NAME="patch-${PREV}-to-${V}.bin"
 
-          # bsdiff <old> <new> <out> — see the RAM preflight above.
-          bsdiff "work/old-$PREV.so" "work/new-$V.so" "work/$NAME"
+          # qbsdiff <old> <new> <out>, bsdiff4-compatible — see the RAM preflight
+          # above. -P (no parallel search) keeps memory predictable; the measured
+          # 3.3-3.8GB figures were taken without it.
+          qbsdiff -P "work/old-$PREV.so" "work/new-$V.so" "work/$NAME"
 
           sha="$(sha256sum "work/$NAME" | awk '{print $1}')"
           echo "patch $NAME sha256=$sha size=$(wc -c < "work/$NAME")"
@@ -761,7 +774,7 @@ jobs:
           fi
 
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends bsdiff
+          sudo apt-get install -y --no-install-recommends bsdiff  # bspatch only
 
           python3 -c 'import json;m=json.load(open("back/live-latest.json"));[print(k,v["name"],v["sha256"]) for k,v in m["patches"].items()]' \
             > /tmp/patches.txt
@@ -779,7 +792,7 @@ jobs:
             # Prove it applies: diff $frm's published dylib and confirm the result
             # is byte-identical to this release's dylib. This is the real check —
             # a patch can apply cleanly and still yield a dead binary, and this
-            # catches the bsdiff-format/reproducibility class without a display.
+            # catches the patch-format/reproducibility class without a display.
             # Booting the patched GUI app is a manual step: CI has no webkit2gtk
             # and no display, so it is NOT claimed here. See docs/RELEASING.md.
             olddir="back/old-$frm"
