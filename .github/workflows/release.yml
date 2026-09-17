@@ -473,17 +473,47 @@ jobs:
             echo "::warning::no portable zip in dist; the Windows artifact entry is omitted (Windows clients stay put)"
           fi
 
-      - name: Publish the manifest to the releases branch
+      - name: Generate the landing page
+        run: |
+          set -euo pipefail
+          V="${{ needs.version.outputs.version }}"
+          RELEASE_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/v$V"
+          mkdir -p landing
+          # The asset list is built from what is ACTUALLY in dist, so the page can
+          # never advertise a file that was not published. NOTE the if/fi form: with
+          # `set -e`, a failing `[ -f ] && specs+=(...)` returns non-zero and aborts
+          # the whole job, so an OS we do not build for would fail the release.
+          specs=()
+          if [ -f "dist/SemaClip-$V-win-x64.msi" ]; then
+            specs+=("SemaClip-$V-win-x64.msi:windows:x64:Installer (.msi)")
+          fi
+          if [ -f "dist/SemaClip-$V-win-x64-portable.zip" ]; then
+            specs+=("SemaClip-$V-win-x64-portable.zip:windows:x64:Portable (.zip)")
+          fi
+          if [ -f "dist/SemaClip.AppImage" ]; then
+            specs+=("SemaClip.AppImage:linux:x64:AppImage")
+          fi
+          # landing.py drops the runtime .so/.dll: they are the updater's patch
+          # ingredients, not something a user can do anything with.
+          python3 scripts/ci/landing.py landing/index.html "$V" "$RELEASE_URL" "${specs[@]}"
+
+      - name: Publish the manifest and the landing page to the releases branch
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # GitHub Pages serves the `releases` branch, and the updater fetches
           # <baseUrl>/latest.json — so the manifest lands at nightly/latest.json.
-          # Plain git push; no third-party Pages action.
+          # The page goes to the branch ROOT (index.html) because every SemaClip
+          # release is a PRERELEASE: GitHub's /releases/latest resolves to the
+          # releases LIST, not to a tag, so no tag-free download URL exists and the
+          # page must carry the concrete version. Both files ride ONE commit via
+          # push-pages.sh, which preserves the patch files the live manifest still
+          # references. Plain git push; no third-party Pages action.
           bash scripts/ci/push-pages.sh "$GITHUB_REPOSITORY" "$GH_TOKEN" \
             "dist/${{ env.CHANNEL_DIR }}/latest.json" \
-            "${{ env.CHANNEL_DIR }}/latest.json"
+            "${{ env.CHANNEL_DIR }}/latest.json" \
+            "landing/index.html" "index.html"
 
       # ── Ed25519 manifest signing: WIRED BUT NOT ACTIVE ──────────────────────
       # No key exists yet, and SEMACLIP_UPDATE_PUBKEY is unset, so today's clients
@@ -828,6 +858,52 @@ jobs:
 
           python3 scripts/ci/manifest.py check \
             back/live-latest.json "${{ needs.version.outputs.version }}"
+
+      - name: Verify the landing page and every download link it offers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          V="${{ needs.version.outputs.version }}"
+          PAGE="${{ env.MANIFEST_BASE_URL }}/index.html"
+
+          # Poll like the manifest check: Pages publishes asynchronously.
+          ok=no
+          for _ in $(seq 1 20); do
+            if curl -sSfL --max-time 30 "$PAGE" -o back/live-index.html; then ok=yes; break; fi
+            echo "landing page not reachable yet; retrying in 15s ($PAGE)"
+            sleep 15
+          done
+          if [ "$ok" != yes ]; then
+            echo "::error::$PAGE did not become reachable within 5 minutes"
+            exit 1
+          fi
+
+          # The page must name THIS version and must not still be advertising an
+          # older one — a stale page is how a user downloads the wrong build.
+          grep -qF "nightly $V" back/live-index.html \
+            || { echo "::error::landing page does not mention nightly $V"; exit 1; }
+          grep -qF "pre-alpha" back/live-index.html \
+            || { echo "::error::landing page lost the pre-alpha notice"; exit 1; }
+
+          # Every download link on the page must resolve. This is the check that
+          # would have caught a page generated against assets that were never
+          # uploaded, which is the only way this page can lie.
+          mapfile -t LINKS < <(grep -oE 'https://github\.com/[^"]+/releases/download/[^"]+' back/live-index.html | sort -u)
+          if [ "${#LINKS[@]}" -eq 0 ]; then
+            echo "::error::landing page offers no download links"; exit 1
+          fi
+          fail=0
+          for url in "${LINKS[@]}"; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -L --max-time 60 -r 0-0 "$url" || true)"
+            # 206 for a satisfied range request, 200 if the server ignored Range.
+            case "$code" in
+              200|206) echo "ok  $code  $url" ;;
+              *) echo "::error::download link returned $code: $url"; fail=1 ;;
+            esac
+          done
+          [ "$fail" -eq 0 ] || exit 1
+          echo "landing page verified: ${#LINKS[@]} download link(s) resolve, version $V present"
 
       - name: Verify every published patch applies
         run: |
