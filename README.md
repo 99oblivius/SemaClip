@@ -6,7 +6,29 @@ SemaClip is a local-first desktop application that finds clip-worthy moments in 
 
 ## Status
 
-**v2 architecture — pre-implementation.** The v1 codebase (Deno server + SvelteKit frontend) is a real, working skeleton being completed against the v2 architecture; the v1 ML engine was a mock and is being replaced. Current state and phase gates: [ROADMAP.md](ROADMAP.md). Functional design: [ARCHITECTURE.md](ARCHITECTURE.md). The superseded v1 design docs are archived under [docs/archive/v1/](docs/archive/v1/).
+**Pre-alpha.** The app runs end to end — import a VOD, download it (chat + a scrub-able preview + full quality), review detected moments, edit captions, export — but features are missing and things break. The UI says so in its header bar. Current state and phase gates: [ROADMAP.md](ROADMAP.md). Functional design: [ARCHITECTURE.md](ARCHITECTURE.md). Distribution/release plan: [docs/DISTRIBUTION-PLAN.md](docs/DISTRIBUTION-PLAN.md). Superseded v1 design docs are archived under [docs/archive/v1/](docs/archive/v1/).
+
+Versioning is `v{yy}.{patch}` (e.g. `v26.148`), where patch counts commits since Jan 1. The two-digit year is forced by Windows: an MSI ProductVersion packs as major(0-255).minor(0-255).build(0-65535), so a full CalVer year is unencodable. See [docs/RELEASING.md](docs/RELEASING.md).
+
+## Getting started
+
+Requires Deno 2.9+ and ffmpeg on PATH for development (the packaged app bundles its own).
+
+```sh
+./scripts/fetch-native.sh   # pinned whisper.cpp + models + static ffmpeg/ffprobe
+cd frontend && npm ci && npm run build
+cd ../server && deno task start
+```
+
+Then open <http://localhost:5174>.
+
+To build the desktop app for one platform (cross-compiles, so a Linux host can
+produce the Windows `.msi`):
+
+```sh
+cd server && deno task desktop
+```
+
 
 ## Design principles
 
@@ -17,7 +39,7 @@ SemaClip is a local-first desktop application that finds clip-worthy moments in 
 
 ## Stack
 
-Deno Desktop (CEF shell, cross-compiled `.msi`/`.AppImage`, built-in auto-update) · TypeScript backend · Svelte 5 + SvelteKit + Tailwind v4 · FFmpeg · whisper.cpp · llama.cpp · node:sqlite + Drizzle.
+`deno desktop` (cross-compiled `.msi`/`.AppImage`, built-in auto-update) · TypeScript backend · Svelte 5 + SvelteKit + Tailwind v4 · bundled static FFmpeg · whisper.cpp · node:sqlite + Drizzle.
 
 ## Layout
 
