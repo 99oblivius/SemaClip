@@ -504,8 +504,13 @@ jobs:
           # The binaries sit behind a NON-DEFAULT "cmd" feature — without
           # --features cmd the install succeeds and produces no binaries at all,
           # which would look like a working step and fail later at the patch.
-          # Verified locally: qbspatch reproduces the target byte-identically.
-          cargo install qbsdiff --features cmd --locked
+          # NO --locked: measured on a genuinely fresh cargo cache, --locked FAILS
+          # with "failed to select a version for qbsdiff ... all possible versions
+          # conflict" -- the crate's shipped Cargo.lock is self-inconsistent. CI has
+          # a cold cache, so --locked would have broken this job on its first real
+          # run while looking perfectly reasonable. Verified locally: qbspatch
+          # reproduces the target byte-identically.
+          cargo install qbsdiff --features cmd
           # ~/.cargo/bin is NOT guaranteed to be on PATH on a runner, and a
           # missing path here would surface much later as "qbsdiff: command not
           # found" inside the patch step. Put it on PATH for later steps and
@@ -784,7 +789,7 @@ jobs:
           # would mean the patch is produced by one implementation and verified by
           # another, so a format mismatch could pass verification or fail it
           # spuriously. One crate on both sides.
-          cargo install qbsdiff --features cmd --locked
+          cargo install qbsdiff --features cmd
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.cargo/bin:$PATH"
           command -v qbspatch
