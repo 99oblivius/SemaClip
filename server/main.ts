@@ -2,6 +2,7 @@ import { createApp } from "@/adapters/inbound/http/routes.ts";
 import { buildContainer } from "@/composition/container.ts";
 import { resolveToolPaths } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
 import { reexecForLinuxWebview } from "@/adapters/outbound/platform/linux-webview.ts";
+import { startAutoUpdate } from "@/adapters/outbound/platform/auto-update.ts";
 import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
 
 // MUST run before anything else on Linux: the GTK/WebKit backend initialises
@@ -133,3 +134,7 @@ console.log(`  Cache:    ${CACHE_DIR}`);
 console.log(`  Export:   ${EXPORT_DIR}`);
 console.log(`  Engine:   ${ENGINE_BINARY}`);
 console.log(`  Tools:    ffmpeg=${tools.ffmpeg} (${tools.source})`);
+
+// Update check. Inert under `deno run` (no baked-in version) and when no
+// release URL is configured, so this changes nothing in development.
+startAutoUpdate();

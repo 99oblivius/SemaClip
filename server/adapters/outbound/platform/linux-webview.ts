@@ -36,6 +36,15 @@
  *
  * The marker variable makes the loop impossible even if the child's env is
  * stripped by something in between.
+ *
+ * DESKTOP RUNTIME ONLY. This is guarded on DENO_SERVE_ADDRESS, which the desktop
+ * runtime sets and `deno run` does not. That guard is load-bearing, not tidiness:
+ * Deno.args holds SCRIPT ARGS (not the entrypoint path), so under `deno run` a
+ * re-exec with `args: Deno.args` would invoke bare `deno` — which starts an
+ * interactive REPL instead of the server, and the dev server would silently stop
+ * existing. Measured: re-exec is correct in the compiled binary (Deno.execPath()
+ * IS the app there) and catastrophic under `deno run`, so the two paths must not
+ * share the spawn.
  */
 const MARKER = "SEMACLIP_WEBVIEW_REEXEC";
 const FIX_VAR = "WEBKIT_DISABLE_DMABUF_RENDERER";
@@ -47,6 +56,9 @@ const FIX_VAR = "WEBKIT_DISABLE_DMABUF_RENDERER";
  */
 export async function reexecForLinuxWebview(): Promise<void> {
   if (Deno.build.os !== "linux") return;
+  // Only the packaged desktop runtime: see the note above — re-execing under
+  // `deno run` would launch a REPL, not the server.
+  if (!Deno.env.get("DENO_SERVE_ADDRESS")) return;
   if (Deno.env.get(FIX_VAR)) return;
   if (Deno.env.get(MARKER)) return;
 
