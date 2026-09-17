@@ -298,8 +298,8 @@ jobs:
             find dist -maxdepth 3 -type f | sed 's/^/  /'
             exit 1
           fi
-          sha256sum "$ART" | awk '{print $1}' > "$ART.sha256"
-          echo "artifact $ART ($(wc -c < "$ART") bytes) sha256=$(cat "$ART.sha256")"
+          ( cd "$(dirname "$ART")" && sha256sum "$(basename "$ART")" ) > "$ART.sha256"
+          echo "artifact $ART ($(wc -c < "$ART") bytes) sha256=$(awk '{print $1}' "$ART.sha256")"
 
           # Every uploaded artifact needs a sidecar, including the Windows
           # portable zip. The first real CI run failed with
@@ -308,8 +308,8 @@ jobs:
           if [ "$P" = "win-x64" ]; then
             ZIP="dist/SemaClip-$V-win-x64-portable.zip"
             [ -f "$ZIP" ] || { echo "::error::expected portable zip '$ZIP' missing"; exit 1; }
-            sha256sum "$ZIP" | awk '{print $1}' > "$ZIP.sha256"
-            echo "portable zip $ZIP sha256=$(cat "$ZIP.sha256")"
+            ( cd "$(dirname "$ZIP")" && sha256sum "$(basename "$ZIP")" ) > "$ZIP.sha256"
+            echo "portable zip $ZIP sha256=$(awk '{print $1}' "$ZIP.sha256")"
           fi
 
           # The runtime dylib (<App>.so / <App>.dll) carries the whole ~560MB
@@ -323,7 +323,7 @@ jobs:
           fi
           ext="${DYLIB##*.}"
           cp "$DYLIB" "dist/SemaClip-$V-$P-runtime.$ext"
-          sha256sum "dist/SemaClip-$V-$P-runtime.$ext" | awk '{print $1}' \
+          ( cd dist && sha256sum "SemaClip-$V-$P-runtime.$ext" ) \
             > "dist/SemaClip-$V-$P-runtime.$ext.sha256"
           echo "runtime dylib: $DYLIB -> SemaClip-$V-$P-runtime.$ext"
 
@@ -400,7 +400,7 @@ jobs:
             "dist/SemaClip-$V-win-x64.msi" \
             "dist/SemaClip-$V-win-x64-portable.zip"
           do
-            want="$(cat "$art.sha256")"
+            want="$(awk '{print $1}' "$art.sha256")"
             got="$(sha256sum "$art" | awk '{print $1}')"
             [ "$want" = "$got" ] || { echo "::error::$art hash mismatch ($want != $got)"; exit 1; }
             echo "ok $art $got"
@@ -467,7 +467,7 @@ jobs:
           if [ -f "dist/$ZIP" ]; then
             python3 scripts/ci/manifest.py artifact \
               "dist/${{ env.CHANNEL_DIR }}/latest.json" \
-              "$V" win-x64 "$ZIP" "$(cat "dist/$ZIP.sha256")" \
+              "$V" win-x64 "$ZIP" "$(awk '{print $1}' "dist/$ZIP.sha256")" \
               "https://github.com/${{ github.repository }}/releases/download/${{ needs.version.outputs.tag }}/$ZIP"
           else
             echo "::warning::no portable zip in dist; the Windows artifact entry is omitted (Windows clients stay put)"
@@ -730,7 +730,7 @@ jobs:
             "${{ needs.version.outputs.version }}" \
             "${{ steps.prev.outputs.version }}" \
             "${{ steps.diff.outputs.name }}" \
-            "$(cat "work/${{ steps.diff.outputs.name }}.sha256")"
+            "$(awk '{print $1}' "work/${{ steps.diff.outputs.name }}.sha256")"
 
           # NOTE: no Windows patch is generated, deliberately. Applying an update
           # works on macOS/Linux only — the Windows launcher downloads and stages
@@ -813,7 +813,7 @@ jobs:
               fail=1
               continue
             fi
-            want="$(cat "back/$art.sha256")"
+            want="$(awk '{print $1}' "back/$art.sha256")"
             got="$(sha256sum "back/$art" | awk '{print $1}')"
             if [ "$want" = "$got" ]; then
               echo "ok  $art $got"
@@ -830,7 +830,7 @@ jobs:
             echo "::error::release is missing SemaClip-$d or its sidecar"
             fail=1
           else
-            want="$(cat "back/SemaClip-$d.sha256")"
+            want="$(awk '{print $1}' "back/SemaClip-$d.sha256")"
             got="$(sha256sum "back/SemaClip-$d" | awk '{print $1}')"
             [ "$want" = "$got" ] && echo "ok  SemaClip-$d $got" \
               || { echo "::error::SemaClip-$d hash mismatch: sidecar=$want actual=$got"; fail=1; }
