@@ -66,8 +66,10 @@ const appImage = Deno.env.get("SEMACLIP_APPIMAGE") === "1";
 // native installer, authored by deno desktop in pure Rust and cross-compiled
 // from Linux). The version scheme is what makes this possible -- see
 // scripts/version.sh for the Windows Installer ProductVersion bounds.
+// MEASURED: the .msi write ALSO leaves the assembled app directory beside it
+// (SemaClip/ with the .exe and .dll), so a portable zip needs no second build.
 const output = platform === "win-x64"
-  ? (Deno.env.get("SEMACLIP_ZIP") === "1" ? `${out}-win-x64` : `${out}.msi`)
+  ? `${out}.msi`
   : appImage
   ? `${out}.AppImage`
   : out;
