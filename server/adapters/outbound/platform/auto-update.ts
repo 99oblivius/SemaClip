@@ -12,12 +12,12 @@
  * process is untouched; the launcher swaps the update in on the next start, and
  * rolls back automatically if the new version fails to launch.
  *
- * WHAT IT DOES NOT DO: apply on Windows. There the patch downloads and stages
- * but the launcher never swaps it in (a loaded DLL cannot be replaced in
- * place), so Windows users stay on their installed version. Deno's docs say to
- * treat Windows auto-update as unsupported; the project accepted an external
- * updater as the workaround. The status is surfaced in-app rather than hidden,
- * so a Windows user is not shown "update ready" forever with nothing happening.
+ * WHAT IT DOES NOT DO BY ITSELF: apply on Windows. Deno's launcher cannot swap a
+ * loaded DLL, so there the runtime only stages the patch and the BUNDLED SIDECAR
+ * (tools/updater) installs it while the app is closed — that is the shipped
+ * workaround, and `canApply: false` is what tells the UI to explain it. The
+ * status is surfaced in-app rather than hidden, so a Windows user is not shown
+ * "update ready" forever with nothing happening.
  */
 const CHANNEL = Deno.env.get("SEMACLIP_CHANNEL") === "stable" ? "stable" : "nightly";
 
@@ -65,18 +65,19 @@ export function startAutoUpdate(baseUrl?: string): void {
     console.log("Updates: disabled (no version baked in — dev run)");
     return;
   }
-  // deno.json's desktop.release.baseUrl is baked into the binary; an explicit
-  // arg or env override lets a build be pointed at a different channel without
-  // recompiling (useful for testing the updater itself).
-  const url = baseUrl ?? Deno.env.get("SEMACLIP_UPDATE_URL");
-  if (!url) {
-    console.log("Updates: disabled (no release baseUrl configured)");
-    return;
-  }
+  // deno.json's desktop.release.baseUrl is baked into the binary and
+  // Deno.autoUpdate() DEFAULTS to it ("This is the only server URL the runtime
+  // polls automatically ... defaults to this URL, but can override it per call").
+  // So the absence of an explicit url is NOT a reason to disable the updater —
+  // requiring one here made the whole feature dead in every packaged build, which
+  // logged "Updates: disabled (no release baseUrl configured)" while the manifest
+  // it should have been polling answered 200. An arg or env var only OVERRIDES.
+  const override = baseUrl ?? Deno.env.get("SEMACLIP_UPDATE_URL");
 
   const autoUpdate = (Deno as {
     autoUpdate?: (opts: {
-      url: string;
+      /** Optional: the runtime falls back to the baked desktop.release.baseUrl. */
+      url?: string;
       interval?: number;
       publicKey?: string;
       onUpdateReady?: (v: string) => void;
@@ -89,7 +90,10 @@ export function startAutoUpdate(baseUrl?: string): void {
     return;
   }
 
-  console.log(`Updates: ${CHANNEL} channel, current ${status.current}${url ? `, polling ${url}` : ""}`);
+  console.log(
+    `Updates: ${CHANNEL} channel, current ${status.current}, polling ` +
+      `${override ?? "the baseUrl baked into this build"}`,
+  );
   if (!status.canApply) {
     console.warn("Updates: Windows cannot apply staged updates (launcher swap unsupported)");
   }
@@ -105,7 +109,9 @@ export function startAutoUpdate(baseUrl?: string): void {
   // Fire-and-forget: a failed update check must never prevent the app from
   // serving. autoUpdate() already swallows non-2xx responses internally.
   autoUpdate({
-    url,
+    // `url` is REQUIRED in the type but optional to the runtime when the build
+    // carries a baseUrl, so only pass it when we are genuinely overriding.
+    ...(override ? { url: override } : {}),
     interval: INTERVAL_MS,
     ...(publicKey ? { publicKey } : {}),
     onUpdateReady(version) {
