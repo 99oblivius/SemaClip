@@ -90,6 +90,28 @@ Repo is currently **local-only**: `git remote -v` is empty and
 `99oblivius/SemaClip` does not exist on GitHub. This step needs your go-ahead —
 it publishes the project.
 
+**CI hygiene constraints (measured from the build output — each one silently
+costs time or reproducibility if ignored):**
+
+- Every `deno desktop` build downloads its own toolchain over the network:
+  `libdenort-x86_64-unknown-linux-gnu.zip` from `dl.deno.land` and the
+  `laufey-webview` backend archive (v0.7.0 at time of measurement). **Cache the
+  Deno dir in Actions** (keyed on the pinned Deno version + target) or every job
+  re-downloads tens of MB and inherits upstream flakiness.
+- `deno desktop` prints **`⚠ deno desktop is experimental and subject to
+  change`**. Pin the **exact patch version** (e.g. `v2.9.6`, not `v2.9.x`) for
+  release jobs so an upstream Deno release cannot change packaging behaviour
+  under a tag mid-flight. Both existing workflows currently pin `v2.9.x`, which
+  floats — that is fine for `check.yml` (it should track the newest 2.9) but
+  must not be used for a release job.
+- The build **downloads** its webview backend, so the CI runner does not need
+  the Linux webview libraries installed — but **users do** (the default
+  `webview` backend requires `webkit2gtk` at runtime on Linux). That belongs in
+  the README/install notes next to the AppImage, not just in CI.
+- The build is slow (~90–110 s for a hello-world, first run) — batch steps and
+  run them as tracked background jobs; a chained foreground shell call gets
+  promoted and cut at 600 s.
+
 Proposed workflows (replacing the placeholder `nightly.yml`/`release.yml`
 described in `ARCHITECTURE.md`, which assume tooling that no longer applies):
 
