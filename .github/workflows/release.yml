@@ -506,6 +506,13 @@ jobs:
           # which would look like a working step and fail later at the patch.
           # Verified locally: qbspatch reproduces the target byte-identically.
           cargo install qbsdiff --features cmd --locked
+          # ~/.cargo/bin is NOT guaranteed to be on PATH on a runner, and a
+          # missing path here would surface much later as "qbsdiff: command not
+          # found" inside the patch step. Put it on PATH for later steps and
+          # assert BOTH binaries resolve now, not just that install exited 0.
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          command -v qbsdiff qbspatch
           qbsdiff --help >/dev/null
           qbspatch --help >/dev/null
 
@@ -778,6 +785,9 @@ jobs:
           # another, so a format mismatch could pass verification or fail it
           # spuriously. One crate on both sides.
           cargo install qbsdiff --features cmd --locked
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          command -v qbspatch
 
           python3 -c 'import json;m=json.load(open("back/live-latest.json"));[print(k,v["name"],v["sha256"]) for k,v in m["patches"].items()]' \
             > /tmp/patches.txt
