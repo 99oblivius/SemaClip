@@ -5,8 +5,9 @@
 # identity. The patch number is the commit count, so each commit has its own version
 # and consecutive builds can never collide.
 #
-# Nightly channel only. A stable channel (tag push `v*`) would reuse the build and
-# verify jobs and differ only in the version source and manifest path.
+# The only channel. There is no stable/beta split: a single line of releases, every
+# one of them pre-alpha. Adding a channel later would reuse the build and verify jobs
+# and differ only in the version source and the manifest path.
 #
 # Shape: version -> build (matrix) -> publish -> patch -> verify.
 # Jobs that produce a user-visible claim (a release, a manifest, a patch) are
@@ -417,9 +418,22 @@ jobs:
           V="${{ needs.version.outputs.version }}"
           TAG="${{ needs.version.outputs.tag }}"
 
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::error::release $TAG already exists — the version job must produce a fresh tag"
-            exit 1
+          # A retry must be SAFE. A cancelled or failed run can leave a release that
+          # exists but never finished uploading (measured: the concurrency group killed
+          # a run mid-upload, and the retry then died with "ReleaseAsset.name already
+          # exists"). A release with NO assets is a stub from such a run and is safe to
+          # replace; a release WITH assets is published work and must never be
+          # overwritten, so that case still refuses and asks for a fresh version.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+              --jq '.assets | length' >/tmp/existing_assets 2>/dev/null; then
+            have="$(cat /tmp/existing_assets)"
+            if [ "$have" = "0" ]; then
+              echo "::warning::release $TAG exists with no assets — replacing a stub from a cancelled run"
+              gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+            else
+              echo "::error::release $TAG already exists with $have asset(s) — the version job must produce a fresh tag"
+              exit 1
+            fi
           fi
 
           # A normal release: there is no channel to keep out of the "latest" slot.
@@ -429,7 +443,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "SemaClip $V" \
-            --notes "Nightly build $V from ${GITHUB_SHA:0:12}.
+            --notes "Pre-alpha build $V from ${GITHUB_SHA:0:12}. Development is continuous: this is the next build along one line, not a beta or a stable release.
 
           Linux: \`SemaClip.AppImage\` — chmod +x, then run. Needs \`webkit2gtk\` installed.
           Windows: \`SemaClip-$V-win-x64.msi\` — the installer. \`SemaClip-$V-win-x64-portable.zip\` — no-install fallback, unzip and run \`SemaClip.exe\`.
