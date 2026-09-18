@@ -303,7 +303,8 @@ function toByteStream(
  *   - `output()` resolves, never rejects
  *   - an ENOENT resolves as a failed result rather than throwing
  */
-function spawnWithDenoCommand(cmd: string, opts: RunOptions): ChildHandle {
+/** Exported for tests: the Windows piped-stdin path, exercisable on any platform. */
+export function spawnWithDenoCommand(cmd: string, opts: RunOptions): ChildHandle {
   const command = new Deno.Command(cmd, {
     args: opts.args ?? [],
     ...(opts.cwd ? { cwd: opts.cwd } : {}),
@@ -331,56 +332,95 @@ function spawnWithDenoCommand(cmd: string, opts: RunOptions): ChildHandle {
     };
   }
 
-  // Deno's streams ARE web streams, so the ByteStream facade is a thin adapter — but the
-  // same facade is kept so call sites cannot tell the two paths apart.
-  const out: Uint8Array[] = [];
-  const errs: Uint8Array[] = [];
-
-  // ── ONE READER PER STREAM ────────────────────────────────────────────────────
-  // A ReadableStream takes exactly one reader. The node path had separate concerns (a
-  // collector plus a consumer) because node streams are EventEmitters; web streams are not,
-  // so both go through a single reader here. Getting this wrong surfaced immediately as
-  // "ReadableStream is locked" on the first real run.
+  // ── ONE READER, ONE OWNER, AND A QUEUE IN FRONT ──────────────────────────────
+  // A ReadableStream takes exactly one reader, and TWO consumers must not race for it. The
+  // node path got this free (node streams are EventEmitters: every listener sees every
+  // chunk), so a naive port let the internal collector and the caller's `for await` share
+  // the reader and STEAL CHUNKS FROM EACH OTHER. On a real download that silently corrupted
+  // the fMP4 box parser's input — the download completed, but the fragment index came out
+  // empty (10 bytes: a moov offset and no fragments), so the media could not be scrubbed.
+  //
+  // So: the collector owns the reader and ALWAYS drains it into a queue. Claiming swaps what
+  // happens to queued bytes (kept for `output()` vs. handed to the consumer) and nothing
+  // races, because there is still only one reader.
   const makeChannel = (stream: ReadableStream<Uint8Array> | null, isOut: boolean) => {
     if (!stream) {
-      return { facade: null as ByteStream | null, claimed: () => false, collect: async () => {} };
+      return {
+        facade: null as ByteStream | null,
+        collect: async () => {},
+        buffered: () => [] as Uint8Array[],
+      };
     }
     const reader = stream.getReader();
-    let claimedFlag = false;
-    const claim = () => {
-      claimedFlag = true;
-      // Drop whatever the collector buffered before the claim: the consumer reads live now.
-      if (isOut) out.length = 0; else errs.length = 0;
+    const queue: Uint8Array[] = [];
+    const collected: Uint8Array[] = [];
+    const waiters: (() => void)[] = [];
+    let done = false;
+    let error: Error | null = null;
+    let claimed = false;
+    const wake = () => {
+      for (const w of waiters.splice(0)) w();
     };
+
+    const collect = async () => {
+      try {
+        for (;;) {
+          const { done: d, value } = await reader.read();
+          if (d) {
+            done = true;
+            wake();
+            return;
+          }
+          if (!value) continue;
+          queue.push(value);
+          // Only the unclaimed channel keeps a copy for `output()`.
+          if (!claimed) collected.push(value);
+          wake();
+        }
+      } catch (err) {
+        error = err instanceof Error ? err : new Error(String(err));
+        done = true;
+        wake();
+      }
+    };
+
+    const next = async (): Promise<{ done: boolean; value: Uint8Array | undefined }> => {
+      for (;;) {
+        const value = queue.shift();
+        if (value) return { done: false, value };
+        if (error) throw error;
+        if (done) return { done: true, value: undefined };
+        await new Promise<void>((r) => waiters.push(r));
+      }
+    };
+
     const facade: ByteStream = {
       getReader() {
-        claim();
+        claimed = true;
+        // Drop the pre-claim copies: the consumer is reading live now, so they are dead
+        // weight and keeping them would double every byte.
+        collected.length = 0;
         return {
-          read: () => reader.read() as Promise<{ done: boolean; value: Uint8Array | undefined }>,
-          releaseLock: () => { try { reader.releaseLock(); } catch { /* ok */ } },
+          read: next,
+          releaseLock: () => { /* the collector owns the reader for the child's lifetime */ },
         };
       },
       [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
-        claim();
+        claimed = true;
         return {
           async next() {
-            const { done, value } = await reader.read();
-            return done ? { done: true as const, value: undefined } : { done: false as const, value: value! };
+            const { done: d, value } = await next();
+            return d ? { done: true as const, value: undefined } : { done: false as const, value: value! };
           },
         };
       },
     };
+
     return {
       facade,
-      claimed: () => claimedFlag,
-      // Drain while unclaimed so `output()` still works for callers that never read.
-      collect: async () => {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) return;
-          if (!claimedFlag && value) (isOut ? out : errs).push(value);
-        }
-      },
+      collect,
+      buffered: () => collected,
+      claimed: () => claimed,
     };
   };
 
@@ -402,7 +442,7 @@ function spawnWithDenoCommand(cmd: string, opts: RunOptions): ChildHandle {
     stderr: errCh.facade,
     async output(): Promise<RunOutput> {
       const st = await status;
-      return { success: st.success, code: st.code, stdout: concat(out), stderr: concat(errs) };
+      return { success: st.success, code: st.code, stdout: concat(outCh.buffered()), stderr: concat(errCh.buffered()) };
     },
     stdin: opts.stdin === "piped"
       ? {
