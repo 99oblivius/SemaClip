@@ -963,6 +963,28 @@ jobs:
         run: |
           set -euo pipefail
           V="${{ needs.version.outputs.version }}"
+
+          # RE-FETCH the manifest. The copy in back/ was downloaded by an earlier step,
+          # BEFORE the patch job merged its entry into latest.json and pushed Pages, so
+          # reading it here saw the PRE-PATCH manifest and reported "no patches" on a run
+          # whose patch had in fact just been published. Pages deploys asynchronously, so
+          # poll for THIS release's version carrying a patch rather than trusting the copy.
+          URL="${{ env.MANIFEST_BASE_URL }}/latest.json"
+          ok=no
+          for _ in $(seq 1 20); do
+            curl -sSfL --max-time 30 "$URL" -o back/live-latest.json || { sleep 15; continue; }
+            if python3 -c "import json,sys; m=json.load(open('back/live-latest.json')); sys.exit(0 if (m.get('version')=='$V' and m.get('patches')) else 1)"; then
+              ok=yes; break
+            fi
+            echo "manifest does not yet show $V with its patch; retrying in 15s"
+            sleep 15
+          done
+          if [ "$ok" != yes ]; then
+            echo "::error::$URL never served version $V with a patch entry — a client on the previous version cannot update"
+            exit 1
+          fi
+          echo "live manifest shows $V with its patch entry"
+
           n="$(python3 -c 'import json;print(len(json.load(open("back/live-latest.json")).get("patches",{})))')"
           if [ "$n" = "0" ]; then
             # An empty `patches` is legitimate ONLY for the first release of a line.
