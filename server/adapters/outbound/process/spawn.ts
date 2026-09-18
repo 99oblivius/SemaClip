@@ -1,22 +1,33 @@
 /**
  * One place that runs external processes.
  *
- * ── WHY THIS EXISTS ───────────────────────────────────────────────────────────
- * On Windows every child process inherits the parent's console, so each ffmpeg,
- * whisper or tar invocation flashes a console window. For a GUI app whose whole
- * premise is background work, that is unacceptable — the user reported "downloading
- * about anything opens a terminal each time".
+ * ── ON WINDOWS, A PIPED STDIN USES Deno.Command. NOTHING ELSE DOES. ───────────
+ * `node:child_process` DEADLOCKS on Windows once more than ~1MB is written to a child's
+ * stdin: the write neither resolves nor rejects, and the event loop stops running entirely,
+ * so the process cannot log, serve HTTP, or notice its own timeout. Measured in the target
+ * VM with the app's own helper, 3.3MB of mpegts into the managed ffmpeg:
  *
- * ── WHY node:child_process AND NOT Deno.Command ───────────────────────────────
- * `Deno.Command` has NO option to suppress the child console: its CommandOptions
- * has no windowsHide/creationFlags field (verified against the runtime's own types).
- * Worse, passing `windowsHide` to it is SILENTLY IGNORED — it neither errors nor
- * takes effect (verified), which is the worst possible behaviour for a fix.
+ *   node:child_process    HUNG — no result after 12s, and the loop's own 250ms heartbeat
+ *                         never fired once (the loop was blocked, not merely waiting)
+ *   Deno.Command          RESOLVED in 52ms, muxed 3,138,113 bytes, exit 0
  *
- * Deno's `node:child_process` polyfill DOES honour `windowsHide: true`, mapping it to
- * CREATE_NO_WINDOW on CreateProcessW (denoland/deno#34627, fixed 2026-05-31, and the
- * underlying spawn logic already applied the flag). So the node polyfill is the
- * supported route, not a workaround.
+ * same data, same binary, same no-console (GUI) parent. Below the threshold both work,
+ * which is why this survived so long: `ffmpeg -version` and 1MB writes are fine, and only a
+ * real download crosses it. The field symptom is exactly this file's opposite concern —
+ * a download that stops after "spawning ffmpeg" with the child alive and no error.
+ *
+ * ── THE CONSOLE TRADEOFF, STATED PLAINLY ──────────────────────────────────────
+ * `Deno.Command` has no windowsHide: its CommandOptions has no such field (verified against
+ * the runtime's own types), and passing one is SILENTLY IGNORED. `node:child_process` does
+ * honour `windowsHide: true` (CREATE_NO_WINDOW, denoland/deno#34627). So the piped-stdin
+ * path buys a working download at the cost of the console-hiding flag, and the non-piped
+ * paths (the majority, including every short-lived probe) keep it.
+ *
+ * That trade is deliberate and is the only arrangement that works: a hidden console is
+ * worthless on a download that never completes. Whether a console actually becomes VISIBLE
+ * could not be measured here — the test VM's non-interactive window station reports no
+ * visible window even for a deliberately unhidden spawn — so treat "no terminal flash" as
+ * EXPECTED but UNVERIFIED on the piped path and confirm it on a real desktop.
  *
  * ── WHY A WRAPPER RATHER THAN 23 EDITS ────────────────────────────────────────
  * There are 23 `Deno.Command` call sites across 12 files. Editing each one means 23
@@ -152,7 +163,7 @@ export function runStatus(cmd: string, opts: RunOptions = {}): Promise<RunStatus
 }
 
 /** Concatenates collected chunks into the Uint8Array shape callers expect. */
-function concat(chunks: Buffer[]): Uint8Array {
+function concat(chunks: (Buffer | Uint8Array)[]): Uint8Array {
   if (chunks.length === 0) return new Uint8Array();
   if (chunks.length === 1) return new Uint8Array(chunks[0]!);
   return new Uint8Array(Buffer.concat(chunks));
@@ -280,7 +291,153 @@ function toByteStream(
  * Returns a facade shaped like the parts of `Deno.ChildProcess` in use here, so a
  * converted call site keeps its `.status` await and its `.kill()`.
  */
+/**
+ * The Windows piped-stdin path, built on `Deno.Command`.
+ *
+ * Only used when a caller will FEED the child (opts.stdin === "piped") on Windows, because
+ * that is the exact configuration `node:child_process` deadlocks in. Everything else keeps
+ * the node path, and therefore keeps `windowsHide`.
+ *
+ * Semantics are matched to the node path deliberately:
+ *   - stdout/stderr become the same ByteStream facade (Deno's real streams are adapted)
+ *   - `output()` resolves, never rejects
+ *   - an ENOENT resolves as a failed result rather than throwing
+ */
+function spawnWithDenoCommand(cmd: string, opts: RunOptions): ChildHandle {
+  const command = new Deno.Command(cmd, {
+    args: opts.args ?? [],
+    ...(opts.cwd ? { cwd: opts.cwd } : {}),
+    ...(opts.env ? { env: opts.env } : {}),
+    stdin: opts.stdin ?? "null",
+    stdout: opts.stdout === "null" || opts.stdout === "inherit" ? opts.stdout : "piped",
+    stderr: opts.stderr === "null" || opts.stderr === "inherit" ? opts.stderr : "piped",
+  });
+
+  let child: Deno.ChildProcess;
+  try {
+    child = command.spawn();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`spawn failed: ${cmd} — ${message}`);
+    const failed = { success: false, code: -1 };
+    return {
+      status: Promise.resolve(failed),
+      pid: undefined,
+      kill() {},
+      stdout: null,
+      stderr: null,
+      output: () => Promise.resolve({ ...failed, stdout: new Uint8Array(), stderr: new Uint8Array() }),
+      stdin: null,
+    };
+  }
+
+  // Deno's streams ARE web streams, so the ByteStream facade is a thin adapter — but the
+  // same facade is kept so call sites cannot tell the two paths apart.
+  const out: Uint8Array[] = [];
+  const errs: Uint8Array[] = [];
+
+  // ── ONE READER PER STREAM ────────────────────────────────────────────────────
+  // A ReadableStream takes exactly one reader. The node path had separate concerns (a
+  // collector plus a consumer) because node streams are EventEmitters; web streams are not,
+  // so both go through a single reader here. Getting this wrong surfaced immediately as
+  // "ReadableStream is locked" on the first real run.
+  const makeChannel = (stream: ReadableStream<Uint8Array> | null, isOut: boolean) => {
+    if (!stream) {
+      return { facade: null as ByteStream | null, claimed: () => false, collect: async () => {} };
+    }
+    const reader = stream.getReader();
+    let claimedFlag = false;
+    const claim = () => {
+      claimedFlag = true;
+      // Drop whatever the collector buffered before the claim: the consumer reads live now.
+      if (isOut) out.length = 0; else errs.length = 0;
+    };
+    const facade: ByteStream = {
+      getReader() {
+        claim();
+        return {
+          read: () => reader.read() as Promise<{ done: boolean; value: Uint8Array | undefined }>,
+          releaseLock: () => { try { reader.releaseLock(); } catch { /* ok */ } },
+        };
+      },
+      [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+        claim();
+        return {
+          async next() {
+            const { done, value } = await reader.read();
+            return done ? { done: true as const, value: undefined } : { done: false as const, value: value! };
+          },
+        };
+      },
+    };
+    return {
+      facade,
+      claimed: () => claimedFlag,
+      // Drain while unclaimed so `output()` still works for callers that never read.
+      collect: async () => {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) return;
+          if (!claimedFlag && value) (isOut ? out : errs).push(value);
+        }
+      },
+    };
+  };
+
+  const outCh = makeChannel(child.stdout, true);
+  const errCh = makeChannel(child.stderr, false);
+  outCh.collect().catch(() => {});
+  errCh.collect().catch(() => {});
+
+  const status: Promise<RunStatus> = child.status.then((st) => ({ success: st.success, code: st.code }))
+    .catch(() => ({ success: false, code: -1 }));
+
+  return {
+    status,
+    pid: child.pid,
+    kill() {
+      try { child.kill(); } catch { /* already exited */ }
+    },
+    stdout: outCh.facade,
+    stderr: errCh.facade,
+    async output(): Promise<RunOutput> {
+      const st = await status;
+      return { success: st.success, code: st.code, stdout: concat(out), stderr: concat(errs) };
+    },
+    stdin: opts.stdin === "piped"
+      ? {
+          async write(chunk: Uint8Array): Promise<number> {
+            const w = child.stdin.getWriter();
+            try {
+              await w.write(chunk);
+            } finally {
+              w.releaseLock();
+            }
+            return chunk.length;
+          },
+          async close(): Promise<void> {
+            try { await child.stdin.close(); } catch { /* already closed */ }
+          },
+          getWriter() {
+            const w = child.stdin.getWriter();
+            return {
+              write(chunk: Uint8Array): Promise<void> { return w.write(chunk); },
+              releaseLock() { try { w.releaseLock(); } catch { /* ok */ } },
+            };
+          },
+        }
+      : null,
+  };
+}
+
 export function spawnChild(cmd: string, opts: RunOptions = {}): ChildHandle {
+  // On Windows a PIPED STDIN must not go through node:child_process: writing more than
+  // ~1MB deadlocks it and blocks the event loop (measured — see the file header). Feed the
+  // child with the runtime's own API instead; every other spawn keeps windowsHide.
+  if (Deno.build.os === "windows" && opts.stdin === "piped") {
+    return spawnWithDenoCommand(cmd, opts);
+  }
+
   // `run()` wraps its spawn because spawn() throws synchronously for a malformed command
   // or a missing binary. This entry point did not, so a machine with no ffmpeg on PATH
   // got an exception thrown out of a download instead of a clean reported failure — on a
