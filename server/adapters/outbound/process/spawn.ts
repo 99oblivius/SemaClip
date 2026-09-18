@@ -281,7 +281,27 @@ function toByteStream(
  * converted call site keeps its `.status` await and its `.kill()`.
  */
 export function spawnChild(cmd: string, opts: RunOptions = {}): ChildHandle {
-  const child = spawn(cmd, opts.args ?? [], launchOptions(cmd, opts));
+  // `run()` wraps its spawn because spawn() throws synchronously for a malformed command
+  // or a missing binary. This entry point did not, so a machine with no ffmpeg on PATH
+  // got an exception thrown out of a download instead of a clean reported failure — on a
+  // GUI build that surfaces as a download that never starts, with no message.
+  let child;
+  try {
+    child = spawn(cmd, opts.args ?? [], launchOptions(cmd, opts));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`spawn failed: ${cmd} — ${message}`);
+    const failed = { success: false, code: -1 };
+    return {
+      status: Promise.resolve(failed),
+      pid: undefined,
+      kill() {},
+      stdout: null,
+      stderr: null,
+      output: () => Promise.resolve({ ...failed, stdout: new Uint8Array(), stderr: new Uint8Array() }),
+      stdin: null,
+    };
+  }
 
   // ── UNBOUNDED BUFFERING: the freeze ────────────────────────────────────────
   // These collectors duplicate every byte the child writes. That is fine for a short

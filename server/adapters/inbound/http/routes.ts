@@ -43,6 +43,7 @@ import {
   closeWindow,
   restartApp,
 } from "@/adapters/outbound/platform/window-lifecycle.ts";
+import { logFilePath, readLogTail } from "@/adapters/outbound/platform/log-file.ts";
 import { updateStatus } from "@/adapters/outbound/platform/auto-update.ts";
 import { emitAppEvent, subscribeAppEvents, sseFrame } from "@/application/events.ts";
 import { fetchWithTimeout, MEDIA_TIMEOUT_MS } from "@/adapters/outbound/net/fetch-timeout.ts";
@@ -853,6 +854,26 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   // button for something the window class cannot do. Measured against the runtime:
   // minimize/maximize are ABSENT from BrowserWindow.
   app.get("/api/window", (c) => c.json(chromeState()));
+
+  // The app's own log file, readable from the UI. A packaged desktop app has no console,
+  // so without this a user seeing a failure has no way to send evidence — which is exactly
+  // what happened when the owner reported the download freeze and the missing chrome.
+  app.get("/api/log", async (c) => {
+    const tail = await readLogTail();
+    return c.text(tail, 200, { "Content-Type": "text/plain; charset=utf-8" });
+  });
+
+  // Where the log lives, and whether file logging is on at all. Also reports the window
+  // adoption failure (if any), because that is invisible in the UI otherwise.
+  app.get("/api/diagnostics", (c) =>
+    c.json({
+      logPath: logFilePath(),
+      logEnabled: Boolean(logFilePath()),
+      chrome: chromeState(),
+      version: (Deno as { desktopVersion?: string | null }).desktopVersion ?? "dev",
+      os: Deno.build.os,
+      serveAddress: Deno.env.get("DENO_SERVE_ADDRESS") ?? null,
+    }));
 
   // Real update state, so Settings reports what is true instead of describing the
   // mechanism. A packaged build answers with its baked version; a dev run answers with

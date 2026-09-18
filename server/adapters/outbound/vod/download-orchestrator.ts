@@ -760,6 +760,9 @@ export class DownloadOrchestrator {
     // running phase (otherwise a container appears only after a refresh).
     this.liveStates.set(opts.streamId, state);
     this.bumpRevision(opts.streamId);
+    // Phase logging: a stalled download's LAST line names the stage it died in, which is
+    // the only way to localise a freeze on a machine with no console.
+    console.log(`[download ${opts.streamId}] run() started includeProxy=${opts.includeProxy}`);
     const rt = new Map<DownloadPartKind, PartRuntime>();
     for (const kind of ["chat", "markers", "proxy", "hq"] as const) {
       rt.set(kind, newPart());
@@ -789,6 +792,7 @@ export class DownloadOrchestrator {
     // with status "pending" — the old `!== "running"` guard skipped the
     // fetch entirely and chat stayed pending (user-reported).
     if (rt.get("chat")!.status === "pending" || rt.get("chat")!.status === "running") {
+    console.log(`[download ${opts.streamId}] stage: chat`);
     rt.get("chat")!.status = "running";
     try {
       const n = await downloadChat(vodId, chatPath, {
@@ -806,6 +810,7 @@ export class DownloadOrchestrator {
       rt.get("chat")!.percent = 1;
       state.chatPath = chatPath;
       state.chatCount = n;
+      console.log(`[download ${opts.streamId}] chat done (${n} comments)`);
       await opts.onPartDone?.("chat", state);
     } catch (err) {
       if (opts.signal?.aborted) {

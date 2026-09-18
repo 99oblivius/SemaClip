@@ -9,6 +9,7 @@ import { startAutoUpdate } from "@/adapters/outbound/platform/auto-update.ts";
 import {
   adoptWindowLifecycle,
   chromeState,
+  logWindowDiagnostics,
 } from "@/adapters/outbound/platform/window-lifecycle.ts";
 import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
 
@@ -42,6 +43,16 @@ const DB_PATH = Deno.env.get("SEMACLIP_DB") ?? `${DATA_DIR}/semaclip.db`;
 const CACHE_DIR = Deno.env.get("SEMACLIP_CACHE") ?? `${DATA_DIR}/cache`;
 const EXPORT_DIR = Deno.env.get("SEMACLIP_EXPORT") ?? `${DATA_DIR}/exports`;
 const ENGINE_BINARY = Deno.env.get("SEMACLIP_ENGINE") ?? "semaclip-engine";
+
+// Install file logging BEFORE anything else: a packaged desktop app has no console, so a
+// startup failure would otherwise leave no trace at all. This is what makes a bug report
+// from a user's machine possible.
+installFileLogging(DATA_DIR);
+
+// Report what the window was actually created with, and whether adoption worked. The
+// owner reported "still decorated, no functional chrome" and there was no way to tell
+// WHY — an adoption failure must be visible, not a silent early return.
+logWindowDiagnostics();
 
 /**
  * v2 engine selection: if the bundled whisper.cpp tree exists under native/,
@@ -221,4 +232,5 @@ console.log(`  Engine:   ${ENGINE_BINARY}`);
 // Awaited because on Windows it first places the sidecar updater at a real per-user
 // path — the payload's virtual filesystem is readable only from this process, so if
 // that does not complete there is no way for a staged update to ever be applied.
+import { installFileLogging } from "@/adapters/outbound/platform/log-file.ts";
 await startAutoUpdate();

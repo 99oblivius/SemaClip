@@ -77,16 +77,28 @@ export class ImportStreamByUrlUseCase {
   ) {}
 
   async execute(input: ImportByUrlInput): Promise<ImportResult> {
+    // Instrumented step by step: the owner reported the import POST never appears to
+    // return on Windows (no container, no progress, an inert Download button), and with
+    // no logs there was no way to tell WHICH step stalled. Each line below is a point the
+    // request can get stuck, so a single run localises it.
+    const t0 = performance.now();
+    const step = (label: string) =>
+      console.log(`[import] ${label} +${Math.round(performance.now() - t0)}ms`);
+
+    step("start");
     if (!this.vodDownloader.isSupported(input.url)) {
       throw new Error(`Unsupported VOD URL: ${input.url}`);
     }
+    step("url supported");
 
     // Fetch metadata first for immediate stream record. The progressive
     // URL imports fetch metadata via GQL directly (no twitch-dl dependency).
     const meta = await (async () => {
       const id = extractVodId(input.url);
       if (!id) throw new Error(`Unsupported VOD URL: ${input.url}`);
+      step("fetching VOD metadata (GQL)");
       const m = await fetchVodMeta(id);
+      step("metadata fetched");
       return { title: m.title, streamer: m.streamer, game: m.game, duration: m.durationSec };
     })();
     const stream = createStream({
@@ -98,6 +110,7 @@ export class ImportStreamByUrlUseCase {
       duration: meta.duration,
     });
     await this.streams.save(stream);
+    step("stream record saved");
 
     // URL imports always use the chunked/live HLS orchestrator — chunks are
     // proxybable as they land regardless of the proxy-first toggle (the
@@ -109,9 +122,11 @@ export class ImportStreamByUrlUseCase {
     this.aborts.set(stream.id, controller);
     const destDir = `${this.cacheDir}/vods/${stream.id}`;
     await this.fs.ensureDir(destDir);
+    step("dest dir ready — starting the background download and RETURNING");
     this.runProgressive(stream.id, input, meta, destDir, controller).catch((err) => {
       console.error(`Progressive download failed for ${input.url}:`, err);
     });
+    step("returning 201 to the client");
     return { stream, downloadJobId: stream.id };
   }
 

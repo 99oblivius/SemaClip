@@ -157,6 +157,7 @@ export async function downloadFmp4(
     void indexWriter?.flush();
   };
 
+  console.log(`[fmp4] spawning ffmpeg: ${opts.ffmpegPath} dest=${destPath}`);
   const ffmpeg = spawnChild(opts.ffmpegPath, {
     args: [
       "-hide_banner", "-loglevel", "error",
@@ -196,7 +197,14 @@ export async function downloadFmp4(
   /** Pump ffmpeg stdout into the file + parser. */
   const pump = (async () => {
     if (!ffmpeg.stdout) throw new Error("ffmpeg stdout was not piped — cannot capture the muxed mp4");
+    let sawFirst = false;
     for await (const part of ffmpeg.stdout) {
+      if (!sawFirst) {
+        // Proof the child actually started and produced output. If a freeze happens with
+        // this line missing, ffmpeg never ran; if it is present, the stall is downstream.
+        sawFirst = true;
+        console.log(`[fmp4] first muxed bytes from ffmpeg (${part.byteLength}B)`);
+      }
       const slice = part instanceof Uint8Array ? part : new Uint8Array(part);
       await dest.write(slice);
       bytes += slice.byteLength;
@@ -263,6 +271,7 @@ export async function downloadFmp4(
     void resuming;
     return parser.index;
   } catch (err) {
+    console.error(`[fmp4] failed: ${err instanceof Error ? err.message : err}`);
     // Cancel: kill the muxer and keep the partial file (resume re-muxes).
     try {
       ffmpeg.kill("SIGKILL");

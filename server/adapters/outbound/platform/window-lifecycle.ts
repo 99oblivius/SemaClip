@@ -86,6 +86,14 @@ export interface ChromeState {
   /** Window buttons the app can actually provide. Close always works; the rest cannot. */
   canMinimize: boolean;
   canMaximize: boolean;
+  /**
+   * Why adoption failed, when it did.
+   *
+   * Without this the only symptom of a failed adoption is chrome that does not render,
+   * which is indistinguishable from chrome that is not implemented — the owner reported
+   * "still decoration and no functional chrome" three times with nothing to diagnose.
+   */
+  adoptError: string | null;
 }
 
 const state: ChromeState = {
@@ -95,6 +103,7 @@ const state: ChromeState = {
   // asks a question instead of assuming an answer.
   canMinimize: false,
   canMaximize: false,
+  adoptError: null,
 };
 
 export function chromeState(): ChromeState {
@@ -117,6 +126,23 @@ function BrowserWindowCtor(): WindowCtor | undefined {
 /** True when running inside the desktop runtime rather than `deno run`. */
 function inDesktopRuntime(): boolean {
   return Boolean(Deno.env.get("DENO_SERVE_ADDRESS"));
+}
+
+/**
+ * Reports the window state AND the inputs the decision depends on.
+ *
+ * `adoptWindowLifecycle` used to swallow a construction failure entirely, so the only
+ * observable result of a failed adoption was chrome that never rendered, with no clue
+ * why. The owner reported exactly that and could not tell us what went wrong, which is
+ * why this exists.
+ */
+export function logWindowDiagnostics(): void {
+  console.log(
+    `window: desktopRuntime=${inDesktopRuntime()} ` +
+      `(DENO_SERVE_ADDRESS=${Deno.env.get("DENO_SERVE_ADDRESS") ?? "unset"}) ` +
+      `BrowserWindow=${BrowserWindowCtor() ? "present" : "ABSENT"} ` +
+      `SEMACLIP_NATIVE_DECORATIONS=${Deno.env.get("SEMACLIP_NATIVE_DECORATIONS") ?? "unset"}`,
+  );
 }
 
 /**
@@ -145,9 +171,16 @@ export function adoptWindowLifecycle(options: ChromeOptions = {}): void {
       ...(options.title ? { title: options.title } : {}),
     });
     constructed += 1;
-  } catch {
-    // No implicit window (a headless desktop launch, e.g. CI smoke tests). The server
-    // stays up in that case, which is what a test harness wants.
+    console.log(
+      `window: adopted (construction #${constructed}) frameless=${options.frameless !== false} ` +
+        `title=${options.title ?? "none"}`,
+    );
+  } catch (err) {
+    // NOT silent. A failed adoption leaves the window exactly as the OS made it —
+    // decorated, with no chrome — which is a user-visible defect that was being
+    // reported as "the chrome still does not work" with nothing to diagnose.
+    state.adoptError = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    console.error(`window: adoption FAILED — ${state.adoptError}`);
     return;
   }
 
