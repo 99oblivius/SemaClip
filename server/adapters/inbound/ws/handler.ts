@@ -5,10 +5,17 @@ import {
   JOB_STATUS_TOPIC,
   STREAM_STATUS_TOPIC,
   DOWNLOAD_PROGRESS_TOPIC,
+  STREAM_CHANGED_TOPIC,
 } from "@/application/ports/outbound.ts";
 import type { WsEvent } from "shared/types";
 
-const TOPICS = [ENGINE_EVENT_TOPIC, JOB_STATUS_TOPIC, STREAM_STATUS_TOPIC, DOWNLOAD_PROGRESS_TOPIC];
+const TOPICS = [
+  ENGINE_EVENT_TOPIC,
+  JOB_STATUS_TOPIC,
+  STREAM_STATUS_TOPIC,
+  DOWNLOAD_PROGRESS_TOPIC,
+  STREAM_CHANGED_TOPIC,
+];
 
 /**
  * Creates the upgradeWebSocket middleware. On open, subscribes to all

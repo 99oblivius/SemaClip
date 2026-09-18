@@ -6,7 +6,7 @@
   import { wsStore } from '$lib/stores/ws';
   import { fadeIn } from '$lib/actions/gsap';
   import { QueryClientProvider } from '@tanstack/svelte-query';
-  import { type AppSettings } from '$shared/types';
+  import { type AppSettings, type WsEvent } from '$shared/types';
   import { uiScale, seedUiScale, applyUiScale } from '$lib/stores/ui-scale';
   import { onMount, type Snippet } from 'svelte';
   import { page } from '$app/stores';
@@ -16,6 +16,40 @@
   let { children, data }: { children: Snippet; data: PageData } = $props();
 
   onMount(() => wsStore.connect());
+
+  /**
+   * Re-read what the server says changed, instead of waiting for a poll.
+   *
+   * Every artifact mutation (delete chat, delete video, attach a piece, finish a download)
+   * changes the database and previously told the client nothing, so the UI learned about it
+   * on its own schedule — up to 30 seconds when idle. Deleting chat from project settings was
+   * the visible symptom: the panel and the settings row kept showing the file that had just
+   * been deleted.
+   *
+   * The server now publishes `stream:changed` for those mutations, and this is the one place
+   * that turns it into a refetch. Narrow on purpose: it invalidates the stream and the
+   * downloads view rather than everything, so a chat delete does not refetch an unrelated
+   * library listing.
+   *
+   * Scoped to the event's own stream when the route knows it, so an event for another stream
+   * does not disturb this page's cache.
+   */
+  $effect(() => {
+    const qc = data.queryClient;
+    return wsStore.onEvent<Extract<WsEvent, { type: 'stream_changed' }>>((event) => {
+      if (event.type !== 'stream_changed') return;
+      // Narrow on the event's own stream so an event for another stream does not disturb
+      // this page's cache.
+      const id = event.streamId;
+      if (id) {
+        void qc.invalidateQueries({ queryKey: ['stream', id] });
+      } else {
+        void qc.invalidateQueries({ queryKey: ['stream'] });
+      }
+      void qc.invalidateQueries({ queryKey: ['streams'] });
+      void qc.invalidateQueries({ queryKey: ['downloads'] });
+    });
+  });
 
   // UI scale. Applied as the root font-size so every rem-based size and Tailwind
   // spacing utility scales together — the alternative (a CSS transform) blurs

@@ -143,7 +143,7 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
   // Use cases
   const importByFile = new ImportStreamByFileUseCase(streamRepo, fs, ffmpeg);
   const downloadOrchestrator = new DownloadOrchestrator(metadataRepo, config.tools, streamRepo);
-  const mediaActions = new MediaActionsUseCase(streamRepo, metadataRepo, fs, downloadOrchestrator, config.cacheDir);
+  const mediaActions = new MediaActionsUseCase(streamRepo, metadataRepo, fs, downloadOrchestrator, config.cacheDir, bus);
   const importByUrl = new ImportStreamByUrlUseCase(streamRepo, vodDownloader, fs, bus, config.cacheDir, downloadOrchestrator);
   const deleteStream = new DeleteStreamUseCase(streamRepo, jobRepo, metadataRepo, streamStorage);
   const updateStream = new UpdateStreamUseCase(streamRepo);

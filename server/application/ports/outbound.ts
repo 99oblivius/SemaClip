@@ -151,6 +151,28 @@ export const JOB_STATUS_TOPIC = "job:status";
 export const STREAM_STATUS_TOPIC = "stream:status";
 export const DOWNLOAD_PROGRESS_TOPIC = "download:progress";
 
+/**
+ * Something about a stream's stored state changed and the UI should re-read it.
+ *
+ * This exists because every artifact mutation (delete chat, delete video, attach a piece,
+ * finish a download) changed the database and then told the client NOTHING. The client
+ * compensated by polling every 30 seconds when idle, which is why deleting chat took half a
+ * minute to show up in the panel that had just been told to expect it. Publishing one event
+ * replaces the wait with a refetch.
+ *
+ * The payload is deliberately thin — an id and what changed — because the event's job is
+ * "re-read", not "here is the new state". Duplicating state into the event would create a
+ * second source of truth for it.
+ */
+export const STREAM_CHANGED_TOPIC = "stream:changed";
+
+/** Topics the WebSocket forwards to clients. Anything not listed is server-internal. */
+export interface StreamChangedEvent {
+  streamId: string;
+  /** What changed, for a client that wants to invalidate narrowly. */
+  reason: "chat" | "video" | "proxy" | "download" | "metadata";
+}
+
 // ── Clock note: no Clock port — domain code uses `new Date()` directly. A
 // clock abstraction earned nothing at this size (v1 declared one, nothing
 // implemented it). Reintroduce only when a test genuinely needs frozen time.

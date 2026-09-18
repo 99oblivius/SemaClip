@@ -248,7 +248,12 @@ export type WsEvent =
   | EngineEvent
   | { type: "job_status"; jobId: string; status: JobStatus; streamId: string }
   | { type: "stream_status"; streamId: string; status: StreamStatus }
-  | { type: "download_progress"; jobId: string; percent: number; bytesDownloaded: number; totalBytes: number };
+  | { type: "download_progress"; jobId: string; percent: number; bytesDownloaded: number; totalBytes: number }
+  /**
+   * A stream's stored state changed (an artifact was deleted or attached, a download
+   * finished). The client refetches rather than polling for it.
+   */
+  | { type: "stream_changed"; streamId: string; reason: "chat" | "video" | "proxy" | "download" | "metadata" };
 
 // ── App settings ──────────────────────────────────────────────
 

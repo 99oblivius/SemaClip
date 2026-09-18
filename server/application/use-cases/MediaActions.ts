@@ -8,7 +8,8 @@
  * truth — no parallel state machines.
  */
 
-import type { StreamRepository, StreamMetadataRepository, FileSystemPort } from "@/application/ports/outbound.ts";
+import type { EventBus, StreamRepository, StreamMetadataRepository, FileSystemPort } from "@/application/ports/outbound.ts";
+import { STREAM_CHANGED_TOPIC } from "@/application/ports/outbound.ts";
 import { DownloadOrchestrator, type DownloadState } from "@/adapters/outbound/vod/download-orchestrator.ts";
 import { resolveQualities, pickProxyQuality, pickBestQuality, extractVodId, type HlsQuality } from "@/adapters/outbound/vod/hls.ts";
 import { artifactName, indexPathFor, LEGACY_NAMES, streamSlug } from "@/application/use-cases/artifact-naming.ts";
@@ -25,7 +26,31 @@ export class MediaActionsUseCase {
     private readonly orchestrator: DownloadOrchestrator,
     /** Server cache root — the import flow writes VODs to {cacheDir}/vods/{streamId}. */
     private readonly cacheDir: string,
+    /**
+     * Announces artifact changes so the UI can re-read instead of polling.
+     *
+     * OPTIONAL on purpose: this use-case is constructed in tests without a bus, and a missing
+     * announcement degrades to the old behaviour (the client notices late) rather than
+     * breaking the mutation.
+     */
+    private readonly bus?: EventBus,
   ) {}
+
+  /**
+   * Tell the client something about this stream's stored state changed.
+   *
+   * Every mutation here used to change the database and stay silent, which is why deleting
+   * chat took up to 30 seconds to show in the panel that had just initiated the delete.
+   */
+  private announce(streamId: string, reason: "chat" | "video" | "proxy" | "download" | "metadata"): void {
+    try {
+      // `type` is included because the client dispatches on it; the bus is a passthrough and
+      // does not wrap payloads.
+      this.bus?.publish(STREAM_CHANGED_TOPIC, { type: "stream_changed", streamId, reason });
+    } catch {
+      // A failed announcement must never fail the mutation it describes.
+    }
+  }
 
   /** Abort a live piece download, if any. */
   cancelPiece(streamId: string): boolean {
@@ -130,6 +155,7 @@ export class MediaActionsUseCase {
       }
     }
     if (!removed) return { deleted: false };
+    this.announce(streamId, "video");
 
     // Point the stream record at whatever video still exists (the proxy may
     // be the only playable file now) — or clear it so the UI stops claiming
@@ -179,6 +205,7 @@ export class MediaActionsUseCase {
       state.proxyFrontierSec = 0;
       await this.orchestrator.setState(streamId, state);
     }
+    this.announce(streamId, "proxy");
     return { deleted: true };
   }
 
@@ -225,6 +252,7 @@ export class MediaActionsUseCase {
     } catch (e) {
       if (!(e instanceof Deno.errors.NotFound)) throw e;
     }
+    if (bytes > 0) this.announce(streamId, "download");
     return { bytes };
   }
 
@@ -277,6 +305,7 @@ export class MediaActionsUseCase {
     if (stream?.chatPath && recorded.includes(stream.chatPath)) {
       await this.streams.update({ ...stream, chatPath: null });
     }
+    this.announce(streamId, "chat");
     return { deleted: true };
   }
 
