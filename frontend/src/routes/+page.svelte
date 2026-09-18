@@ -16,11 +16,44 @@
   // not yet satisfied — so it appears the moment a download starts, without
   // a page refresh.
   const downloads = downloadsQuery();
+
+  /**
+   * Imports in flight, shown from the instant Download is pressed.
+   *
+   * The server's first download view cannot arrive before the request does: the stream
+   * id is generated server-side and the GQL metadata fetch happens inside the request,
+   * so a container rendered only from `liveDownloads` appears one round-trip after the
+   * click. These placeholders close that gap with the only thing knowable at press time
+   * (the chosen pieces), and are dropped the moment the real view takes over. They live
+   * client-side by design: the server has nothing to say about a stream it has not
+   * created yet, so this is not a second owner of server state.
+   */
+  type PendingImport = { key: string; title: string; includeProxy: boolean };
+  let pendingImports = $state<PendingImport[]>([]);
+
   // Anything that needs attention: actively downloading, failed, or
   // incomplete (an artifact is missing and can be downloaded again).
   const liveDownloads = $derived(
     (downloads.data?.views ?? []).filter((v) => needsAttention(v)),
   );
+
+  /**
+   * Whether a project's chat/video is MISSING, from the one server-composed view.
+   *
+   * The row labels read `stream.chatPath` — a field on the stream RECORD, a different
+   * owner from the view's stat-based presence — so a label could disagree with the truth
+   * it described. An artifact that is actively downloading is not "missing" either: it
+   * gets no label until the outcome is known, rather than reading "no chat" while its
+   * bytes are still arriving.
+   */
+  function missingArtifacts(streamId: string): { chat: boolean; video: boolean } {
+    const v = viewFor(downloads.data?.views, streamId);
+    const absent = (kind: 'chat' | 'video') => {
+      const a = v?.artifacts.find((x) => x.kind === kind);
+      return Boolean(a) && !a!.onDisk && a!.status !== 'running';
+    };
+    return { chat: absent('chat'), video: absent('video') };
+  }
 
   const streamsQuery = createQuery(() => ({
     queryKey: ['streams'],
@@ -36,6 +69,9 @@
   const importUrlMutation = createMutation(() => ({
     mutationFn: (input: ImportByUrlInput) => apiClient.importByUrl(input),
     onSuccess: () => {
+      // The real view is now (or is about to be) in the downloads query, so the
+      // placeholder has done its job — leaving it would double the container.
+      pendingImports = [];
       // An import STARTS a progressive download server-side (progressive: true), so
       // the downloads query is the surface that must learn about it immediately.
       // Invalidating only ['streams'] left the progress container showing whatever it
@@ -46,6 +82,11 @@
       markDownloadsChanged();
       queryClient.invalidateQueries({ queryKey: ['streams'] });
       queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
+    },
+    onError: () => {
+      // A rejected import creates no server view to take over, so the placeholder
+      // must go or it would sit at 0% forever.
+      pendingImports = [];
     },
   }));
 
@@ -126,12 +167,21 @@
 
   function handleUrlImport() {
     if (!urlInput.trim()) return;
+    // Seed the visualisation BEFORE the request goes out: the container must appear the
+    // instant the button is pressed, and the server cannot answer until it has fetched
+    // metadata and created the stream record. The pieces listed are exactly what was
+    // chosen, so a placeholder never claims a download the server was not asked for.
+    const includeProxy = proxyHeightCap !== null;
+    pendingImports = [
+      ...pendingImports,
+      { key: `pending-${Date.now()}`, title: urlInput.trim(), includeProxy },
+    ];
     importUrlMutation.mutate({
       url: urlInput.trim(),
       progressive: true,
       proxyHeightCap: proxyHeightCap ?? 540,
       maxQualityHeight,
-      includeProxy: proxyHeightCap !== null,
+      includeProxy,
     });
     urlInput = '';
     proxyHeightCap = null;
@@ -316,6 +366,37 @@
     <!-- Download progress (unified bar + itemized popover). Filtered by the
          selected channel; a satisfied download (fully done, playable files
          on disk) leaves the list — the stream lives in the library rows. -->
+    {#if pendingImports.length > 0}
+      {#each pendingImports as p (p.key)}
+        <section class="flex flex-col gap-2" aria-label="Download progress">
+          <div class="rounded-md border border-border bg-surface px-3 py-2" role="status">
+            <div class="flex w-full items-center gap-2.5">
+              <Icon name="download" size={14} class="text-accent" />
+              <span class="max-w-40 shrink-0 truncate font-mono text-[10px] text-ash-dim">{p.title}</span>
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center justify-between gap-2 font-mono text-[10px]">
+                  <span class="truncate text-ash">downloading</span>
+                  <span class="text-ash-dim">0%</span>
+                </div>
+                <div class="mt-1 h-1 overflow-hidden rounded-full bg-surface-3"></div>
+              </div>
+            </div>
+            <!-- Itemized rows listed from the start, at pending, so the shape of the
+                 download is known before its first byte lands. -->
+            <div class="mt-2 flex flex-col gap-1.5 border-t border-border pt-2">
+              {#each ['Chat', ...(p.includeProxy ? ['Proxy'] : []), 'Video'] as label (label)}
+                <div class="flex items-center gap-2">
+                  <span class="w-24 shrink-0 font-mono text-[10px] text-ash">{label}</span>
+                  <div class="h-0.5 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-3"></div>
+                  <span class="w-24 shrink-0 text-right font-mono text-[10px] text-ash-dim">pending</span>
+                </div>
+              {/each}
+            </div>
+          </div>
+        </section>
+      {/each}
+    {/if}
+
     {#if visibleDownloads.length > 0}
       <section class="flex flex-col gap-2" aria-label="Download progress">
         {#each visibleDownloads as v (v.streamId)}
@@ -378,8 +459,16 @@
                   {:else if stream.status === 'failed'}
                     <span class="font-mono text-xs text-error">failed</span>
                   {/if}
-                  {#if !stream.chatPath}
+                  <!-- Presence comes from the download view's stat-based report, so the
+                       labels track reality live: a download finishing, a file deleted or
+                       dragged into the folder all converge here without a refresh. Hidden
+                       while an artifact is still downloading — its absence is not yet a
+                       fact. -->
+                  {#if missingArtifacts(stream.id).chat}
                     <span class="font-mono text-xs text-ash-dim">no chat</span>
+                  {/if}
+                  {#if missingArtifacts(stream.id).video}
+                    <span class="font-mono text-xs text-ash-dim">no video</span>
                   {/if}
                 </div>
               </button>

@@ -61,9 +61,14 @@ export interface DownloadView {
   artifacts: ArtifactView[];
   /** Playback resolution: video if present, else the proxy (preview only). */
   media: {
+    /** What REVIEW plays: the proxy when it exists (fast preview), else the video. */
     playablePath: string | null;
-    /** True when only the proxy exists — exports are not possible. */
+    /** What EXPORT renders from: the video, or null when only a preview exists. */
+    renderPath: string | null;
+    /** True when no video exists — exports are not possible. */
     previewOnly: boolean;
+    /** The playable file is still being written (drives the player's frontier). */
+    playableIsGrowing: boolean;
     frontierSec: number;
     durationSec: number | null;
   };
@@ -148,20 +153,41 @@ export function resolvePlayback(artifacts: ArtifactView[]): DownloadView["media"
 
   const videoPlayable = playable(video);
   const proxyPlayable = playable(proxy);
-  // The video is canonical: prefer it whenever it can be watched at all.
-  const chosen = videoPlayable ?? proxyPlayable;
+  // REVIEW PLAYBACK SERVES THE PROXY. That is what a proxy is FOR: it lands in a
+  // fraction of the time, so previewing and marking clips starts almost immediately
+  // while the full-quality video is still downloading, and scrubbing a 540p file costs
+  // a fraction of the I/O. The video is the RENDER source (exports hard-require it),
+  // which is why `renderPath` reports it separately.
+  //
+  // An earlier revision preferred the video here, which made the low-quality copy
+  // unreachable (the entire reason the proxy is downloaded first) and made deleting the
+  // video look like a no-op, because the same duration kept streaming from the proxy.
+  // Both symptoms belonged to the preference, not to the proxy.
+  const chosen = proxyPlayable ?? videoPlayable;
 
-  // How far into `chosen` playback may seek. A running artifact reports its frontier;
-  // a complete one is its full duration.
-  const chosenArtifact = chosen === videoPlayable ? video : proxy;
+  // How far into `chosen` playback may seek. A running artifact reports its frontier; a
+  // COMPLETE one is its full duration. The project duration is the fallback for a
+  // complete artifact that never recorded its own totalSec — without it a finished file
+  // reported frontier 0, which dimmed the entire timeline for a fully downloaded project.
+  const durationSec = video?.totalSec ?? proxy?.totalSec ?? null;
+  const chosenArtifact = chosen !== null && chosen === proxyPlayable ? proxy : video;
   const frontier = chosenArtifact?.onDisk
-    ? (chosenArtifact.totalSec ?? chosenArtifact.frontierSec ?? 0)
+    ? (chosenArtifact.totalSec ?? durationSec ?? chosenArtifact.frontierSec ?? 0)
     : (chosenArtifact?.frontierSec ?? 0);
 
   return {
     playablePath: chosen,
-    previewOnly: !videoPlayable && Boolean(proxyPlayable),
+    /** What export renders from: the video, or null when only a preview exists. */
+    renderPath: videoPlayable,
+    // Only meaningful for exports, which hard-require the video file. Requires
+    // something playable: an EMPTY project is not "preview only", it is empty, and
+    // `!videoPlayable` alone reported a project with no files at all as preview-only.
+    previewOnly: Boolean(chosen) && !videoPlayable,
+    // Whether the file review plays is still being written. The player drives its stall
+    // detector off the frontier of the file it is ACTUALLY playing — reading the video's
+    // bytes once made a still-growing proxy look complete.
+    playableIsGrowing: Boolean(chosen) && chosenArtifact?.onDisk !== true,
     frontierSec: frontier,
-    durationSec: video?.totalSec ?? proxy?.totalSec ?? null,
+    durationSec,
   };
 }

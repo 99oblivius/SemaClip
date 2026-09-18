@@ -97,9 +97,14 @@ export interface DownloadView {
   overall: { percent: number; etaSec: number | null };
   artifacts: ArtifactView[];
   media: {
+    /** What REVIEW plays: the proxy when it exists (fast preview), else the video. */
     playablePath: string | null;
-    /** True when only the proxy remains — exports are impossible. */
+    /** What EXPORT renders from: the video, or null when only a preview exists. */
+    renderPath: string | null;
+    /** True when no video exists — exports are impossible. */
     previewOnly: boolean;
+    /** The playable file is still being written (drives the player's frontier). */
+    playableIsGrowing: boolean;
     frontierSec: number;
     durationSec: number | null;
   };

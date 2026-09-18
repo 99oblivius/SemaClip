@@ -51,7 +51,10 @@ Deno.test("delete: removing the video leaves the proxy playable (preview) and fl
       },
     }),
   });
-  assertEquals(before.media.playablePath, "/d/hq.mp4");
+  // Review playback serves the proxy while it exists (fast preview); the video is the
+  // render source, reported separately.
+  assertEquals(before.media.playablePath, "/d/proxy.mp4");
+  assertEquals(before.media.renderPath, "/d/hq.mp4");
   assertEquals(before.media.previewOnly, false);
 
   // After DELETE /video: the hq file is gone, the proxy is untouched.
@@ -70,7 +73,7 @@ Deno.test("delete: removing the video leaves the proxy playable (preview) and fl
   const proxy = after.artifacts.find((a) => a.kind === "proxy")!;
   assertEquals(proxy.onDisk, true, "the proxy file must survive deleting the video");
   assertEquals(proxy.bytes, 500, "the proxy keeps its own size");
-  assertEquals(after.media.playablePath, "/d/proxy.mp4", "playback falls back to the proxy");
+  assertEquals(after.media.playablePath, "/d/proxy.mp4", "the proxy is still the preview source");
   assertEquals(after.media.previewOnly, true, "and the UI is told exports are impossible");
 });
 
@@ -93,8 +96,10 @@ Deno.test("delete: removing the proxy leaves the video fully functional", () => 
   assertEquals(proxyRow.onDisk, false, "the deleted proxy reports no file");
   assertEquals(proxyRow.bytes, 0);
   assertEquals(proxyRow.downloadable, true, "and can be downloaded again");
+  // With no proxy, playback falls to the video and the project stays renderable.
   assertEquals(after.media.playablePath, "/d/hq.mp4");
-  assertEquals(after.media.previewOnly, false, "the video is canonical — not preview-only");
+  assertEquals(after.media.renderPath, "/d/hq.mp4");
+  assertEquals(after.media.previewOnly, false, "the video is present — not preview-only");
   assertEquals(after.artifacts.find((a) => a.kind === "video")!.bytes, 2000);
 });
 

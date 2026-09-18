@@ -748,7 +748,14 @@ export class DownloadOrchestrator {
     // ── Single-download case: no proxy opt-in, no proxy pick, or proxy IS
     // already the max quality — one download serves both roles. ──
     if (!opts.includeProxy || !proxy || proxy === hq) {
-      const target = proxy ?? hq;
+      // ONE FILE AT THE USER'S CHOSEN VIDEO QUALITY — `hq`, never `proxy`.
+      //
+      // The proxy pick is a PREVIEW pick: capped by `proxyHeightCap` (540 by default) and
+      // deliberately below the video. Using it as the single download's target silently
+      // ignored `maxQualityHeight`, so a "160p" download fetched 480p (measured: 551MB,
+      // where the same VOD via a manual piece — which does use `hq` — fetched 101MB). The
+      // proxy is a fallback only for when no hq pick exists at all.
+      const target = hq ?? proxy;
       if (target) {
         // ONE growing fragmented MP4 serves the project — no .ts, no twin,
         // no remux, and crucially no second artifact aliasing this file

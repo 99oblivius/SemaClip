@@ -71,8 +71,20 @@
   // presence of a URL.
   const downloads = downloadsQuery();
   const localMedia = $derived(viewFor(downloads.data?.views, streamId)?.media ?? null);
-  /** True only when NOTHING local exists yet — i.e. before the first download. */
-  const useSourceUrl = $derived(Boolean(stream?.sourceUrl) && !localMedia?.playablePath);
+  /**
+   * What the player may play: LOCAL MEDIA ONLY, never the VOD URL.
+   *
+   * The source URL exists to DOWNLOAD from. It used to reach the player as an HLS
+   * fallback ("no local file yet, so stream from Twitch"), which is why the player kept
+   * showing the vod url despite repeated attempts to remove it: the fallback was still a
+   * legitimate branch, so every state without a local file landed on it. It is gone. The
+   * player receives `playablePath` or nothing, and nothing renders an explicit
+   * "not downloaded yet" state rather than silently streaming the remote VOD.
+   *
+   * Review prefers the proxy (it lands first and scrubs cheaply); the video is the
+   * export/render source, reported separately as `renderPath`.
+   */
+  const playableSrc = $derived(localMedia?.playablePath ?? null);
 
 
   // ── Undo/redo history (P0-12): endpoint edits push undo entries; Ctrl+Z /
@@ -456,7 +468,6 @@
       <VideoPlayer
         bind:this={playerComp}
         {streamId}
-        hls={useSourceUrl}
         duration={stream?.duration ?? null}
         clips={visibleClips}
         currentClip={currentClip}

@@ -58,10 +58,23 @@ function presenceForArtifact(
       ? (presence.proxy ?? { onDisk: false, bytes: 0, path: null })
       : { onDisk: false, bytes: 0, path: null };
   }
-  // Single-download: the one file is reported as the video's artifact.
-  return includeProxy
-    ? (presence.hq ?? { onDisk: false, bytes: 0, path: null })
-    : (presence.proxy ?? { onDisk: false, bytes: 0, path: null });
+  if (includeProxy) return presence.hq ?? { onDisk: false, bytes: 0, path: null };
+
+  // Single-download mode: there is ONE video file, and WHICH SLOT HOLDS IT depends on
+  // how it arrived. The pipeline records it in the proxy slot (the one file carries the
+  // main video), while a manual video piece records it in the hq slot. Reading only the
+  // proxy slot therefore reported a freshly re-downloaded video as ABSENT: the file was
+  // on disk at 101MB while the row said `pending`, `bytes: 0`, and offered a Download
+  // button that "finished in seconds without downloading" — it was re-fetching a file
+  // that already existed, because the view never saw it.
+  //
+  // So prefer whichever slot actually holds a file, and keep the mode's primary when
+  // neither does so the absent state still names the path a download would fill.
+  const hq = presence.hq;
+  const proxy = presence.proxy;
+  if (hq?.onDisk) return hq;
+  if (proxy?.onDisk) return proxy;
+  return proxy ?? hq ?? { onDisk: false, bytes: 0, path: null };
 }
 
 export interface ProjectInput {

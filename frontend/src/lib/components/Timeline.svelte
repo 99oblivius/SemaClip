@@ -69,6 +69,26 @@
     return v.media.frontierSec;
   });
 
+  /**
+   * The seek ceiling: how far into the timeline the media can actually be scrubbed.
+   *
+   * The timeline keeps showing the ABSOLUTE duration (a 5.8 h VOD looks 5.8 h long from
+   * the first second), while the scrubbable portion is this extent — the frontier of the
+   * file review plays, grown live as chunks land, and the full duration once that file is
+   * complete. Same mechanism as the waveform's `extentSec`, which draws only the media
+   * that exists.
+   */
+  const playableExtent = $derived.by(() => {
+    const v = dlView;
+    if (!v) return Infinity;
+    if (!v.media.playableIsGrowing) return Infinity;
+    const proxy = v.artifacts.find((a) => a.kind === 'proxy');
+    const video = v.artifacts.find((a) => a.kind === 'video');
+    // The growing file review plays: the proxy when it has bytes, else the video.
+    const growing = (proxy && proxy.bytes > 0 ? proxy : video)?.frontierSec ?? 0;
+    return growing > 0 ? growing : Infinity;
+  });
+
   let canvasEl = $state<HTMLCanvasElement | undefined>(undefined);
   let containerEl = $state<HTMLDivElement | undefined>(undefined);
   let rafId = 0;
@@ -204,11 +224,23 @@
   const viewStart = $derived(player.viewStart || 0);
   const viewEnd = $derived(player.viewEnd || duration);
   const viewSpan = $derived(Math.max(1, viewEnd - viewStart));
+  /**
+   * Pixel → time, in absolute VOD seconds.
+   *
+   * The timeline is ABSOLUTE (the full VOD duration always), but only the downloaded
+   * prefix is scrubbable: past `playableExtent` the media genuinely does not exist, so
+   * seeking there lands the player on nothing. Clamping here — the single place a pixel
+   * becomes a time — covers dragging, clicking and marker jumps at once, and the void
+   * band drawn past the extent is then exactly what the cursor cannot enter.
+   *
+   * `playableExtent` is Infinity once the file being played is complete, so a finished
+   * project scrubs its whole timeline.
+   */
   function xToTime(x: number): number {
     if (!containerEl) return 0;
     const w = containerEl.clientWidth;
     const t = viewStart + (x / w) * viewSpan;
-    return Math.max(0, Math.min(duration, t));
+    return Math.max(0, Math.min(duration, t, playableExtent));
   }
 
   function timeToX(t: number): number {

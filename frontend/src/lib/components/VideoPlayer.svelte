@@ -8,13 +8,9 @@
   import type { Clip } from '$shared/types';
   import { onDestroy } from 'svelte';
   import { browser } from '$app/environment';
-  import Hls from 'hls.js';
-
+  
   interface Props {
     streamId: string;
-    /** Stream has a remote source (Twitch URL) — play through the HLS proxy
-     *  (growing playback: chunks stream as the downloader lands them). */
-    hls?: boolean;
     duration: number | null;
     clips: Clip[];
     currentClip: Clip | undefined;
@@ -24,7 +20,6 @@
 
   let {
     streamId,
-    hls = false,
     duration,
     clips,
     currentClip,
@@ -33,7 +28,6 @@
   }: Props = $props();
 
   let videoEl = $state<HTMLVideoElement | undefined>(undefined);
-  let hlsInstance: Hls | null = null;
   let containerEl = $state<HTMLDivElement | undefined>(undefined);
 
   // Local UI state — restored from localStorage for persistence across refreshes.
@@ -100,14 +94,36 @@
   let frontierAtLastReload = 0;
   let reloadInFlight = false;
 
-  /** Media URL; the counter busts Chromium's cache so a reload re-ranges. */
-  const videoSrc = $derived(
-    hls ? undefined : `${apiClient.videoUrl(streamId)}${reloadCount > 0 ? `?_r=${reloadCount}` : ''}`,
-  );
+  /**
+   * Media URL — always a LOCAL file served by the media route, never the VOD URL.
+   *
+   * The player plays what is on disk (the proxy during review, the video once the proxy
+   * is gone). There is no remote fallback: streaming the source would make a
+   * local-first clipper depend on the network and would bypass the proxy the project
+   * downloaded for exactly this purpose. When nothing local exists, `srcUnavailable`
+   * renders an explicit state instead.
+   *
+   * The reload counter busts Chromium's cache so a re-range picks up newly written bytes.
+   */
+  const videoSrc = $derived.by(() => {
+    if (!srcUnavailable) return `${apiClient.videoUrl(streamId)}${reloadCount > 0 ? `?_r=${reloadCount}` : ''}`;
+    return undefined;
+  });
 
   // Frontier from the SHARED downloads query (one poller for the whole app).
   const downloads = downloadsQuery();
   const dlView = $derived(viewFor(downloads.data?.views, streamId));
+
+  /**
+   * Nothing local to play yet (a fresh project, or every artifact deleted).
+   *
+   * The state is derived from the same one view the rest of the app reads, so it clears
+   * itself the moment the first bytes land — a download starting IS the transition out
+   * of it, which is what makes the player follow the download live.
+   */
+  const srcUnavailable = $derived(
+    downloads.isSuccess ? !dlView?.media.playablePath : false,
+  );
   $effect(() => {
     const v = dlView;
     if (!v) return;
@@ -116,9 +132,11 @@
       frontierBytes = Number.MAX_SAFE_INTEGER;
       return;
     }
-    const video = v.artifacts.find((a) => a.kind === 'video');
-    const proxy = v.artifacts.find((a) => a.kind === 'proxy');
-    frontierBytes = video?.bytes ?? proxy?.bytes ?? 0;
+    // The file review PLAYS is the proxy when it exists (the view picked it, so ask the
+    // view), otherwise the video. Reading the video's bytes here once made a
+    // still-growing proxy look complete, so the stall detector never fired.
+    const playable = v.media.playableIsGrowing ? (v.artifacts.find((a) => a.kind === 'proxy') ?? v.artifacts.find((a) => a.kind === 'video')) : null;
+    frontierBytes = playable?.bytes ?? Number.MAX_SAFE_INTEGER;
   });
 
   /** Reload the media at the current position to pick up newly written bytes. */
@@ -146,7 +164,7 @@
 
   // Stall detector: a growing file that stops advancing needs a reload.
   $effect(() => {
-    if (!hls || !videoEl) return;
+    if (!videoEl) return;
     const id = setInterval(() => {
       const v = videoEl;
       if (!v) return;
@@ -159,24 +177,6 @@
       reloadMedia();
     }, 500);
     return () => clearInterval(id);
-  });
-
-  // HLS fallback: containers that cannot be streamed with plain Range
-  // (raw MPEG-TS) still play through the chunk proxy.
-  $effect(() => {
-    if (!hls || !videoEl) return;
-    if (!Hls.isSupported()) return;
-    const instance = new Hls({ enableWorker: true, lowLatencyMode: false });
-    hlsInstance = instance;
-    instance.loadSource(apiClient.hlsPlaylistUrl(streamId));
-    instance.attachMedia(videoEl);
-    instance.on(Hls.Events.ERROR, (_evt, data) => {
-      if (data.fatal) console.error('[hls] fatal:', data.type, data.details);
-    });
-    return () => {
-      instance.destroy();
-      if (hlsInstance === instance) hlsInstance = null;
-    };
   });
 
   function seekTo(time: number) {
@@ -292,10 +292,23 @@
 
 <!-- No bg-black — video element handles its own aspect; container is transparent -->
 <div bind:this={containerEl} class="relative flex-1 overflow-hidden rounded-lg">
+  {#if srcUnavailable}
+    <!-- Explicit, not a silent fallback to the remote VOD: the player plays local media
+         or says why it cannot. This is the state a project is in before its first
+         download (and after deleting everything). -->
+    <div class="flex h-full w-full flex-col items-center justify-center gap-2 text-center">
+      <Icon name="download" size={22} class="text-ash-dim" />
+      <p class="font-mono text-xs text-ash">nothing downloaded yet</p>
+      <p class="max-w-72 font-mono text-[10px] text-ash-dim">
+        The player runs from local media only. Start a download and playback begins as soon
+        as the first chunks land.
+      </p>
+    </div>
+  {/if}
   <video
     bind:this={videoEl}
     src={videoSrc}
-    class="h-full w-full"
+    class="h-full w-full {srcUnavailable ? 'hidden' : ''}"
     ontimeupdate={handleTimeUpdate}
     onloadedmetadata={(e: Event & { currentTarget: HTMLVideoElement }) => {
       videoDuration = e.currentTarget.duration;

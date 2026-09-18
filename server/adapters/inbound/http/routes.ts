@@ -964,42 +964,32 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     const stream = await deps.getStream.execute(c.req.param("streamId"));
     if (!stream) return c.json({ error: "Video not available" }, 404);
 
-    // Proxy preference: explicit ?src=full override, else proxy if it exists.
+    // Review playback serves the PROXY whenever one exists: it lands in a fraction of
+    // the time and scrubs cheaply, which is exactly why it is downloaded first. The
+    // video is the RENDER source — exports ask for it explicitly with ?src=full, and
+    // the download view reports it separately as `renderPath`.
+    //
+    // This preference was briefly inverted (video first). That made the proxy
+    // unreachable — the purpose it is downloaded for — and made deleting the video look
+    // like a no-op, because the route kept serving the proxy's bytes at the same
+    // duration. Both symptoms belonged to the preference, not to the proxy.
     const wantFull = c.req.query("src") === "full";
     // Download state is the primary source of truth for playable media —
     // a mid-download stream has no vodPath yet but its proxy twin exists.
     let mediaPath = stream.vodPath ?? "";
     if (!wantFull) {
-      // mp4 twins first — Chromium can't demux raw MPEG-TS, so a .ts vodPath
-      // is unplayable; its .mp4 twin (kept in the download state) is the
-      // playable form of the same bytes.
+      // mp4 twins only — Chromium can't demux raw MPEG-TS, so a .ts path is
+      // unplayable; its .mp4 twin (kept in the download state) is the playable form of
+      // the same bytes.
       const dl = await deps.downloadState(c.req.param("streamId"));
-      // Prefer the MAIN video over the proxy: the proxy is a preview copy, so
-      // playing it while a full-quality file exists wastes the download — and
-      // it made deleting the video look like it changed nothing, because the
-      // route kept serving the proxy's bytes at the same duration.
-      // Mid-download only the proxy exists, so this falls through naturally.
       const pickPlayable = async (p: string | null | undefined) =>
         p && await Deno.stat(p).then(() => true).catch(() => false) ? p : null;
-      const playableTwin = (await pickPlayable(dl.hqMp4))
-        ?? (await pickPlayable(dl.hqPath))
-        ?? (await pickPlayable(dl.proxyMp4))
-        ?? (await pickPlayable(dl.proxyPath));
-      if (playableTwin && await Deno.stat(playableTwin).then(() => true).catch(() => false)) {
+      const playableTwin = (await pickPlayable(dl.proxyMp4))
+        ?? (await pickPlayable(dl.proxyPath))
+        ?? (await pickPlayable(dl.hqMp4))
+        ?? (await pickPlayable(dl.hqPath));
+      if (playableTwin) {
         mediaPath = playableTwin;
-      } else {
-        try {
-          const meta = await deps.metadata.get(stream.id, "transcript_srt");
-          if (meta) {
-            const artifactDir = (JSON.parse(meta) as { path: string }).path.replace(/\/[^/]+$/, "");
-            const proxyPath = `${artifactDir}/proxy.mp4`;
-            if (await Deno.stat(proxyPath).then(() => true).catch(() => false)) {
-              mediaPath = proxyPath;
-            }
-          }
-        } catch {
-          // fall back to source
-        }
       }
     }
 

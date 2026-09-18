@@ -223,21 +223,53 @@ export class MediaActionsUseCase {
     return { bytes };
   }
 
-  /** Delete the chat JSON (chatPath in the stream record + download state). */
+  /**
+   * Delete the chat JSON.
+   *
+   * ENUMERATES the names the chat may carry — project-named (`{slug}.chat.json`) plus
+   * every legacy boilerplate name — rather than testing one hardcoded path. Artifacts are
+   * project-named, so `chat.json` matched nothing on any project created since the rename:
+   * the route returned 200 with `deleted: false` and the file stayed on disk, which the UI
+   * reports as "no chat" never appearing after a delete. Exactly the hardcoded-name-list
+   * defect already fixed for `DELETE /download`; this was the same bug one artifact over.
+   *
+   * All THREE owners are reset: the file, the download state, and the stream record.
+   */
   async deleteChat(streamId: string): Promise<{ deleted: boolean }> {
     const dir = await this.artifactDir(streamId);
     if (!dir) return { deleted: false };
-    const chatPath = `${dir}/chat.json`;
-    if (!(await this.fs.exists(chatPath))) return { deleted: false };
-    await this.fs.remove(chatPath);
+
+    const names = [...LEGACY_NAMES.chat];
+    const stream = await this.streams.findById(streamId);
+    if (stream) {
+      names.push(artifactName("chat", streamSlug({
+        id: streamId,
+        title: stream.title,
+        streamer: stream.streamer,
+      })));
+    }
+    // Whatever the state or the record actually points at, wherever it lives — a
+    // folder import references the user's own directory, which is not `dir`.
     const state = await this.orchestrator.getState(streamId);
+    const recorded = [state.chatPath, stream?.chatPath].filter(
+      (p): p is string => Boolean(p),
+    );
+
+    let removed = false;
+    for (const path of new Set([...recorded, ...names.map((n) => `${dir}/${n}`)])) {
+      if (await this.fs.exists(path)) {
+        await this.fs.remove(path);
+        removed = true;
+      }
+    }
+    if (!removed) return { deleted: false };
+
     state.chatPath = null;
     state.chatCount = 0;
     const part = state.parts.find((x) => x.kind === "chat");
     if (part && part.status === "done") part.status = "pending";
     await this.orchestrator.setState(streamId, state);
-    const stream = await this.streams.findById(streamId);
-    if (stream?.chatPath === chatPath) {
+    if (stream?.chatPath && recorded.includes(stream.chatPath)) {
       await this.streams.update({ ...stream, chatPath: null });
     }
     return { deleted: true };

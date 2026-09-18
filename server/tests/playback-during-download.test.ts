@@ -46,13 +46,22 @@ Deno.test("a RUNNING download is playable to its frontier, not withheld until co
     artifact({ kind: "proxy", status: "done", onDisk: true, path: "/vods/1/clip - proxy.mp4" }),
   ]);
 
+  // The COMPLETE PROXY wins for review playback even though the video is playable: the
+  // proxy is what lands first and scrubs cheaply, so it is the right preview source while
+  // both exist. The video is reported separately as `renderPath`.
   assertEquals(
     media.playablePath,
-    "/vods/1/clip - video.mp4",
-    "the running video must be playable; falling back to the source url is the reported bug",
+    "/vods/1/clip - proxy.mp4",
+    "review playback serves the proxy whenever it exists",
   );
-  assertEquals(media.frontierSec, 140, "the frontier is the seek ceiling for a growing file");
-  assertEquals(media.previewOnly, false, "a video exists, so this is not preview-only");
+  assertEquals(media.renderPath, "/vods/1/clip - video.mp4", "the video is the render source");
+  assertEquals(
+    media.frontierSec,
+    7200,
+    "the frontier belongs to the file being PLAYED (the complete proxy), not its sibling",
+  );
+  assertEquals(media.previewOnly, false, "a video exists, so exports are possible");
+  assertEquals(media.playableIsGrowing, false, "the chosen proxy is complete");
 });
 
 Deno.test("a running artifact with NO bytes yet is not offered", () => {
@@ -70,6 +79,7 @@ Deno.test("a running artifact with NO bytes yet is not offered", () => {
   ]);
   assertEquals(media.playablePath, null);
   assertEquals(media.frontierSec, 0);
+  assertEquals(media.renderPath, null);
 });
 
 Deno.test("a COMPLETE artifact plays to its full duration, not a stale frontier", () => {
@@ -86,21 +96,42 @@ Deno.test("a COMPLETE artifact plays to its full duration, not a stale frontier"
   ]);
   assertEquals(media.playablePath, "/vods/1/clip - video.mp4");
   assertEquals(media.frontierSec, 7200, "a complete file is fully seekable");
+  assertEquals(media.renderPath, "/vods/1/clip - video.mp4");
+  assertEquals(media.playableIsGrowing, false);
 });
 
-Deno.test("a running VIDEO wins over a complete proxy, and the proxy stays the fallback", () => {
+Deno.test("the PROXY is the review source while both exist; the video is the render source", () => {
+  // Owner directive: the proxy exists for fast viewing and editing; the video is what
+  // final rendering uses. So review playback takes the proxy whenever it is playable,
+  // and `renderPath` carries the video for exports.
   const withVideo = resolvePlayback([
     artifact({ kind: "video", status: "running", path: "/v.mp4", bytes: 1000, frontierSec: 30 }),
-    artifact({ kind: "proxy", status: "done", onDisk: true, path: "/p.mp4", frontierSec: 5400 }),
+    artifact({ kind: "proxy", status: "done", onDisk: true, path: "/p.mp4", totalSec: 5400 }),
   ]);
-  assertEquals(withVideo.playablePath, "/v.mp4", "the video is canonical whenever it can be watched");
+  assertEquals(withVideo.playablePath, "/p.mp4", "the proxy is the review source");
+  assertEquals(withVideo.renderPath, "/v.mp4", "the video remains the render source");
+  assertEquals(
+    withVideo.playableIsGrowing,
+    false,
+    "the growing video must not drive the stall detector of a complete proxy",
+  );
 
-  // Once the video is deleted, playback falls back to the proxy at preview quality.
+  // With no proxy, playback falls to the video, and the frontier is ITS frontier.
+  const videoOnly = resolvePlayback([
+    artifact({ kind: "video", status: "running", path: "/v.mp4", bytes: 1000, frontierSec: 30 }),
+    artifact({ kind: "proxy", status: "pending" }),
+  ]);
+  assertEquals(videoOnly.playablePath, "/v.mp4");
+  assertEquals(videoOnly.frontierSec, 30);
+  assertEquals(videoOnly.playableIsGrowing, true, "the played file is still arriving");
+
+  // Once the video is deleted, playback stays on the proxy and exports are impossible.
   const proxyOnly = resolvePlayback([
     artifact({ kind: "video", status: "pending" }),
     artifact({ kind: "proxy", status: "done", onDisk: true, path: "/p.mp4", totalSec: 5400 }),
   ]);
   assertEquals(proxyOnly.playablePath, "/p.mp4");
+  assertEquals(proxyOnly.renderPath, null, "no video means nothing to render from");
   assertEquals(proxyOnly.previewOnly, true, "no video means exports are impossible");
 });
 
@@ -109,5 +140,8 @@ Deno.test("nothing on disk yields no playable path, so the source fallback still
     artifact({ kind: "video", status: "pending" }),
     artifact({ kind: "proxy", status: "pending" }),
   ]);
-  assertEquals(media.playablePath, null, "the frontend must still be able to fall back to the source url");
+  // No local file: the player shows an explicit empty state. It must NEVER be handed the
+  // source url to stream — that fallback is what kept the VOD url in the player.
+  assertEquals(media.playablePath, null, "nothing local is playable yet");
+  assertEquals(media.renderPath, null);
 });

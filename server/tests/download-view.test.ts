@@ -194,8 +194,8 @@ Deno.test("view: two-file mode yields distinct proxy and video rows with no shar
   assertEquals(video.bytes, 2000, "sizes land on the right row");
 });
 
-Deno.test("view: playback resolves to the video, falling back to the proxy as preview", () => {
-  // Video present → canonical.
+Deno.test("view: playback resolves to the PROXY for review, the video for render", () => {
+  // Both present → review plays the proxy (it lands first, it scrubs cheaply).
   const both = projectDownloadView({
     ...base,
     state: state({
@@ -208,8 +208,9 @@ Deno.test("view: playback resolves to the video, falling back to the proxy as pr
       },
     }),
   });
-  assertEquals(both.media.playablePath, "/d/hq.mp4");
-  assertEquals(both.media.previewOnly, false);
+  assertEquals(both.media.playablePath, "/d/proxy.mp4", "the proxy is the review source");
+  assertEquals(both.media.renderPath, "/d/hq.mp4", "the video is the render source");
+  assertEquals(both.media.previewOnly, false, "a video exists, so exports are possible");
 
   // Two-file mode with the VIDEO deleted: only the proxy survives → the
   // project plays at preview quality and exports are impossible.
@@ -223,6 +224,7 @@ Deno.test("view: playback resolves to the video, falling back to the proxy as pr
     }),
   });
   assertEquals(proxyOnly.media.playablePath, "/d/proxy.mp4");
+  assertEquals(proxyOnly.media.renderPath, null, "nothing to render from");
   assertEquals(proxyOnly.media.previewOnly, true, "proxy-only must be flagged for the export warning");
 
   // Single-download mode: the one file IS the video, so it is not preview-only.
@@ -236,11 +238,13 @@ Deno.test("view: playback resolves to the video, falling back to the proxy as pr
     }),
   });
   assertEquals(single.media.playablePath, "/d/video.mp4");
+  assertEquals(single.media.renderPath, "/d/video.mp4", "the one file is both surfaces");
   assertEquals(single.media.previewOnly, false, "the single file is the video, not a preview");
 
   // Nothing at all → no playback.
   const none = resolvePlayback([]);
   assertEquals(none.playablePath, null);
+  assertEquals(none.renderPath, null);
   assertEquals(none.previewOnly, false);
 });
 

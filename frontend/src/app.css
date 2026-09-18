@@ -44,6 +44,28 @@
     font-family: var(--font-body);
     font-size: 14px;
     line-height: 1.5;
+    /* The app is dark-only. Without this the OS paints a <select>'s popup with the
+       LIGHT system palette — the white menu the dropdowns showed — because the native
+       list is drawn by the platform, not by our CSS. It also darkens native
+       scrollbars and the caret. */
+    color-scheme: dark;
+  }
+
+  /* A native select's popup cannot be styled directly, but while it is open the
+     closed control can carry the accent so the open state is unmistakable. :open is
+     the precise hook; :focus is the practical equivalent on engines without it
+     (clicking the control both focuses and opens it). */
+  select:open,
+  select:focus {
+    border-color: var(--color-accent);
+    outline: none;
+  }
+
+  /* Belt and braces for engines that do honor option styling (the popup inherits
+     color-scheme otherwise). */
+  select option {
+    background-color: var(--color-surface-2);
+    color: var(--color-ink);
   }
 
   body {

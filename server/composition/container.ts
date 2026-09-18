@@ -150,7 +150,7 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
   const getClip = new GetClipUseCase(clipRepo);
   const rejectClip = new RejectClipUseCase(clipRepo);
   const updateClip = new UpdateClipUseCase(clipRepo);
-  const exportClip = new ExportClipUseCase(clipRepo, streamRepo, ffmpeg, fs, config.exportDir, metadataRepo);
+  const exportClip = new ExportClipUseCase(clipRepo, streamRepo, ffmpeg, fs, config.exportDir, metadataRepo, downloadOrchestrator);
   const manageQueue = new ManageQueueUseCase(jobRepo);
   const settings = new SettingsUseCase(new SqliteSettingsRepository(db), bus);
   const presets = new SqliteExportPresetRepository(db);
