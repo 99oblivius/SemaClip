@@ -4,7 +4,7 @@
  * and publishes one unified state for the UI via
  *   GET /api/streams/:id/download
  *
- * Progress semantics (docs/DOWNLOAD-PIPELINE.md):
+ * Progress semantics (ARCHITECTURE.md §5):
  * - overall.percent is a byte-weighted mean across parts (video parts weight
  *   by BANDWIDTH × totalSec; chat/markers carry tiny fixed weights).
  * - Per-part ETA from a rolling 10s throughput window — total/elapsed lies
@@ -14,7 +14,8 @@
  *   required for review.
  */
 
-import type { StreamMetadataRepository } from "@/application/ports/outbound.ts";
+import type { Stream } from "shared/types";
+import type { StreamMetadataRepository, StreamRepository } from "@/application/ports/outbound.ts";
 import type { ToolRegistry } from "@/adapters/outbound/ffmpeg/tool-paths.ts";
 import {
   extractVodId,
@@ -135,12 +136,53 @@ function updateEta(part: PartRuntime, cumulativeBytes: number): void {
 }
 
 export class DownloadOrchestrator {
+  /**
+   * The NETWORK boundary, injectable so a test can drive the real piece bodies.
+   *
+   * The attach calls live INSIDE `runChatPiece`/`runVideoPiece`, so a seam that replaced
+   * those runners would replace the code under test: an earlier version of the test did
+   * exactly that and passed with the fix reverted. Substituting only the two functions
+   * that talk to Twitch leaves every line of the runners — including the `onPartDone`
+   * calls that were missing — executed.
+   *
+   * Defaults to the real implementations; tests override them.
+   */
+  net: {
+    chat: (
+      vodId: string,
+      destPath: string,
+      opts: { signal?: AbortSignal | undefined; onProgress: (p: { comments: number; pages: number }) => void },
+    ) => Promise<number>;
+    fmp4: (
+      playlistUrl: string,
+      destPath: string,
+      opts: {
+        ffmpegPath: string;
+        signal?: AbortSignal | undefined;
+        indexPath?: string | undefined;
+        lookahead?: number;
+        onProgress: (p: { downloadedSec: number; totalSec: number; bytes: number; percent: number }) => void;
+      },
+    ) => Promise<unknown>;
+  };
+
   constructor(
     private readonly metadata: StreamMetadataRepository,
     /** Resolved at spawn time via the registry: a download can land mid-session,
      *  and a path captured at construction would go stale. */
     private readonly tools: ToolRegistry,
-  ) {}
+    /**
+     * Stream records, so a finished piece can point its record at the file it wrote.
+     * Optional: the orchestrator is constructed in tests without one, and a piece still
+     * downloads correctly when absent — only the record attachment is skipped.
+     */
+    private readonly streams: StreamRepository | null = null,
+  ) {
+    this.net = {
+      chat: (vodId, destPath, o) => downloadChat(vodId, destPath, o),
+      fmp4: (playlistUrl, destPath, o) => downloadFmp4(playlistUrl, destPath, o),
+    };
+  }
 
   /** Streams with an orchestrator run in THIS process — reconcile() must
    *  not touch their running phase (orphaned vs live distinction). */
@@ -415,8 +457,31 @@ export class DownloadOrchestrator {
     // progress write has a full state object to extend.
     this.liveStates.set(opts.streamId, await this.getState(opts.streamId));
     this.markRunLive(opts.streamId, true);
+
+    // ── ATTACH ON COMPLETION, for EVERY piece ─────────────────────────────────
+    // A piece that finishes must update the STREAM RECORD, not just the download
+    // state. Two owners hold each artifact's location: the state (which the settings
+    // rows render from) and `stream.vodPath`/`stream.chatPath` (which the chat panel,
+    // the video route and Export read). The pipeline always fired onPartDone and the
+    // manual-piece path never did, so re-downloading an artifact moved the file and
+    // left the record pointing at nothing: the owner's "deleting chat empties the panel
+    // but re-downloading it does not bring the chat back". Chat is the visible case;
+    // a manual VIDEO piece had the same defect (Export renders from the record's path).
+    //
+    // Supplied HERE rather than at each runner so both kinds share one implementation —
+    // a per-runner copy is how the two drifted apart in the first place.
+    const onPartDone = (kind: DownloadPartKind, state: DownloadState) =>
+      this.attachPartToStream(opts.streamId, kind, state);
+
     if (opts.kind === "chat") {
-      await this.runChatPiece({ streamId: opts.streamId, destDir: opts.destDir, vodId: opts.vodId, slug: opts.slug, signal: opts.signal });
+      await this.runChatPiece({
+        streamId: opts.streamId,
+        destDir: opts.destDir,
+        vodId: opts.vodId,
+        slug: opts.slug,
+        signal: opts.signal,
+        onPartDone,
+      });
     } else {
       await this.runVideoPiece({
         streamId: opts.streamId,
@@ -425,8 +490,33 @@ export class DownloadOrchestrator {
         slug: opts.slug,
         quality: opts.quality!,
         signal: opts.signal,
+        onPartDone,
       });
     }
+  }
+
+  /**
+   * Point the stream record at an artifact that just finished downloading.
+   *
+   * Deliberately mirrors the pipeline's attachPart (ImportStreamByUrlUseCase): the same
+   * roles, the same precedence, one behaviour whether the bytes arrived on a fresh import
+   * or on a manual re-download. HQ outranks the proxy, and the proxy is never allowed to
+   * overwrite a recorded HQ path.
+   */
+  private async attachPartToStream(
+    streamId: string,
+    kind: DownloadPartKind,
+    state: DownloadState,
+  ): Promise<void> {
+    if (!this.streams) return;
+    const stream = await this.streams.findById(streamId);
+    if (!stream) return;
+    const patch: Partial<Stream> = {};
+    if (kind === "chat" && state.chatPath) patch.chatPath = state.chatPath;
+    if (kind === "hq" && state.hqPath) patch.vodPath = state.hqPath;
+    if (kind === "proxy" && state.proxyPath && !state.hqPath) patch.vodPath = state.proxyPath;
+    if (Object.keys(patch).length === 0) return;
+    await this.streams.update({ ...stream, ...patch });
   }
 
   /** Canonical 4-part skeleton — every state write carries all parts so UI
@@ -454,6 +544,7 @@ export class DownloadOrchestrator {
     slug: string;
     quality: HlsQuality;
     signal?: AbortSignal | undefined;
+    onPartDone?: (kind: DownloadPartKind, state: DownloadState) => void | Promise<void>;
   }): Promise<void> {
     const { kind } = opts;
     const controller = new AbortController();
@@ -475,7 +566,7 @@ export class DownloadOrchestrator {
     const indexPath = `${opts.destDir}/${artifactName(role === "proxy" ? "proxy-index" : "video-index", opts.slug)}`;
     let lastWrite = 0;
     try {
-      await downloadFmp4(opts.quality.playlistUrl, mp4Path, {
+      await this.net.fmp4(opts.quality.playlistUrl, mp4Path, {
         signal: controller.signal,
         lookahead: kind === "proxy" ? 3 : 4,
         indexPath,
@@ -508,6 +599,9 @@ export class DownloadOrchestrator {
       }
       started.phase = "done";
       await this.persist(opts.streamId, started, rt);
+      // The record must learn the file's new location, or the reader that consults
+      // `stream.vodPath` (Export) keeps resolving the path it had before.
+      await opts.onPartDone?.(kind, started);
     } catch (err) {
       part.status = controller.signal.aborted ? "skipped" : "failed";
       part.error = err instanceof Error ? err.message : String(err);
@@ -532,6 +626,7 @@ export class DownloadOrchestrator {
     vodId: string;
     slug: string;
     signal?: AbortSignal | undefined;
+    onPartDone?: (kind: DownloadPartKind, state: DownloadState) => void | Promise<void>;
   }): Promise<void> {
     const chatPath = `${opts.destDir}/${artifactName("chat", opts.slug)}`;
     const controller = new AbortController();
@@ -547,7 +642,7 @@ export class DownloadOrchestrator {
 
     try {
       let lastWrite = 0;
-      const count = await downloadChat(opts.vodId, chatPath, {
+      const count = await this.net.chat(opts.vodId, chatPath, {
         signal: controller.signal,
         onProgress: ({ comments }) => {
           part.percent = Math.min(0.95, Math.log10(1 + comments) / 4);
@@ -565,6 +660,10 @@ export class DownloadOrchestrator {
       started.chatCount = count;
       started.phase = (started.proxyPath || started.hqPath) ? "done" : "idle";
       await this.persist(opts.streamId, started, rt);
+      // Attach the re-downloaded chat to the record. Without this the settings row
+      // reported the file, the state recorded it, and the chat panel stayed empty —
+      // every reader of the panel resolves `stream.chatPath`.
+      await opts.onPartDone?.("chat", started);
     } catch (err) {
       part.status = controller.signal.aborted ? "skipped" : "failed";
       part.error = err instanceof Error ? err.message : String(err);

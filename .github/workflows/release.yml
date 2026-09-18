@@ -802,7 +802,7 @@ jobs:
           # cannot describe two platforms' dylibs. It is safe only because every
           # entry here is a Linux patch keyed by a Linux version string; a Windows
           # client's version finds no entry and stays put. Adding Windows entries
-          # requires per-arch manifest paths (docs/DISTRIBUTION-PLAN.md step 3).
+          # requires per-arch manifest paths.
 
       - name: Republish the manifest and the patch
         if: steps.prev.outputs.found == 'true'

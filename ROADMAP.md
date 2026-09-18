@@ -27,8 +27,10 @@ Goal: replace 100% fabricated output with defensible output on the training VOD;
 
 **Status (2026-09-09, Phase 1 COMPLETE)**: pipeline verified E2E on real fixtures — bundled jfk.wav (11s, real whisper→clip→SRT) and a 4h ironmouse subathon slice (17.5k comments, 158× denser chat; full-path HTTP job: 15-min slice → 10 clips from both axes in 32.1s = 28× realtime). Perf measured: 36× realtime @16 workers → 5.8h VOD ≈ 10 min CPU (budget met 6×). Recall on 6 hand-labeled organic bursts: 5/6 (miss = 3s spike under minDurationSec=4, by-design policy); gift-train floods correctly not flagged. TWO axes live: hype (chat-driven) + reaction (voice-gated delta energy + wording, chat-independent — the streamer-reaction directive). Adaptive floor+spread baselines validated on dense data (floor drift +195%/4h handled); cold-start warmup fixes early over-scoring. Known limits: whisper text loses emphasis (prosody axis deferred to Phase 3); single-axis ground truth only (6 labels).
 
-## Phase 2 — Frontend re-development (first-priority product surface)
+## Phase 2 — Frontend re-development (COMPLETE)
 Goal: re-develop the frontend to the full professional clipper's toolkit per the Phase 2 feature inventory (docs/FRONTEND-REQUIREMENTS.md), on a rewritten interaction core. Simplicity rule: **no UI gating** — every tool visible and reachable; power lives in keyboard and defaults, not in hidden menus.
+
+**Status (2026-09-18): shipped.** All seven items are in the tree: frame-step, axis filters 1–7 (reaction added), the regime-banded timeline, an inline export screen at `/export` with presets + naming template + live filename preview, the processing screen, the god-component split (ClipDetail / CandidateQueue), and locally bundled fonts. The one genuinely open half is chat windowing: the server's `?around=` pagination exists, but `ChatView.loadAll` still requests offset 0/limit 500.
 
 Reference: docs/FRONTEND-REQUIREMENTS.md (professional-VOD-clipper expectations, feature inventory, UX spec) — written from research into what avid clippers expect; the v1 DESIGN.md palette/typography/instrument principles carry over as the visual foundation.
 
@@ -52,17 +54,17 @@ Reference: docs/FRONTEND-REQUIREMENTS.md (professional-VOD-clipper expectations,
 
 **Exit gate**: all six axes produce candidates on the training VOD with distinct, correct examples; triage demonstrably kills false positives; CPU-tier run completes < 2× VOD duration.
 
-## Phase 4 — Release engineering (desktop app + updates + CI/CD)
-1. main.ts gains the real Deno Desktop shell (window, tray, dialogs, bindings); loopback server; frontend served/embedded.
-2. nightly.yml + release.yml per ARCHITECTURE.md §8.2: cross-compiled `.msi` + `.AppImage`, SHA-256 sidecars, bsdiff patches, signed `latest.json` on GH Pages.
-3. Settings → Updates: channel selector, check-now, pending-update UI; `Deno.autoUpdate` wired; Windows staged-update external-updater path.
-4. Repository public on Livia's GitHub; tags drive stable; PRs gated by check.yml.
-5. twitch-dl pinned/bundled for URL import; import validation.
-6. **Standalone prerequisites** (found by measuring `deno desktop` on the dev machine — see docs/DISTRIBUTION-PLAN.md): bundle ffmpeg/ffprobe per-OS into `native/` and resolve them like whisper (they are bare PATH lookups today, so the binary is not yet standalone); set `GDK_BACKEND=x11` in the Linux launcher or the window never opens on Wayland; add `desktop.*` config + app icons to deno.json.
+## Phase 4 — Release engineering (SHIPPED)
+1. main.ts gains the real Deno Desktop shell (window, dialogs, loopback server); the window adopts the runtime's implicit window exactly once, and closing it exits the process.
+2. `release.yml`: cross-compiled `.AppImage` + portable Windows `.zip`, SHA-256 sidecars, qbsdiff patches, `latest.json` at the Pages ROOT. One continuous release line — no channels, and a version suffix fails the build.
+3. Settings → Updates reads the real runtime state; `Deno.autoUpdate` is wired; the Windows gap is covered by a bundled Go sidecar updater the app writes out beside itself, run through the shipped launcher.
+4. Repository public on Livia's GitHub; every code push to main cuts a release; PRs gated by check.yml + check-engine.yml.
+5. URL import goes through Twitch GQL + usher; the twitch-dl path is gone.
+6. **Deliberate divergences from the original plan**, each measured: ffmpeg is NOT bundled (PATH → managed dir → offered download; bundling cost ~550MB per artifact and needed ~9.8GB of bsdiff memory against a 7GB runner); the Wayland fix is `WEBKIT_DISABLE_DMABUF_RENDERER=1`, not `GDK_BACKEND=x11`; and the `.msi` is built but NOT offered, because its per-machine install leaves WebView2 unable to write its profile (blank window, upstream denoland/deno#36768) while the portable build is unaffected.
 
 **Tooling correction**: `deno desktop` (Deno 2.9, experimental) supersedes the v1-era plan. It authors the `.msi` and `.AppImage` itself in pure Rust, cross-compiled from any host — there is **no Inno Setup and no appimagetool step**, and no Windows build host. Verified on this machine (hello-world `.msi` 32 MB, `.AppImage` 34 MB from Arch Linux). Inno Setup remains an option only by feeding it the plain app directory.
 
-**Exit gate**: on this machine, install the `.AppImage`, update from nightly→nightly+1 via the built-in updater (verifies the patch + rollback path); the same flow verified on a Windows machine or VM (staged path); a fresh clone to green CI is reproducible.
+**Exit gate**: on this machine, run the `.AppImage` and take a patch via the built-in updater (verifies the patch + rollback path); the same flow verified on Windows (launcher + sidecar path); a fresh clone to green CI is reproducible. Partly met: Linux patch application is verified byte-for-byte in CI against the published URL; the on-device relaunch (both platforms) and the Windows sidecar on real hardware are still unverified.
 
 ## Phase 5 — Personalization & polish
 1. Implicit feedback loop (discard/export/self-label → axis weight adaptation via rolling stats) — personas table earns its existence or is dropped.
@@ -75,4 +77,4 @@ Reference: docs/FRONTEND-REQUIREMENTS.md (professional-VOD-clipper expectations,
 - No phase starts before the previous exit gate is demonstrably met.
 - Anything that would fabricate success (stub returning victory) is a CI-blocking review reject.
 - shared/types.ts is the only wire contract; docs never fork it (STACK.md §6 lesson).
-- data/testing is held out until Phase 3 exit.
+- data/testing is no longer a clean hold-out: `fixtures/jfk.wav` is the shared CI engine fixture and `ironmouse_4h/` has already been used for Phase 1 validation (see Phase 1's status below). Treat new data placed there as held out, but do not cite the two existing entries as unseen.

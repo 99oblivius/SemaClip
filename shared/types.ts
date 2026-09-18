@@ -168,7 +168,7 @@ export interface ImportByUrlInput {
   url: string; // Twitch VOD URL
   title?: string;
   streamer?: string;
-  /** Progressive download (docs/DOWNLOAD-PIPELINE.md). */
+  /** Progressive download — see ARCHITECTURE.md §5 (download pipeline). */
   progressive?: boolean;
   /** Highest quality of the proxy pass (default 540). */
   proxyHeightCap?: number;

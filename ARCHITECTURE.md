@@ -6,11 +6,11 @@
 
 ## 1. Product requirements (v2, fixed)
 
-1. **Desktop app, Windows + Linux, cross-compiled from CI.** One codebase, per-OS installers, identical feature surface. macOS is a free follow-on (Deno Desktop supports it) but is not a v2 gate.
-2. **Auto-updating client** with a **stable / nightly channel selector** in Settings. Verified platform facts (Deno Desktop docs, 2.9):
-   - Built-in: `Deno.autoUpdate()` polls `latest.json`, downloads bsdiff patches, verifies SHA-256, stages, applies on next launch, rolls back on failed launch. Manifest signing via Ed25519.
+1. **Desktop app, Windows + Linux, cross-compiled from CI.** One codebase, identical feature surface. macOS is a free follow-on (Deno Desktop supports it) but is not a v2 gate.
+2. **Auto-updating client**, one continuous line of releases — there is no stable/beta/nightly split, and a version suffix fails the build. Verified platform facts (Deno Desktop docs, 2.9):
+   - Built-in: `Deno.autoUpdate()` polls `latest.json`, downloads bsdiff patches, verifies SHA-256, stages, applies on next launch, rolls back on failed launch. Manifest signing via Ed25519 is wired but not active (no key exists yet).
    - **Windows gap: patches download and stage but never swap in (loaded DLL cannot be replaced). Windows auto-update is officially "not yet supported."**
-   - Therefore: the update *check*, download, and channel selection are in-app on all platforms; *application* of updates is native on Linux, and on Windows is a staged-download + "restart to apply via external updater" path (§9.4) until Deno ships the launcher swap. No third-party updater dependency in v2.
+   - Therefore: the update *check* and download are in-app on all platforms; *application* of updates is native on Linux, and on Windows is handled by a bundled sidecar updater that the app writes out beside itself and the user runs through the shipped launcher (§9.4). No third-party updater dependency in v2.
 3. **Local inference on consumer hardware as the floor**: ~16 GB RAM, ~6 GB VRAM, AMD and NVIDIA, Windows and Linux. Scaling up (more VRAM/RAM) must be automatic — never worse, never manual tuning.
 4. **UI-first priority**: clip review, trimming, composing (multi-clip), and export are the product. Signal detection is the second pillar and must be fully implemented — but never at the cost of the edit/export loop.
 5. **Honesty invariant** (learned from the v1 audit): no UI element may display data the pipeline did not produce. Features report failure loudly. Every contract boundary is runtime-validated.
@@ -19,17 +19,17 @@
 
 | Layer | Choice | Why (v2 constraints) |
 |---|---|---|
-| Shell | **Deno Desktop + CEF** | Verified: cross-compiles Win x64 + Linux x64 from any host; produces `.msi`, `.AppImage`, `.deb/.rpm` directly; built-in updater on Linux/macOS. Same language both sides = shared types with no codegen. |
-| Backend | **Deno (TypeScript)** | Unchanged verdict from v1: I/O orchestration, negligible perf cost vs ML. The Python engine layer is **deleted** (§4). |
+| Shell | **Deno Desktop, OS webview** | Verified: cross-compiles Win x64 + Linux x64 from any host; produces the `.AppImage` and a portable Windows `.zip` directly; built-in updater on Linux. CEF was evaluated and NOT adopted — it would add ~150MB to replace a system webview, and the WebView2/webkit2gtk dependencies are ordinary platform packages. Same language both sides = shared types with no codegen. |
+| Backend | **Deno (TypeScript)** | Unchanged verdict from v1: I/O orchestration, negligible perf cost vs ML. Detection runs in-process in TypeScript; a Python engine survives only as a fallback stub for a build with no native whisper tree. |
 | Frontend | **Svelte 5 + SvelteKit SPA + Tailwind v4** | Already proven in the existing codebase; keep the investment. |
 | Transcription | **whisper.cpp** (GGUF models, Vulkan + CPU) | Runs identically on NVIDIA/AMD/Intel/CPU. Vulkan works on Windows and Linux with one binary. Quantized models fit 6 GB VRAM floors (§4.1). |
 | LLM triage/labels | **llama.cpp server** (GGUF, Vulkan + CPU) | Same reasoning. Qwen-class 4-7B at Q4 fits the floor. Optional: if the user has a tabbyAPI/ollama endpoint configured, use it via OpenAI-compatible API. |
-| Video | **FFmpeg** (bundled, per-OS binaries from BtbN builds pinned in CI) | The one universally correct choice; already a working dependency. |
+| Video | **FFmpeg** — NOT bundled; resolved PATH → managed directory → offered download | Bundling a ~330MB pair put ~550MB in every artifact and made bsdiff need ~9.8GB against a 7GB runner. A machine that already has ffmpeg on PATH is never offered a download. |
 | GPU detection | `nvidia-smi` (NVIDIA), Vulkan enumeration via `vulkaninfo`-equivalent probe (AMD/other), CPU fallback | Drives the device picker and per-tier model manifest (§4.1). |
-| DB | **node:sqlite + Drizzle sqlite-proxy** (keep v1's actual choice) | Works, WAL, synchronous fine for desktop scale. Add FK constraints this time. |
+| DB | **node:sqlite** (no ORM) | Works, WAL, synchronous fine for desktop scale. |
 
 Explicitly rejected for v2:
-- **Python engine + PyInstaller**: CUDA-only GPU story fails AMD; 200-400 MB binary fails consumer distribution; the IPC layer was the weakest audited surface. All detection logic moves to TypeScript, calling native runtimes as subprocesses.
+- **Python engine + PyInstaller**: CUDA-only GPU story fails AMD; 200-400 MB binary fails consumer distribution; the IPC layer was the weakest audited surface. All detection logic moves to TypeScript.
 - **PyTorch / faster-whisper / sentence-transformers**: same GPU-ecosystem objection; superseded by GGUF/ONNX runtimes.
 - **Universal Stream Encoder (custom contrastive multimodal model)**: a research project, not a component. Cut from the roadmap entirely (§7.3). The v1 architecture's stages that depended on it (embedding-space anomaly detection, embedding Kalman) are cut with it.
 
@@ -85,8 +85,8 @@ VOD + chat.json
   → detection/segmentation: change points → variable-length regimes
   → detection/axes: candidates per axis with per-signal scores (ClipSignals)
   → LLM triage (llama.cpp): classify + justify candidates above threshold
-  → detection/ranking: axis-relative percentile + diversity → final clips
-  → detection/endpoints: recovery/topic/max per axis, snapped to sentence boundary
+  → detection/pipeline.ts rank(): axis-relative percentile + diversity → final clips
+  → endpoint resolution: recovery/topic/max per axis, snapped to a sentence boundary
   → persist (clips + signals + persona updates) → WS stream to UI
 ```
 
@@ -125,36 +125,15 @@ Model selection is a **manifest lookup by detected hardware tier**, not a config
 | High | >12 GB VRAM | `large-v3` | 7B-14B Q4/Q5 | Automatic scale-up. |
 
 - Detection: NVIDIA via `nvidia-smi`, AMD/others via Vulkan device enumeration; VRAM queried where possible, else conservative default.
-- Manifest (`shared/model-manifest.ts`) maps tier → model file + quantization + context size; llama.cpp server is spawned once per job with the tier's model and killed after.
+- Manifest mapping tier → model file + quantization + context size (tier detection lives in the engine adapter; there is no separate manifest module); llama.cpp server is spawned once per job with the tier's model and killed after.
 - All models download on first use to the platform cache dir (Windows: `%LOCALAPPDATA%\SemaClip\models`; Linux: `~/.local/share/SemaClip/models`) with SHA-256 verification, resumable download, and a Settings UI showing what is present.
 - **No RAM/VRAM probing failure may crash the app**: probe failure → CPU tier + visible warning.
-
-### 4.2 Performance budget (hard requirement)
-
-**A 6-hour VOD processes in under 1 hour on the consumer floor (CPU-only, ~16 GB RAM); under ~15 min with a mid-tier GPU.** The budget is validated in Phase 1's exit gate — the measured per-phase timings are displayed in the UI, not just logged.
-
-Where the time budget goes (6 h = 21,600 s of audio):
-
-| Stage | Strategy | CPU-only target | Mid-GPU |
-|---|---|---|---|
-| Decode + feature arrays | ffmpeg to 16 kHz mono WAV; RMS/speech-ratio arrays computed in a streaming pass | ~2–5 min | same |
-| **Transcription** | **Parallel chunked whisper.cpp**: split on silence into 30–120 s chunks, N worker processes (N = min(cores÷2, 8)), each pinned `small`/`base` int8 on CPU — near-linear scaling. GPU tiers: single `large-v3-turbo` Q5 via Vulkan, chunks pipelined | ~20–35 min (8 workers × ~3–5× realtime) | ~3–6 min |
-| Chat + detection arrays | Pure TS, per-second math | seconds | seconds |
-| Segmentation/axes/ranking/endpoints | Array math, O(n) | seconds | seconds |
-| LLM triage | Batched parallel calls to llama.cpp server; skipped on CPU-only tier unless time budget remains | 0–10 min | ~5 min |
-| Export | On-demand, not in the pipeline | — | — |
-
-Rules:
-- Transcription parallelism is the only stage where multi-processing pays; it is built in from Phase 1, not retrofitted. Worker count, model per tier, and chunk overlap are manifest-driven; workers are plain OS processes (whisper.cpp CLI), so Windows/Linux behave identically.
-- Every stage reports measured seconds in `progress` events (`message` includes elapsed + estimated remaining); the Processing screen shows actuals. A phase exceeding its budget share logs a warning (visible in job diagnostics) — budgets are asserted in an integration test with a mock decoder so regressions are caught in CI.
-- CPU tiers skip LLM triage by default (keep detection honest: clips are marked `triage: 'skipped'`, not silently absent).
-- These figures are engineering targets validated on the Phase 1 exit gate run; the manifest tier table is adjusted to *measured* hardware, not optimistic paper numbers.
 
 ## 5. The five subsystems in functional detail
 
 ### 5.1 Ingest
 - **File import** (existing, works): local VOD + optional chat JSON.
-- **URL import**: fixed TwitchDlAdapter; `twitch-dl` pinned and bundled per-OS by release CI (binary dependency, not a runtime assumption); chat auto-fetch after VOD download; progress via WS `download_progress` (the event already exists, unused in the UI).
+- **URL import**: Twitch GQL for metadata and chat, a usher playback token for the HLS playlist; no external downloader. The `twitch-dl` path was removed (it was a /tmp venv dependency and delivered no live-chunk behaviour). Progress is served by `GET /api/downloads`, one composed payload for every surface rather than a per-consumer event.
 - Input validation: container/duration/codec probe before acceptance; chat JSON schema check (TwitchDownloader format) with a clear error if mismatched.
 
 ### 5.2 Detection engine (see data flow above)
@@ -176,31 +155,33 @@ v1's universal encoder is cut. What detection still needs is topic-boundary simi
 - **Cancel**: cooperative flag in the pipeline + stdin cancel line + SIGTERM→SIGKILL escalation ladder; engine reaped on server shutdown; cancelled job resets stream status (v1 leaked it).
 - **stderr**: piped, drained continuously into a ring buffer; last 50 lines attached to job failure for diagnostics.
 - **Concurrency**: exactly one running job (GPU constraint); queue is persisted, reorder is transactional.
-- The engine runs as **one long-lived process per job batch** with the IPC protocol below; no PyInstaller, no per-job model reload.
+- Detection runs **in-process** in TypeScript; the only subprocesses are the native runtimes (whisper.cpp, ffmpeg) spawned per stage. There is no engine process and no IPC transport — see §6.
 
 ### 5.5 Export & composing (first-priority product surface)
 - **Export**: FFmpegAdapter actually spawns ffmpeg (v1 shipped a stub that reported success — the cardinal audit finding). Real args builder: codec (H.264/H.265/VP9), aspect crop (16:9/9:16/1:1 with live preview), caption burn-in from real whisper SRT (generated, not renamed chat JSON), output path + filename, progress parsing (`-progress pipe:1`), cancel support.
-- **Compose**: multi-clip timeline — select clips, order, per-clip trim, optional crossfade/text cards between, single FFmpeg filtergraph render. The composition is persisted as an entity (`compositions` table) so a half-built reel survives restarts.
+- **Compose**: multi-clip timeline — select clips, order, per-clip trim, optional crossfade/text cards between, single FFmpeg filtergraph render. Phase 5, not built: the rail entry exists as a shell.
 - **Editor affordances** (H7 finished properly): frame-accurate trim with the fixed seek model (§6.2), zoom to frame, keyboard-first review loop (J/K, 1–6 axis filters, E/Shift+E, D/U) per the v1 DESIGN.md — that document's UI spec was good and is the reference for the UI track.
 
-## 6. IPC protocol (single canonical contract)
+## 6. Engine contract (single canonical shape)
 
-**One protocol, defined in `shared/types.ts`, runtime-validated at every boundary.** The v1 docs' snake_case fork is dead; the actual built system's camelCase shapes are canonical.
+**One contract, defined in `shared/types.ts`, runtime-validated at every boundary.** The v1 docs' snake_case fork is dead; the actual built system's camelCase shapes are canonical.
 
-Commands (Deno → engine process stdin, NDJSON):
+There is **no engine process and no IPC transport**: detection runs in-process in TypeScript (`adapters/outbound/engine/DetectionEngineAdapter.ts`). The shapes below are the internal call contract the adapter produces and the job runner consumes; the v1 plan of NDJSON over stdin/stdout was retired with the Python engine.
+
+Request (runner → adapter):
 ```typescript
 type EngineCommand =
-  | { type: "start"; jobId: string; vodPath: string; chatPath?: string; config?: JobConfig }
+  | { type: "start"; jobId: string; artifactDir: string; workers: number; config?: JobConfig }
   | { type: "cancel" };
 ```
 
-Events (engine stdout → Deno, NDJSON; every event carries `jobId`):
+Events (adapter → job runner; every event carries `jobId`):
 ```typescript
 type EngineEvent =
   | { type: "progress"; jobId; phase: EnginePhase; percent: number; message?: string }
   | { type: "segment"; jobId; start; end; regime }
-  | { type: "candidate"; jobId; axis; start; end; peak; score; signals: ClipSignals }
-  | { type: "clip"; jobId; axis; start; end; peak; score; justification?; signals: ClipSignals }
+  | { type: "candidate"; jobId; axis; start; end; score; signals: ClipSignals }
+  | { type: "clip"; jobId; id; axis; start; end; score; justification?; signals: ClipSignals }
   | { type: "complete"; jobId; clipsFound: number }
   | { type: "error"; jobId; phase: EnginePhase; message };
 ```
@@ -211,7 +192,7 @@ type EngineEvent =
 ## 7. Cross-platform requirements
 
 - **All paths via adapter**: every filesystem touch goes through `StreamStorage`/`FileSystemPort` using path semantics per OS; no string concatenation with `/`.
-- **Process spawning**: `Deno.Command` with absolute binary paths resolved from the `native/` dir per-OS (`.exe` suffix on Windows); no reliance on PATH.
+- **Process spawning**: everything goes through one helper (`adapters/outbound/process/spawn.ts`) so the Windows console is suppressed everywhere (`node:child_process` with `windowsHide`; `Deno.Command` cannot suppress it and silently ignores the option). Native runtimes resolve to absolute paths in `native/`; ffmpeg is the deliberate exception and is PATH-first by design.
 - **Fonts**: Google Fonts CDN (v1 choice) is rejected — offline-first requirement. Fonts are bundled as woff2 in the app (both OSes).
 - **Keyboard/UX parity**: the keymap avoids OS-reserved combos; shortcuts overlay lists per-OS differences (e.g., Cmd vs Ctrl is moot for v2 but the structure exists).
 - **File dialogs**: Deno Desktop native dialogs via bindings; drag-drop paths normalized per-OS.
@@ -222,35 +203,21 @@ type EngineEvent =
 ## 8. Update & release engineering
 
 ### 8.1 Channels
-- `nightly`: built on every merge to `main` (or `develop`), version `0.0.0-nightly.<run>`, published to the nightly manifest, retained for 30 days.
+- Release cadence: every push to `main` that touches code cuts a release (markdown-only pushes are ignored). There is ONE line of releases and no channel selector; see docs/RELEASING.md.
 - `stable`: built on version tags (`v*`), full changelog, permanent retention.
-- Both channels' manifests live side by side: `releases/stable/latest.json`, `releases/nightly/latest.json`. The client's channel setting selects which manifest it polls.
+- The manifest is a single `latest.json` at the ROOT of the `releases` branch. It carries the current version, the patch entries (each with a mandatory sha256), and for Windows the artifact entry naming the self-updating zip.
 
 ### 8.2 CI/CD (GitHub Actions)
-> **Tooling correction (measured 2026-09, Deno 2.9.6).** The `deno desktop` in this section's
-> original wording (`--backend cef --all-targets`) is real but the surrounding assumptions are
-> stale. `deno desktop` authors the `.msi` (pure Rust, per-machine, cross-compiled from any host)
-> and the `.AppImage`/`.deb`/`.rpm` itself — **no Inno Setup, no appimagetool, no Windows build
-> host**, and framework auto-detection is bypassed by pointing it at `server/main.ts` (which is
-> what SemaClip wants, since it uses adapter-static and serves its own build). `--include` embeds
-> `frontend/build` + `native/` so the existing `import.meta.url` resolution works inside the
-> binary. Two real blockers: ffmpeg/ffprobe are bare PATH lookups (not standalone yet), and the
-> webview window dies on Wayland without `GDK_BACKEND=x11`. The updater manifest is
-> **patches-only** (no full-artifact entry), so bsdiff entries must exist for every supported
-> prior version, generated per-architecture from the runtime dylib with the `bsdiff` CLI.
-> Full verified detail and the workflow design: `docs/DISTRIBUTION-PLAN.md`.
-
-- **check.yml** (PR + push): `deno check`, `deno test` (detection/ is pure TS — real unit tests run here, fast, no models), frontend `svelte-check` + `vite build`, `deno publish --dry-run` style lint of deno.json. This is the gate; nightly releases depend on green.
-- **nightly.yml** (merge to main): frontend build → `deno desktop --target x86_64-pc-windows-msvc` + `--target x86_64-unknown-linux-gnu` (single ubuntu host cross-compiles both; `.msi` + `.AppImage` outputs) → SHA-256 per artifact → upload to releases (GH Releases for artifacts; Pages/R2 for manifests — §8.4) → generate bsdiff patches from previous nightly per platform → publish `latest.json` (patch entries carry mandatory sha256) → optionally Ed25519-sign the manifest (key in GH secret).
-- **release.yml** (tag `v*`): same matrix, versioned artifacts + changelog from commits, stable manifest update.
-- Engine/native binaries (ffmpeg, whisper.cpp, llama.cpp, onnxruntime, twitch-dl): pinned versions fetched by CI from upstream releases with checksum verification; bundled into the app payload (or downloaded on first run for the large model files — binaries bundle, models download).
-- Artifacts: `SemaClip-<ver>-windows-x64.msi`, `SemaClip-<ver>-linux-x64.AppImage`, each with `.sha256` sidecar; manifest lists patch SHAs (auto-update contract).
+- **check.yml** (PR + push): `deno check`, `deno test` (detection/ is pure TS — real unit tests run here, fast, no models), frontend `svelte-check` + `vite build`. **check-engine.yml** additionally fetches the native tree and runs the engine end-to-end on a bundled fixture. These are the gates a release depends on.
+- **release.yml** (push to main + workflow_dispatch): six jobs — `version`, two cross-compiled builds (`win-x64`, `linux-x64` from one Ubuntu host), `publish`, `patch`, `verify`. Artifacts go to GitHub Releases; `latest.json` and the landing page are pushed to the `releases` branch, which is the Pages source. Patches are generated with `qbsdiff` and verified by applying one over the PUBLIC url and comparing bytes. Every push cuts a release; the concurrency group serialises runs so two cannot race for the same tag.
+- Engine/native binaries (whisper.cpp; the models): pinned versions fetched by CI from upstream releases with checksum verification and embedded via `--include`. ffmpeg and ffprobe are deliberately NOT bundled — resolution is PATH first, then the app's managed directory, then an offered download. Large model files download on first use rather than shipping in the payload.
+- Artifacts: `SemaClip-<ver>-win-x64-portable.zip` (the Windows download, self-updating through the bundled launcher), `SemaClip.AppImage`, and both platforms' runtime binaries for patching, each with a `.sha256` sidecar. A `.msi` is still built and published but is NOT offered on the landing page: its per-machine install under `%ProgramFiles%` leaves the WebView2 runtime unable to write its profile, so the window renders blank (upstream denoland/deno#36768). The manifest lists patch SHAs and the Windows artifact entry.
 
 ### 8.3 Update flow in-app
-- Settings → Updates: channel selector (stable/nightly), current version (`Deno.desktopVersion`), "check now" button, last-check timestamp, pending-update indicator with "restart to apply".
-- `Deno.autoUpdate({url: channelBaseUrl, interval: 6h, onUpdateReady, onRollback})` — wired in main.ts; channel switch re-invokes with the other manifest URL.
+- Settings → Updates: current version (`Deno.desktopVersion`), the real update state read from the runtime, and a pending-update indicator. There is no channel selector.
+- `Deno.autoUpdate({url: baseUrl, interval: 6h, onUpdateReady, onRollback})` — wired in main.ts against the one manifest at the Pages root.
 - Linux: native staging applies on next launch with rollback.
-- Windows (Deno gap): patches download + stage; the app shows "update ready — restart to install" and a tiny external updater exe (written to app data, itself replaceable) performs the swap on a fresh process, then relaunches. **Accepted decision (2026-09-09, Livia): functional Windows auto-update regardless of method.** This updater is a *workaround for Deno's missing Windows launcher swap* — it lives behind `server/adapters/updater/windows-update.ts`, its contract (stage dir layout, swap protocol, readiness check) is documented in that module's header comment, and it is flagged for replacement the moment Deno ships native Windows apply. Cleanup = delete the adapter and the staged path; everything else (manifests, channel logic, UI) is untouched by the workaround.
+- Windows (Deno gap): patches download + stage; the app shows "update ready — restart to install" and a tiny external updater exe (written to app data, itself replaceable) performs the swap on a fresh process, then relaunches. **Accepted decision (2026-09-09, Livia): functional Windows auto-update regardless of method.** This updater is a *workaround for Deno's missing Windows launcher swap* — it is a small Go program (`tools/updater/`), shipped INSIDE the portable payload and written out beside the app at launch by `adapters/outbound/platform/sidecar.ts`, because a per-machine installer cannot carry a file the app will overwrite. It performs the swap on a fresh process and relaunches, and it is flagged for replacement the moment Deno ships native Windows apply.
 
 ### 8.4 Manifest hosting
 - GitHub Releases for full artifacts; **GitHub Pages** for `latest.json` + patch files (both channels), from a `releases` branch pushed by CI. Zero paid infra; SHA-256 is mandatory in the manifest per Deno's contract; Ed25519 signing adds tamper protection beyond TLS.
@@ -261,7 +228,7 @@ type EngineEvent =
 Keep v1's actual schema (streams, jobs, clips, stream_metadata, personas, settings) with these changes:
 - **FK constraints** on jobs.streamId, clips.jobId/streamId (v1 declared none while PRAGMA-ing foreign_keys=ON).
 - `clips.signals_json` (v1 dropped ClipSignals at persistence), `clips.rank` actually populated, `clips.composition_id` nullable.
-- **New** `compositions` table (id, streamId, clipIds ordered, transitions, title, updatedAt).
+- No `compositions` table yet: the reel editor is Phase 5. The live schema is streams, jobs, clips, personas, settings, stream_metadata, export_presets.
 - `settings` finally wired: SettingsRepository port + persistence + runtime application (gpuDevice → engine spawn env; channel → updater; engineBinaryPath → resolved binary).
 - `personas` kept but honest: either the implicit-feedback loop ships (Phase 5) or the table is dropped. No third dead-schema state.
 
@@ -271,8 +238,8 @@ Keep v1's actual schema (streams, jobs, clips, stream_metadata, personas, settin
 2. `svelte-check` green; no `as any` in server/adapters boundary code; engine adapter validates payloads at runtime.
 3. Frontend builds via `vite build` in CI on every PR.
 4. Job lifecycle integration test: fake engine process scripted to emit each failure mode (exit 0 without complete, exit 1, stdout garbage, cancel mid-run, stderr flood) — each must produce the specified terminal state. These five tests are the regression suite for the v1 audit findings.
-5. E2E smoke (manual or playwright-CEF later): import → process (mock engine in CI) → review → export produces a real file.
-6. Security: loopback bind asserted in a startup test; no route accepts arbitrary filesystem paths without allowlist checking (vodPath validated against the storage root).
+5. E2E smoke: import → process → review → export produces a real file. CI runs the engine end-to-end on a bundled fixture (check-engine.yml); the browser-driven smoke is manual.
+6. Security: loopback bind asserted in a startup test. Path handling is honestly weaker than v1's plan claimed: there is no allowlist module. `vodPath` on a folder import deliberately references the user's own directory, so the boundary is "loopback only, and the user chose the path" rather than a storage-root check.
 
 ## 11. What is deliberately NOT in v2
 - Real-time live processing (unchanged from v1 anti-goals).

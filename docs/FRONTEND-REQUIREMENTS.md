@@ -2,7 +2,7 @@
 
 > What an avid, professional VOD clipper — someone who turns Twitch streams into YouTube Shorts, TikToks, and highlight compilations every day, often for several channels — needs from SemaClip's review and editing UI. This document is the feature and workflow basis for the Phase 2 frontend re-development (ROADMAP.md). It is self-contained: an implementer who has never read this conversation can build from it.
 >
-> **Carry-over from v1:** the visual foundation is fixed by `docs/archive/v1/DESIGN.md` — "Carbon & Blood" palette (foundation `#0B0B10`, accent `#CC0000` used only for playhead / selected clip / primary CTA / active filter), Space Grotesk / Inter / JetBrains Mono typography, custom SVG iconography, GSAP-driven motion with `prefers-reduced-motion` support, and the *signal terrain* timeline (canvas waveform + chat-density area + SVG clip marks + HTML playhead). This document specifies **features, screens, and interaction** — not visual style. Where a screen spec below references tokens (`--color-surface`, `--color-accent`, etc.), they are the v1 tokens, restated in §7.1.
+> **Carry-over from v1:** the visual foundation is fixed by `docs/archive/v1/DESIGN.md` — "Carbon & Blood" palette (foundation `#0B0B10`, accent `#CC0000` used only for playhead / selected clip / primary CTA / active filter), Space Grotesk / Inter / JetBrains Mono typography, custom SVG iconography, GSAP-driven motion with `prefers-reduced-motion` support, and the *signal terrain* timeline (canvas waveform + chat-density area + SVG clip marks + HTML playhead). This document specifies **features, screens, and interaction** — not visual style. Where a screen spec below references tokens (`--color-surface`, `--color-accent`, etc.), they are the v1 tokens, restated in §7.
 >
 > **Hard rule (from the product owner):** **NO UI GATING.** Every tool visible and reachable. Power lives in keyboard shortcuts and good defaults, not hidden menus. §8 is a per-feature compliance audit.
 
@@ -182,7 +182,7 @@ The app remains a single window: 44px top bar, 56px icon rail (now six entries),
 └──────────────────────────────────────────────────────────────┘
 ```
 
-- Review/Compose/Export are contextual: the rail highlights them when the active context is a loaded VOD/composition/export batch. `1`–`6`-style global keys: `G` then `L/R/P/C/E/X` is unnecessary — screens are reached by workflow keys (`O` opens Library, `Esc` backs out one level) so the keyboard never leaves the Review surface for long.
+- Review/Compose/Export are contextual: the rail highlights them when the active context is a loaded VOD/composition/export batch. `1`–`7`-style global keys: `G` then `L/R/P/C/E/X` is unnecessary — screens are reached by workflow keys (`O` opens Library, `Esc` backs out one level) so the keyboard never leaves the Review surface for long.
 - The top-bar **channel selector** (`All ▾`) is global: it filters Library, and in Review/Export it scopes default presets and naming templates to that channel. Keyboard: `Shift+C` opens the selector inline.
 
 ### 4.1 Screen — Library
@@ -295,7 +295,7 @@ The app remains a single window: 44px top bar, 56px icon rail (now six entries),
 | `G` | Toggle facecam tracking (P1-7) |
 | `M` | Metadata draft focus |
 | `R` | Send to composition |
-| `1`–`6` | Axis filters (hype/humor/skill/awkward/emotional/tension) |
+| `1`–`7` | Axis filters (hype/humor/skill/awkward/emotional/tension/reaction) |
 | `Shift+C` | Channel selector (top bar) |
 | `Q` | Queue filter: unreviewed only / all |
 | `E` / `Shift+E` | Export clip / batch export accepted |

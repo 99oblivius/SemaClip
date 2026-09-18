@@ -58,7 +58,7 @@ export const apiClient = {
   importByUrl: (input: ImportByUrlInput) =>
     api<ImportResult>('/streams/import-url', { method: 'POST', body: JSON.stringify(input) }),
 
-  // ── Download pipeline (docs/DOWNLOAD-PIPELINE.md) ──
+  // ── Download pipeline ──
   listQualities: (url: string) =>
     api<{ qualities: { name: string; width: number; height: number; fps: number; bandwidth: number }[] }>(
       `/vod/qualities?url=${encodeURIComponent(url)}`,

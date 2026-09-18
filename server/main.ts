@@ -157,10 +157,21 @@ applyWebviewLaunchEnvironment();
 // It must arrive via `deno desktop --env-file`, because setting it here is too late.
 reportWebviewLaunchEnvironment();
 
-// Adopt the startup window. Frameless chrome is OFF by default: measured, the window
-// class has no minimize/maximize, so removing the OS decoration would leave the app
-// with no way to do either. Set SEMACLIP_FRAMELESS=1 to ask for it deliberately.
-const frameless = Deno.env.get("SEMACLIP_FRAMELESS") === "1";
+// Adopt the startup window. Frameless chrome is the DEFAULT: the owner's requirement is
+// a desktop app with its own chrome, and "still has decoration on Windows when it should
+// not" is a bug report against the opt-in default this used to have.
+//
+// The app can carry drag, close, and any paint. It CANNOT minimise or maximise: verified
+// against the runtime's own string table (Deno 2.9.6) — the window class exposes
+// getSize/setSize/getPosition/setPosition/isResizable/setResizable/isAlwaysOnTop/
+// setAlwaysOnTop/getOpacity/setOpacity/isVisible/focus/openDevtools/reload/executeJs/
+// getNativeWindow/bind/unbind, and the only `minimize`/`maximize` strings in the binary
+// belong to Intl.Locale. A frameless window therefore has no titlebar and no replacements.
+//
+// SEMACLIP_NATIVE_DECORATIONS=1 restores the OS titlebar for anyone who needs the system
+// controls back — an explicit, documented escape hatch rather than a silent default.
+const useNativeDecorations = Deno.env.get("SEMACLIP_NATIVE_DECORATIONS") === "1";
+const frameless = !useNativeDecorations;
 const APP_TITLE = `SemaClip ${appVersion()}`;
 // ONE construction, with the title applied to the window it adopts. Calling any
 // separate title setter here would construct a SECOND window: the runtime adopts the

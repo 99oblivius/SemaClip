@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { writable, get } from 'svelte/store';
 import { UI_SCALE_FACTOR, type UiScale } from '$shared/types';
 
 /**
@@ -29,8 +29,19 @@ type Source = 'persisted' | 'user';
 export const uiScale = writable<UiScale>('medium');
 let source: Source = 'persisted';
 
+/**
+ * The last value the SERVER confirmed, kept so a preview can be undone.
+ *
+ * `seedUiScale` is the only writer of this: a value that came from the server is by
+ * definition the persisted one. Without it, reverting a pending choice would have
+ * nothing to revert TO — the store would have to guess, and a guess is how a scale
+ * silently becomes one the user never chose.
+ */
+let persisted: UiScale = 'medium';
+
 /** Apply a value that came from the server. Ignored while a user choice is pending. */
 export function seedUiScale(scale: UiScale): void {
+  persisted = scale;
   if (source === 'user') return;
   uiScale.set(scale);
 }
@@ -43,6 +54,21 @@ export function selectUiScale(scale: UiScale): void {
 
 /** The pending choice is now the persisted one, so server values may win again. */
 export function confirmUiScaleSaved(): void {
+  persisted = get(uiScale);
+  source = 'persisted';
+}
+
+/**
+ * Undo a previewed-but-unsaved choice, restoring the last persisted scale.
+ *
+ * Called when the settings page is left without saving. The preview must not outlive the
+ * page that owns it: the store feeds the layout's root font size on EVERY route, so a
+ * forgotten preview otherwise rescaled the whole app while the settings page, re-entered,
+ * showed the old value — the page and the applied UI disagreed, and only a reload fixed it.
+ */
+export function revertUiScaleIfPending(): void {
+  if (source !== 'user') return;
+  uiScale.set(persisted);
   source = 'persisted';
 }
 

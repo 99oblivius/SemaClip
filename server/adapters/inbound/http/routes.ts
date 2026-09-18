@@ -45,6 +45,7 @@ import {
 } from "@/adapters/outbound/platform/window-lifecycle.ts";
 import { updateStatus } from "@/adapters/outbound/platform/auto-update.ts";
 import { emitAppEvent, subscribeAppEvents, sseFrame } from "@/application/events.ts";
+import { fetchWithTimeout, MEDIA_TIMEOUT_MS } from "@/adapters/outbound/net/fetch-timeout.ts";
 
 /**
  * How many bytes of `mediaPath` may be served right now.
@@ -184,7 +185,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     return c.json(result, 201);
   });
 
-  // ── Progressive download state (docs/DOWNLOAD-PIPELINE.md) ──
+  // ── Progressive download state ──
   app.get("/api/streams/:id/download", async (c) => {
     const streamId = c.req.param("id");
     const state = await deps.downloadState(streamId);
@@ -1142,7 +1143,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
       : (pickProxyQuality(qualities, 540) ?? pickBestQuality(qualities, null));
     if (!q) return c.json({ error: "No qualities available" }, 404);
 
-    const playlistText = await (await fetch(q.playlistUrl)).text();
+    const playlistText = await (await fetchWithTimeout(q.playlistUrl)).text();
     // RELATIVE chunk URLs — hls.js resolves them against the manifest URL,
     // so they ride the same origin as the page (vite dev proxy on 5173,
     // same-origin static serving in production). Absolute origins broke the
@@ -1202,13 +1203,13 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
       ? pickBestQuality(qualities, null)
       : (pickProxyQuality(qualities, 540) ?? pickBestQuality(qualities, null));
     if (!q) return c.json({ error: "No qualities available" }, 404);
-    const playlistText = await (await fetch(q.playlistUrl)).text();
+    const playlistText = await (await fetchWithTimeout(q.playlistUrl)).text();
     const chunks = playlistText.split("\n").map((l) => l.trim())
       .filter((l) => l && !l.startsWith("#"));
     const chunkUrl = chunks[index];
     if (!chunkUrl) return c.json({ error: "Chunk out of range" }, 404);
     const resolved = chunkUrl.startsWith("http") ? chunkUrl : new URL(chunkUrl, q.playlistUrl).href;
-    const upstream = await fetch(resolved);
+    const upstream = await fetchWithTimeout(resolved, {}, MEDIA_TIMEOUT_MS);
     if (!upstream.ok || !upstream.body) {
       return c.json({ error: `Chunk upstream ${upstream.status}` }, 502);
     }

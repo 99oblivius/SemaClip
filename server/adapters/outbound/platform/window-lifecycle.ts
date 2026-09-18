@@ -138,7 +138,10 @@ export function adoptWindowLifecycle(options: ChromeOptions = {}): void {
   try {
     // THE one construction. It adopts the window the runtime already opened.
     win = new Ctor({
-      ...(options.frameless ? { frameless: true } : {}),
+      // Frameless is a CREATION option, so it must be passed at adoption time. The
+      // default is frameless (the app draws its own chrome); an explicit opt-out is
+      // how the OS titlebar comes back.
+      frameless: options.frameless !== false,
       ...(options.title ? { title: options.title } : {}),
     });
     constructed += 1;
@@ -149,7 +152,10 @@ export function adoptWindowLifecycle(options: ChromeOptions = {}): void {
   }
 
   windowHandle = win;
-  state.frameless = Boolean(options.frameless);
+  // Report what the WINDOW got, not what the caller passed: frameless defaults to true
+  // here, so `Boolean(options.frameless)` would report decorations the window does not
+  // have and the UI would draw no chrome over an undecorated window.
+  state.frameless = options.frameless !== false;
   state.nativeDecorations = !state.frameless;
 
   win.addEventListener("close", () => {

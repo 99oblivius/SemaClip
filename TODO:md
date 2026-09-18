@@ -1,5 +1,0 @@
-SSEs, WS, deno; so many methods to a functional app that are not producing an enjoyable desktop production experience.
-1. waveform generating as fragments are downloaded is poorly aligned when the expectation is for the left side to be at the start and right side growing proportionally to the full length.
-2. Pressing delete on chat doesn't work after the improvement in file naming scheme.
-3. Deleting a video is not causing the playback to lose the video. This feels wrong and either hints at a cached file or browser behavior that would not fit a video editor.
-4. Downloading a file like chat doesn't cause the chat panel to be populated again.

@@ -1,5 +1,6 @@
 import type { VodDownloadPort, VodMetadata } from "@/application/ports/outbound.ts";
 import { spawnChild } from "@/adapters/outbound/process/spawn.ts";
+import { fetchWithTimeout } from "@/adapters/outbound/net/fetch-timeout.ts";
 
 const TWITCH_VOD_REGEX = /^https?:\/\/(?:www\.)?twitch\.tv\/videos\/(\d+)/;
 
@@ -102,7 +103,7 @@ export class TwitchDlAdapter implements VodDownloadPort {
       return [];
     }
     try {
-      const res = await fetch("https://gql.twitch.tv/gql", {
+      const res = await fetchWithTimeout("https://gql.twitch.tv/gql", {
         method: "POST",
         headers: { "Client-ID": "kimne78kx3ncx6brgo4mv6wki5h1ko" },
         body: JSON.stringify({

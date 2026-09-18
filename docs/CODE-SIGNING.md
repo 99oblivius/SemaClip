@@ -2,6 +2,15 @@
 
 Researched 2026-09-17. Two separate mechanisms, frequently conflated:
 
+> **Currency note (2026-09-18).** The RESEARCH here stands and is the only place these
+> facts are recorded. Statements about "the current adapter" in §1.3–§1.5 have since been
+> overtaken: the public key is a compile-time constant rather than an environment read
+> (which is what this document recommended), the shipped signing script is
+> `scripts/ci/sign-manifest.py` and has never been run against a real key, and a
+> verify-only script does not exist yet. Windows no longer needs a fresh download per
+> release: the portable zip self-updates through a bundled Go sidecar updater. Live
+> release mechanics are in `docs/RELEASING.md`.
+
 | | **Manifest signing** | **Windows Authenticode** |
 |---|---|---|
 | Protects | the auto-updater manifest (`latest.json`) | the `.exe` / `.msi` file itself |
@@ -107,7 +116,10 @@ pick one and keep key handling consistent between signing script and secret.
 | Signed envelope | committed to the `releases` branch / Pages | Replaces `latest.json` at the same URL. |
 
 **Caveat — the current adapter will not work as written.** `server/adapters/outbound/platform/auto-update.ts:92`
-reads the public key from `Deno.env.get("SEMACLIP_UPDATE_PUBKEY")`. Environment variables
+used to read the public key from `Deno.env.get("SEMACLIP_UPDATE_PUBKEY")`. **That was
+changed, in the way this document recommended**: the key is now a compile-time constant
+(`UPDATE_PUBLIC_KEY` in `auto-update.ts`), because a `getenv()` there reads undefined in
+production and silently disables verification. Environment variables
 are **not** baked into the compiled binary — the Deno docs say only `version` and
 `desktop.release.baseUrl` from `deno.json` are baked in, and the same reasoning applies:
 a GUI app launched from an `.msi`/`.AppImage` by Explorer/the desktop shell inherits no
@@ -119,7 +131,8 @@ Fix: make the public key a compile-time constant, e.g. a generated
 "…"`, and keep the env var only as a dev override:
 
 ```ts
-const publicKey = Deno.env.get("SEMACLIP_UPDATE_PUBKEY") ?? MANIFEST_PUBLIC_KEY;
+// Superseded by the shipped shape: a compile-time constant, never a getenv().
+const publicKey = UPDATE_PUBLIC_KEY;
 ```
 
 Committing the public key is correct and the simplest safe option. If you would rather
@@ -128,7 +141,8 @@ not have it in git history, generate that file in CI from a (non-secret) variabl
 
 ### 1.4 Signing script
 
-`scripts/sign-manifest.ts` — signs the manifest file's verbatim bytes:
+`scripts/ci/sign-manifest.py` — signs the manifest file's verbatim bytes (the shipped
+implementation is Python, not the TypeScript sketch below):
 
 ```ts
 // Usage: MANIFEST_SIGNING_KEY=<base64 pkcs8> deno run -A scripts/sign-manifest.ts \
@@ -189,12 +203,12 @@ publish:
       run: deno run -A scripts/verify-manifest.ts dist/release/latest.json
 ```
 
-Add `scripts/verify-manifest.ts` (verify-only: re-import the public key, check the
+Add a verify-only script (re-import the public key, check the
 signature over `signed`, then JSON-parse it). A publish job that cannot verify its own
 output must fail — otherwise the first symptom is users stuck on an old version with only
 a "no patch available" log line.
 
-The existing `docs/DISTRIBUTION-PLAN.md` already specifies the `releases` branch +
+`docs/RELEASING.md` specifies the `releases` branch +
 GitHub Pages hosting and the `v*` tag trigger; signing slots into the `publish` job
 between "compose `latest.json`" and "commit to `releases`".
 
@@ -272,7 +286,7 @@ warning for a new, low-download app. Nothing except Microsoft Store distribution
 **SemaClip-specific aggravator:** Deno's docs state Windows auto-update is not supported
 ("On Windows, patches are still downloaded and staged, but the launcher does not yet swap
 them in … Treat Windows auto-update as not yet supported"). Windows users must therefore
-download a **fresh installer for every single release** — the exact case where unsigned
+re-download a full payload for every release — the exact case where unsigned
 builds reset SmartScreen reputation to zero each time.
 
 ### 2.3 What is obtainable, by whom, at what cost
@@ -429,14 +443,15 @@ Concretely:
    future manifests, and you cannot rotate it without shipping a new app build).
 2. Store the base64 private key as the GitHub secret `MANIFEST_SIGNING_KEY`.
 3. **Fix the public key plumbing**: add a committed `release-key.ts` constant and make
-   `auto-update.ts` read `Deno.env.get("SEMACLIP_UPDATE_PUBKEY") ?? MANIFEST_PUBLIC_KEY`.
+   `auto-update.ts` read a public key from the environment (now a compile-time constant,
+   as recommended below).
    As written today the env-only read will be `undefined` in a real install (§1.3).
-4. Add `scripts/sign-manifest.ts` + `scripts/verify-manifest.ts`; wire both into
+4. Add `scripts/ci/sign-manifest.py` + a verify-only counterpart; wire both into
    `release.yml`'s `publish` job, with the verify step gating the publish.
 
 This is a private key in a secret store signing a file whose URL you control — the threat
 model is "the Pages host / release branch is compromised", which is exactly the one
-`docs/DISTRIBUTION-PLAN.md` was already worried about.
+`docs/RELEASING.md` covers this.
 
 ### Defer — Windows Authenticode (§2)
 

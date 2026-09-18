@@ -1,7 +1,8 @@
+import { fetchWithTimeout, MEDIA_TIMEOUT_MS } from "@/adapters/outbound/net/fetch-timeout.ts";
 /**
  * Twitch HLS downloader — progressive chunked fetch of VOD playlists.
  *
- * Verified live (docs/DOWNLOAD-PIPELINE.md): GQL playback token → usher
+ * Verified live: GQL playback token → usher
  * master playlist (token MUST be URL-encoded, path is `.m3u8` — `.json`
  * returns 400 "malformed vod id") → media playlist with ~10s `.ts` chunks.
  * Chunks are appended in timeline order so the growing file is immediately
@@ -46,7 +47,7 @@ export async function fetchPlaybackToken(vodId: string): Promise<{ sig: string; 
       'query PlaybackAccessToken_Template($vodID: ID!, $playerType: String!) { videoPlaybackAccessToken(id: $vodID, params: {platform: "web", playerBackend: "mediaplayer", playerType: $playerType}) { value signature } }',
     variables: { vodID: vodId, playerType: "site" },
   };
-  const res = await fetch(GQL_URL, {
+  const res = await fetchWithTimeout(GQL_URL, {
     method: "POST",
     headers: { "Client-ID": CLIENT_ID, "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -66,7 +67,7 @@ export async function resolveQualities(vodId: string): Promise<HlsQuality[]> {
   const usherUrl =
     `https://usher.ttvnw.net/vod/${vodId}.m3u8?sig=${sig}&token=${encodeURIComponent(token)}` +
     `&allow_source=true&platform=web&player=twitchweb&player_backend=mediaplayer&supported_codecs=h264`;
-  const res = await fetch(usherUrl);
+  const res = await fetchWithTimeout(usherUrl);
   if (!res.ok) throw new Error(`usher returned ${res.status} for VOD ${vodId}`);
   return parseMasterPlaylist(await res.text());
 }
@@ -80,7 +81,7 @@ export interface VodMeta {
 
 /** VOD metadata via GQL — no twitch-dl dependency (progressive path). */
 export async function fetchVodMeta(vodId: string): Promise<VodMeta> {
-  const res2 = await fetch(GQL_URL, {
+  const res2 = await fetchWithTimeout(GQL_URL, {
     method: "POST",
     headers: { "Client-ID": CLIENT_ID, "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -337,7 +338,7 @@ export async function downloadProgressive(
 }
 
 async function fetchPlaylist(url: string): Promise<string> {
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url);
   if (!res.ok) throw new Error(`playlist fetch ${res.status}: ${url}`);
   return res.text();
 }
@@ -346,7 +347,7 @@ async function fetchWithRetry(url: string, signal?: AbortSignal, attempts = 6): 
   let lastErr: unknown = null;
   for (let i = 0; i < attempts; i++) {
     try {
-      const res = await fetch(url, { signal: signal ?? null });
+      const res = await fetchWithTimeout(url, { signal: signal ?? null }, MEDIA_TIMEOUT_MS);
       if (!res.ok) throw new Error(`chunk ${res.status}`);
       return res;
     } catch (err) {

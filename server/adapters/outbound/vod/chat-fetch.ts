@@ -1,3 +1,4 @@
+import { fetchWithTimeout } from "@/adapters/outbound/net/fetch-timeout.ts";
 /**
  * GQL chat fetcher (progressive download part 1) — downloads VOD comments
  * page-by-page into the TwitchDownloader-shaped JSON the existing chat
@@ -19,7 +20,7 @@ export interface RawComment {
 async function gql(body: unknown, tries = 5): Promise<Record<string, unknown>> {
   for (let i = 0; i < tries; i++) {
     try {
-      const res = await fetch(GQL_URL, {
+      const res = await fetchWithTimeout(GQL_URL, {
         method: "POST",
         headers: { "Client-ID": CLIENT_ID, "Content-Type": "application/json" },
         body: JSON.stringify(body),

@@ -18,6 +18,7 @@
 import { run, runStatus } from "@/adapters/outbound/process/spawn.ts";
 import { join } from "node:path";
 import { archiveFor, type ToolArchive } from "./tool-paths.ts";
+import { fetchWithTimeout, MEDIA_TIMEOUT_MS } from "@/adapters/outbound/net/fetch-timeout.ts";
 
 export interface ProvisionProgress {
   phase: "downloading" | "extracting" | "verifying";
@@ -86,7 +87,12 @@ async function download(
   let lastError: unknown;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const res = await fetch(url, { signal: opts.signal ?? null, redirect: "follow" });
+      // MEDIA budget: this transfers a runtime binary (~80MB for ffmpeg).
+      const res = await fetchWithTimeout(
+        url,
+        { redirect: "follow", ...(opts.signal ? { signal: opts.signal } : {}) },
+        MEDIA_TIMEOUT_MS,
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
       const total = Number(res.headers.get("content-length") ?? 0);
       const file = await Deno.open(dest, { write: true, create: true, truncate: true });

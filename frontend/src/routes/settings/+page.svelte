@@ -1,9 +1,10 @@
 <script lang="ts">
   import { createQuery, createMutation } from '@tanstack/svelte-query';
+  import { onDestroy } from 'svelte';
   import { apiClient, getUpdateStatus } from '$lib/api/client';
   import Icon from '$lib/components/Icon.svelte';
   import { fadeIn } from '$lib/actions/gsap';
-  import { selectUiScale, confirmUiScaleSaved } from '$lib/stores/ui-scale';
+  import { selectUiScale, confirmUiScaleSaved, revertUiScaleIfPending } from '$lib/stores/ui-scale';
   import { UI_SCALE_FACTOR, type AppSettings, type AspectRatio, type CaptionStyle, type UiScale } from '$shared/types';
 
   const settingsQuery = createQuery(() => ({
@@ -21,6 +22,19 @@
     uiScale = next;
     selectUiScale(next);
   }
+
+  /**
+   * Leaving without saving must UNDO a previewed change.
+   *
+   * The scale previews live by design, but the preview lives in a store the layout
+   * reads on every page, so navigating away with an unsaved choice kept it applied over
+   * the whole app while the settings page no longer showed it — the page and the UI
+   * disagreed about the scale. Reverting on destroy is what makes the preview honest.
+   * A no-op when the pending choice was saved (confirmUiScaleSaved clears the flag).
+   */
+  onDestroy(() => {
+    revertUiScaleIfPending();
+  });
 
   // Real update state from the runtime (nulls in a dev run, where updates are inert).
   const updateStatusQuery = createQuery(() => ({
@@ -437,4 +451,32 @@
       </div>
     {/if}
   </div>
+
+  <!-- ── UNSAVED-CHANGES FOOTER ────────────────────────────────────────────────
+       Floating, so it is reachable from anywhere in a long settings page rather than
+       only at the top where the header's Save lives. It states the consequence of
+       leaving (the previewed scale reverts) and carries the Save action itself, so the
+       reminder and the fix are the same control. -->
+  {#if dirty}
+    <div
+      class="sticky bottom-0 z-10 mx-auto mt-2 flex w-full max-w-2xl items-center justify-between gap-4 rounded-md border border-warning/50 bg-surface-2 px-4 py-2.5 shadow-lg"
+      role="status"
+      aria-live="polite"
+    >
+      <span class="flex items-center gap-2 text-xs text-ash">
+        <Icon name="alert" size={13} />
+        {updateMutation.isPending
+          ? 'Saving your changes...'
+          : 'You have unsaved changes. Leaving this page reverts them.'}
+      </span>
+      <button
+        class="flex shrink-0 items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
+        onclick={save}
+        disabled={updateMutation.isPending}
+      >
+        <Icon name="check" size={13} />
+        {updateMutation.isPending ? 'Saving...' : 'Save changes'}
+      </button>
+    </div>
+  {/if}
 </div>

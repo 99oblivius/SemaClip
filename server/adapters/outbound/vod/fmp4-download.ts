@@ -16,6 +16,7 @@
  */
 import { Fmp4BoxParser, serializeIndex, type FragmentIndex, type FragmentSpan } from "./fmp4.ts";
 import { spawnChild } from "@/adapters/outbound/process/spawn.ts";
+import { fetchWithTimeout, MEDIA_TIMEOUT_MS } from "@/adapters/outbound/net/fetch-timeout.ts";
 
 export interface Fmp4DownloadProgress {
   downloadedSec: number;
@@ -51,7 +52,9 @@ async function fetchWithRetry(url: string, signal?: AbortSignal): Promise<Respon
   for (let attempt = 0; attempt < CHUNK_RETRY_ATTEMPTS; attempt++) {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     try {
-      const res = await fetch(url, signal ? { signal } : {});
+      // MEDIA budget: one HLS chunk. Retried below, so a stall becomes an attempt
+      // failure rather than a hung download.
+      const res = await fetchWithTimeout(url, signal ? { signal } : {}, MEDIA_TIMEOUT_MS);
       if (res.ok) return res;
       lastErr = new Error(`chunk fetch ${res.status}: ${url}`);
       // 4xx other than 429 will not heal — fail fast.
@@ -92,7 +95,7 @@ export async function downloadFmp4(
   destPath: string,
   opts: Fmp4DownloadOptions,
 ): Promise<FragmentIndex> {
-  const playlistRes = await fetch(playlistUrl);
+  const playlistRes = await fetchWithTimeout(playlistUrl);
   if (!playlistRes.ok) throw new Error(`playlist fetch ${playlistRes.status}: ${playlistUrl}`);
   const chunks = parseMediaPlaylist(await playlistRes.text(), playlistUrl);
   if (chunks.length === 0) throw new Error("Media playlist has no chunks");

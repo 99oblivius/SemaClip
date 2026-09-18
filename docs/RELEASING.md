@@ -1,8 +1,8 @@
 # Releasing SemaClip
 
-How a nightly gets cut, what the version means, where the update manifest lives,
-and what is deliberately broken. Written for the manual path first, because the
-owner is publishing by hand until the pipeline has proven itself.
+What the version means, where the update manifest lives, how CI cuts a release, and
+what is deliberately broken. Written against the shipped pipeline: releases are cut
+by CI on every code push to `main`.
 
 Everything here was measured against Deno 2.9.6. `deno desktop` is
 **experimental** and prints a warning saying so.
@@ -13,11 +13,13 @@ Everything here was measured against Deno 2.9.6. `deno desktop` is
 
 | | | |
 |---|---|---|
-| Stable | `v26.148` | `26` = year − 2000, `148` = commits authored this year up to HEAD |
-| Nightly | `v26.149-nightly.42` | `42` = `GITHUB_RUN_NUMBER`, so two runs of the same commit stay distinct |
+| `v26.196` | `26` = year − 2000, `196` = commits authored this year up to HEAD | The only scheme |
 
-**`yy` is not a stylistic choice — it is what makes the Windows installer build
-at all.** Windows Installer packs `ProductVersion` as
+There is **one continuous line of releases** and no channel of any kind. A version
+suffix (`-nightly`, `-beta`) fails the build: CI asserts the version has no suffix.
+
+**`yy` is not a stylistic choice — it is what makes the Windows installer build at
+all.** Windows Installer packs `ProductVersion` as
 `major(0-255).minor(0-255).build(0-65535)`, so the original full-year scheme was
 rejected outright by `deno desktop`:
 
@@ -26,7 +28,7 @@ error: deno.json `version` "2026.141" cannot be used as an MSI ProductVersion:
 the major field 2026 exceeds the maximum of 255.
 ```
 
-`26.148` fits (and keeps fitting until 2255). The commit count fits the minor
+`26.196` fits (and keeps fitting until 2255). The commit count fits the minor
 field while it is ≤255; past that `version.sh` moves the count into the build
 field (`26.255.<patch>`), which stays encodable. One version serves the app, the
 updater and the installer — there is no separate MSI version to keep in sync. Do
@@ -38,24 +40,17 @@ banner, via `vite.config.ts`) and `server/deno.json` (baked into the binary as
 current version and re-applies patches forever, which is why CI asserts both.
 
 ```sh
-./scripts/version.sh              # write a stable version
-./scripts/version.sh --nightly    # write a nightly version
-./scripts/version.sh --check      # print only, write nothing
+./scripts/version.sh           # write the version
+./scripts/version.sh --check   # print only, write nothing
 ```
-
-The `-nightly` suffix is **load-bearing, not cosmetic**. `Deno.autoUpdate` looks
-up a patch under `manifest.patches[Deno.desktopVersion]`, so if a nightly and a
-stable build both reported `2026.141` the updater would treat them as the same
-version and a nightly would never see the next nightly.
 
 ## Where the manifest lives
 
 GitHub Pages, served from a `releases` branch (no build step — Pages publishes
-the branch content as-is).
+the branch content as-is). One manifest, at the ROOT:
 
 ```
-https://99oblivius.github.io/SemaClip/nightly/latest.json     <- the nightly channel
-https://99oblivius.github.io/SemaClip/stable/latest.json      <- planned, not live
+https://99oblivius.github.io/SemaClip/latest.json
 ```
 
 The base URL is baked into the binary via `desktop.release.baseUrl` in
@@ -63,7 +58,7 @@ The base URL is baked into the binary via `desktop.release.baseUrl` in
 hours (`INTERVAL_MS` in
 `server/adapters/outbound/platform/auto-update.ts`).
 
-Artifacts (installers, zips, runtime dylibs, patches) live on the **GitHub
+Artifacts (zips, the AppImage, runtime dylibs, patches) live on the **GitHub
 Release** for the tag. Only the manifest and the `.bin` patch files live on
 Pages, and they are committed **together in one commit** so a manifest can never
 name a patch that 404s.
@@ -72,110 +67,85 @@ name a patch that 404s.
 
 ```json
 {
-  "version": "26.149-nightly.43",
+  "version": "26.196",
   "patches": {
-    "26.148-nightly.42": {
-      "name": "patch-26.148-nightly.42-to-26.149-nightly.43.bin",
+    "26.194": {
+      "name": "patch-26.194-to-26.196.bin",
       "sha256": "64 lowercase hex characters"
     }
+  },
+  "artifacts": {
+    "win-x64": { "name": "SemaClip-26.196-win-x64-portable.zip", "sha256": "..." }
   }
 }
 ```
 
-Three facts that shape everything:
+Four facts that shape everything:
 
-1. **It is patches-only.** There is no full-artifact download entry. A manifest
-   that lists no patch for your version means you simply stay where you are —
-   gracefully, with "no patch available". Nobody is forced onto a new build.
-2. **`patches` is keyed by the version the user is *currently on*.** Supporting
-   an upgrade from three old versions means three entries. Only versions listed
-   there can update; everyone else waits.
-3. **`sha256` is mandatory.** The runtime refuses a patch whose hash does not
-   match. A wrong hash is not a warning — it is a silent, permanent
-   non-update for every user on that version.
+1. **`patches` is keyed by the version the user is *currently on*.** Supporting an
+   upgrade from three old versions means three entries. Only versions listed there
+   can update; everyone else stays where they are, gracefully, with "no patch
+   available". Nobody is forced onto a new build.
+2. **`sha256` is mandatory.** The runtime refuses a patch whose hash does not
+   match. A wrong hash is not a warning — it is a silent, permanent non-update for
+   every user on that version.
+3. **The `artifacts` entry is the Windows channel.** The runtime applies a *patch*
+   to its own dylib; it cannot replace a whole directory, so the Windows sidecar
+   reads this entry to know which zip to fetch. Two disjoint payloads in one file.
+4. **`{"patches": {}}` is a correct manifest**, not a placeholder. It is what a
+   first release produces. But a "nothing to do" branch must PROVE it is allowed
+   to be empty — a released client with no patch for its version can never update,
+   so an accidentally-empty `patches` is indistinguishable from a broken pipeline.
 
-On the **first** nightly there is no previous version, so `{"patches": {}}` is
-the correct manifest, not a placeholder.
+## How a release is cut
 
-## Cutting a nightly by hand (the current path)
+CI does it. `.github/workflows/release.yml` runs on every push to `main` that
+touches code (markdown-only pushes are ignored via `paths-ignore`, because the
+version is commit-derived and a typo fix would otherwise cut a release and move
+every user's version).
 
-One Linux machine can produce both platforms: `deno desktop` cross-compiles, and
-`scripts/fetch-native.sh` can populate a Windows payload from a Linux host.
+Six jobs:
 
-```sh
-# 0. clean tree on main; the version counts commits, so uncommitted work is invisible
-cd ~/Projects/SemaClip
-git switch main && git pull
+| Job | Does |
+|---|---|
+| `version` | writes the version, asserts tag/version agreement and that both version files carry it, rejects any suffix |
+| `build (linux-x64)` | frontend build, native fetch, `build-desktop.ts` → AppImage + runtime dylib, `sha256` sidecars |
+| `build (win-x64)` | same for Windows → `.msi` + portable `.zip` + runtime dll, with the sidecar updater and launcher asserted present in the zip |
+| `publish` | verifies hashes, creates the release (serially, one asset at a time), writes `latest.json`, pushes Pages |
+| `patch` | qbsdiff delta from the previous release, merges the entry, republishes manifest + patch in one commit |
+| `verify` | downloads the assets back over the PUBLIC urls, hashes them, polls the live manifest, applies every listed patch and compares the result to the target dylib byte-for-byte |
 
-# 1. version it. GITHUB_RUN_NUMBER is unset locally, so the suffix is nightly.0
-export GITHUB_RUN_NUMBER=0
-./scripts/version.sh --nightly
-V="$(./scripts/version.sh --check --nightly | sed -n 's/^version=//p')"
-echo "building $V"
+**One push cuts one release, and the concurrency group serialises runs.** Two runs
+racing would both try to create the same tag and both push a manifest; the second
+push wins and the loser's patch entry is dropped. Do not push to "retry" while a
+release is in flight — `cancel-in-progress` kills the running one mid-upload and
+leaves a partial release.
 
-# 2. frontend (the backend serves frontend/build/ — an unbuilt change is invisible)
-( cd frontend && npm ci && npm run check && npm run build )
+**Publish serially.** `gh release create <tag> <files...>` uploads every asset
+CONCURRENTLY, the asset endpoint rejects concurrent uploads to one release, and the
+call is all-or-nothing — one rejected asset rolls back the entire release. That is
+why publishing goes through `scripts/ci/publish-release.sh`, which creates the
+release empty and uploads one asset at a time with retries. Never call
+`gh release create` with a file list.
 
-# 3. native tree for the TARGET, not the host
-SEMACLIP_NATIVE_PLATFORM=linux-x64 ./scripts/fetch-native.sh
+### Cutting by hand (avoid)
 
-# 4. package. The wrapper owns the target->triple mapping and excludes the other
-#    platform's native subtrees; it emits dist/SemaClip.AppImage AND the unpacked
-#    dist/SemaClip/ directory (which holds the runtime dylib) in one run.
-SEMACLIP_TARGET=linux-x64 OUT="$PWD/dist/SemaClip" SEMACLIP_APPIMAGE=1 \
-  deno run --allow-all scripts/build-desktop.ts
+CI owns this now. Doing it manually means reproducing `release.yml`'s steps, and the
+traps below are the ones that have already cost a release:
 
-# 5. checksums
-( cd dist && sha256sum SemaClip.AppImage > SemaClip.AppImage.sha256 )
-
-# 6. the runtime dylib the next patch will diff from — must be published
-cp dist/SemaClip/SemaClip.so "dist/SemaClip-$V-linux-x64-runtime.so"
-( cd dist && sha256sum "SemaClip-$V-linux-x64-runtime.so" > "SemaClip-$V-linux-x64-runtime.so.sha256" )
-
-# 7. Windows. build-desktop.ts REMOVES its OUT path first, so this replaces the
-#    Linux app directory from step 4 — which is why step 6 copies the .so out
-#    before getting here.
-SEMACLIP_NATIVE_PLATFORM=win-x64 ./scripts/fetch-native.sh
-SEMACLIP_TARGET=win-x64 OUT="$PWD/dist/SemaClip" deno run --allow-all scripts/build-desktop.ts
-# the wrapper emits SemaClip.msi AND the unpacked dist/SemaClip/ directory
-mv dist/SemaClip.msi "dist/SemaClip-$V-win-x64.msi"
-( cd dist && sha256sum "SemaClip-$V-win-x64.msi" > "SemaClip-$V-win-x64.msi.sha256" \
-    && zip -qr "SemaClip-$V-win-x64-portable.zip" SemaClip \
-    && sha256sum "SemaClip-$V-win-x64-portable.zip" > "SemaClip-$V-win-x64-portable.zip.sha256" )
-cp dist/SemaClip/SemaClip.dll "dist/SemaClip-$V-win-x64-runtime.dll"
-( cd dist && sha256sum "SemaClip-$V-win-x64-runtime.dll" > "SemaClip-$V-win-x64-runtime.dll.sha256" )
-
-# 8. release
-gh release create "v$V" --prerelease --target "$(git rev-parse HEAD)" \
-  --title "SemaClip $V (nightly)" dist/SemaClip.AppImage dist/SemaClip.AppImage.sha256 \
-  "dist/SemaClip-$V-win-x64.msi" "dist/SemaClip-$V-win-x64.msi.sha256" \
-  "dist/SemaClip-$V-win-x64-portable.zip" "dist/SemaClip-$V-win-x64-portable.zip.sha256" \
-  "dist/SemaClip-$V-linux-x64-runtime.so" "dist/SemaClip-$V-linux-x64-runtime.so.sha256" \
-  "dist/SemaClip-$V-win-x64-runtime.dll" "dist/SemaClip-$V-win-x64-runtime.dll.sha256"
-
-# 9. manifest (empty patches on a first release)
-python3 scripts/ci/manifest.py init dist/latest.json "$V"
-bash scripts/ci/push-pages.sh 99oblivius/SemaClip "$GH_TOKEN" \
-  dist/latest.json nightly/latest.json
-```
-
-`GITHUB_RUN_NUMBER=0` is safe locally but two machine-cuts of one commit collide on
-one version. Bump the number by hand, or use the date, when cutting twice.
-
-### Getting signatures right on the manual path
-
-Only commit **one** `latest.json`. `scripts/ci/manifest.py merge` fetches nothing
-and merges into the file you give it, so `gh release download` the live manifest
-first if a release already published one, or you will drop the existing entries.
-
-Never re-serialize a signed manifest after signing it. `sign-manifest.py`
-serializes once and emits the exact string it signed. Regenerating the JSON and
-patching `signed` produces a signature no client accepts.
+- `build-desktop.ts` **REMOVES its `OUT` path first**, so the Windows build
+  replaces the Linux app directory — copy the Linux `.so` out before building
+  Windows.
+- **Only commit one `latest.json`.** `manifest.py merge` fetches nothing and merges
+  into the file you give it, so download the LIVE manifest first or you drop the
+  existing entries.
+- Pushing the manifest and the patch in **separate** commits creates a window where
+  the manifest names a file that 404s.
 
 ### Adding a patch afterwards
 
 ```sh
-V="26.149-nightly.43"; PREV="26.148-nightly.42"
+V="26.196"; PREV="26.194"
 gh release download "v$PREV" --pattern '*-linux-x64-runtime.so' --dir work/old
 gh release download "v$V"    --pattern '*-linux-x64-runtime.so' --dir work/new
 # qbsdiff, NOT classic bsdiff: same bsdiff4 format (it is the crate the Deno
@@ -190,13 +160,13 @@ qbspatch "work/old/SemaClip-$PREV-linux-x64-runtime.so" /tmp/patched.so "work/pa
 sha256sum /tmp/patched.so "work/new/SemaClip-$V-linux-x64-runtime.so"   # must match
 
 # merge into the LIVE manifest, not a stale local copy
-curl -sSfL https://99oblivius.github.io/SemaClip/nightly/latest.json -o dist/latest.json
+curl -sSfL https://99oblivius.github.io/SemaClip/latest.json -o dist/latest.json
 python3 scripts/ci/manifest.py merge dist/latest.json "$V" "$PREV" \
   "patch-$PREV-to-$V.bin" "$(sha256sum "work/patch-$PREV-to-$V.bin" | awk '{print $1}')"
 
 gh release upload "v$V" --clobber "work/patch-$PREV-to-$V.bin"
 bash scripts/ci/push-pages.sh 99oblivius/SemaClip "$GH_TOKEN" \
-  dist/latest.json nightly/latest.json "work/patch-$PREV-to-$V.bin" "nightly/patch-$PREV-to-$V.bin"
+  dist/latest.json latest.json "work/patch-$PREV-to-$V.bin" "patch-$PREV-to-$V.bin"
 ```
 
 **Only needed for this step.** Install the generator with:
@@ -214,36 +184,32 @@ which looks like it worked until the patch step fails.
 Stated plainly, because each one is a real user-visible limitation and not a
 pending detail.
 
-- **Windows auto-update does not work.** Applying an update works on macOS and
-  Linux only. On Windows the patch downloads and stages, and the launcher never
-  swaps the DLL in (a loaded DLL cannot be replaced in place). Deno's docs say to
+- **Windows auto-update does not work in-process.** Applying an update works on
+  Linux only. On Windows the patch downloads and stages, and the runtime never
+  swaps the DLL in (a loaded DLL cannot be replaced in place); Deno's docs say to
   treat Windows auto-update as unsupported. The in-app status reports
-  `canApply: false` rather than showing "update ready" forever. An external
-  updater over the staged path is the accepted workaround
-  (`server/adapters/updater/windows-update.ts`) and is not built yet.
-- **Windows gets a real installer, and it is the reason the version scheme
-  changed.** `deno desktop` authors a per-machine `.msi` in pure Rust and
-  cross-compiles it from a Linux runner, so no Windows host is needed. That only
-  works because the version is `v{yy}.{patch}` — Windows Installer packs
-  `ProductVersion` as `major(0-255).minor(0-255).build(0-65535)`, and a CalVer
-  major of 2026 is rejected outright. The `.msi` registers a per-machine install
-  under `%ProgramFiles%`, which some users cannot or will not use, so the plain
-  app directory also ships zipped as `SemaClip-<ver>-win-x64-portable.zip`. Both
-  are unsigned, so SmartScreen warns either way.
+  `canApply: false` rather than showing "update ready" forever. The accepted
+  workaround is a **Go sidecar updater** (`tools/updater/`), shipped inside the
+  portable payload and written out beside the app at launch
+  (`adapters/outbound/platform/sidecar.ts`), which performs the swap on a fresh
+  process and relaunches. The portable zip therefore updates itself when started
+  through the bundled `Update and launch SemaClip.cmd`.
+- **There is no installer offered for Windows, and that is deliberate.** `deno
+  desktop` authors a per-machine `.msi` under `%ProgramFiles%`, where the WebView2
+  runtime cannot write its profile, so the window comes up blank
+  (upstream `denoland/deno#36768`, still open). No in-app fix is possible: the
+  runtime initialises WebView2 before the entrypoint runs and there is no config
+  option for that folder. The `.msi` is still BUILT and published so the per-user
+  install work has an artifact to test, but it is not offered on the landing page.
+  The portable zip is unaffected because it unpacks somewhere writable. The `yy`
+  version scheme above still holds, since the MSI is still built.
 - **`deno desktop` is experimental.** That is why release jobs pin Deno exactly
   (`v2.9.6`) while `check.yml` deliberately floats on `v2.9.x` as early warning.
-- **Patch generation is no longer gated.** It originally was, because classic
-  `bsdiff` needs roughly **17x the input size** (~9.8GB for the ~577MB runtime
-  dylib) against `ubuntu-latest`'s 7GB, where the failure is an OOM kill deep into
-  the run rather than a clean error. That is solved: the generator is now
-  **`qbsdiff`**, the same crate the Deno runtime uses to *apply* patches, measured
-  at **3.3GB typical / 3.8GB worst case** on a 560MB pair. The `patch` job runs by
-  default; `SEMACLIP_PATCH_RUNNER` still overrides the runner if wanted, and the
-  preflight fails fast below 6GB rather than OOMing.
-- **The payload is huge.** ~277MB `.AppImage`, ~577MB runtime dylib, and the
-  Windows zip carries its own ~800MB dylib. That is the bundled whisper models,
-  whisper binaries and static ffmpeg/ffprobe, not the app. Patches exist precisely
-  because re-downloading that per release is unacceptable.
+- **The payload is huge.** ~277MB `.AppImage` and a ~577MB runtime dylib. That is
+  the bundled whisper models and whisper binaries, not the app. ffmpeg is NOT
+  bundled (it resolves PATH → managed dir → offered download), which is why the
+  payload is ~550MB smaller than it once was. Patches exist precisely because
+  re-downloading that per release is unacceptable.
 - **An update that applies is not an update that boots.** A patch can apply
   cleanly and yield a binary that dies on launch, which a user only discovers via
   the failed launch and the automatic rollback. The `verify` job proves a patch
@@ -262,19 +228,21 @@ be a signed envelope:
 {"signed": "<the manifest json as a string>", "signature": "<base64 ed25519 sig over the signed string>"}
 ```
 
-`server/adapters/outbound/platform/auto-update.ts` reads the key from
-`SEMACLIP_UPDATE_PUBKEY` and passes it through. Today that variable is unset, so
-unsigned manifests are what the app accepts.
+`server/adapters/outbound/platform/auto-update.ts` reads the key from a
+**compile-time constant** (`UPDATE_PUBLIC_KEY`), not from the environment — a
+`getenv()` there would read undefined in production and silently disable
+verification. Today that constant is empty, so unsigned manifests are what the app
+accepts.
 
 Consequences worth knowing before switching it on:
 
-- The key is read from the **baked-in environment of the install**. Setting it
-  later does not make existing installs verify anything — only builds made with
-  it set will check signatures. So a signing rollout is a rebuild, and until
-  everyone has rebuilt, the manifests must stay readable by old clients.
-- **Both** the `publish` and `patch` jobs must sign. `patch` rewrites the
-  manifest, so signing only in `publish` leaves the final published manifest
-  unsigned and every client that trusts the key would refuse it.
+- The key is **baked into the install**. Setting it later does not make existing
+  installs verify anything — only builds made with it set will check signatures, so
+  a signing rollout is a rebuild, and until everyone has rebuilt the manifests must
+  stay readable by old clients.
+- **Both** the `publish` and `patch` jobs must sign. `patch` rewrites the manifest,
+  so signing only in `publish` leaves the final published manifest unsigned and
+  every client that trusts the key would refuse it.
 - `scripts/ci/sign-manifest.py` compiles and is self-checking on argument shape,
   but **has never been run against a real key**. Treat its output as unverified
   until a round trip against a real client is done.
@@ -289,31 +257,18 @@ on its previous version and will be offered the same patch again — which is wh
 broken patch must be fixed at the source (delete it from the release and the
 manifest) rather than left in place.
 
-## CI overview
-
-`.github/workflows/release.yml`, triggered by `workflow_dispatch` and by pushes to
-`main` that are not docs-only.
-
-| Job | Does |
-|---|---|
-| `version` | runs `version.sh --nightly`, asserts tag/version agreement and that both version files carry it |
-| `build` | matrix `linux-x64` + `win-x64` on `ubuntu-latest`: frontend build, native fetch, `build-desktop.ts`, sidecars, runtime dylib |
-| `publish` | verifies hashes, creates the prerelease, writes `latest.json` (empty `patches`), pushes Pages |
-| `patch` | **on by default** — qbsdiff delta from the previous nightly, merges the entry, republishes manifest + patch in one commit |
-| `verify` | downloads the release assets back and hashes them; polls the live manifest; runs `bspatch` for every listed patch and compares to the target dylib |
-
-`verify` is a real check, not a smoke test: it fetches over the same public URLs a
-client uses, and it fails when the manifest is unreachable rather than reporting
-success.
-
 ## Checklist before calling a release good
 
 1. `check.yml` and `check-engine.yml` green on the commit being released.
-2. `verify` green.
-3. Install the `.AppImage` on a real desktop, let it update nightly→nightly+1, and
-   confirm the version changed and the window still opens. This is the step CI
-   cannot do — booting the patched app.
-4. Confirm the rollback path by staging a deliberately broken patch on a test
+2. `release.yml`'s six jobs green.
+3. `verify` green — and read it, since a green unit suite while the artifact is
+   broken means the check was not exercising the claim.
+4. Run the `.AppImage` on a real desktop and take a patch. Confirm the version
+   changed and the window still opens. This is the step CI cannot do — booting the
+   patched app.
+5. Confirm the rollback path by staging a deliberately broken patch on a test
    install, or at minimum confirm `<dylib>.backup` appears and is replaced.
-5. On Windows, confirm the zip runs. Update behaviour there is expected to be
-   nothing, and saying otherwise in release notes would be false.
+6. On Windows, run the portable zip and update through `Update and launch
+   SemaClip.cmd`. Report what happened rather than assuming: the sidecar path is
+   verified on Linux against the real helpers but has never run on Windows
+   hardware.

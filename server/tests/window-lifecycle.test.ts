@@ -21,16 +21,26 @@ type FakeWin = {
 
 /** Install a counting fake and a desktop-runtime marker; returns a restore function. */
 function withFakeWindow(
-  fn: (counts: { constructed: number; titles: string[]; closes: number }) => Promise<void>,
+  fn: (
+    counts: { constructed: number; titles: string[]; closes: number; opts: Record<string, unknown> },
+  ) => Promise<void>,
+  /** Constructor options the fake should record, when the call is the one under test. */
+  recordOpts = false,
 ): () => Promise<void> {
-  const counts = { constructed: 0, titles: [] as string[], closes: 0 };
+  const counts = {
+    constructed: 0,
+    titles: [] as string[],
+    closes: 0,
+    opts: {} as Record<string, unknown>,
+  };
   const deno = Deno as Record<string, unknown>;
   const realBW = deno.BrowserWindow;
   const realAddr = Deno.env.get("DENO_SERVE_ADDRESS");
   const realExit = Deno.exit;
 
-  deno.BrowserWindow = function (this: FakeWin) {
+  deno.BrowserWindow = function (this: FakeWin, options?: Record<string, unknown>) {
     counts.constructed += 1;
+    if (recordOpts && options) counts.opts = options;
     this.addEventListener = () => {};
     this.setTitle = (t: string) => counts.titles.push(t);
     this.close = () => {
@@ -121,7 +131,7 @@ Deno.test("adoption is idempotent: calling it twice does not open a window", asy
 });
 
 Deno.test("under `deno run` there is no window, so nothing is constructed", async () => {
-  const counts = { constructed: 0, titles: [] as string[], closes: 0 };
+  const counts = { constructed: 0 };
   const deno = Deno as Record<string, unknown>;
   const realBW = deno.BrowserWindow;
   const realAddr = Deno.env.get("DENO_SERVE_ADDRESS");
@@ -141,4 +151,59 @@ Deno.test("under `deno run` there is no window, so nothing is constructed", asyn
     deno.BrowserWindow = realBW;
     if (realAddr !== undefined) Deno.env.set("DENO_SERVE_ADDRESS", realAddr);
   }
+});
+
+/**
+ * The owner's requirement is a desktop app with its OWN chrome, and the window had
+ * decoration on Windows when it should not. Frameless is now the default, so the
+ * assertion that matters is what the WINDOW was created with — not what the caller
+ * omitted — plus that the reported state agrees with it (otherwise the UI draws no
+ * chrome over an undecorated window).
+ */
+Deno.test("the window is created FRAMELESS by default, and the state says so", async () => {
+  const run = withFakeWindow(async (counts) => {
+    const mod = await import(
+      `@/adapters/outbound/platform/window-lifecycle.ts?t=${Date.now()}frameless`
+    );
+    mod.adoptWindowLifecycle({ title: "x" });
+    assertEquals(
+      counts.opts.frameless,
+      true,
+      "with no explicit choice the window must be created without OS decoration",
+    );
+    assertEquals(mod.chromeState().frameless, true);
+    assertEquals(mod.chromeState().nativeDecorations, false);
+  }, true);
+  await run();
+});
+
+Deno.test("an explicit opt-out restores the OS titlebar, in the window and the state", async () => {
+  const run = withFakeWindow(async (counts) => {
+    const mod = await import(
+      `@/adapters/outbound/platform/window-lifecycle.ts?t=${Date.now()}decorated`
+    );
+    mod.adoptWindowLifecycle({ frameless: false, title: "x" });
+    assertEquals(counts.opts.frameless, false, "the escape hatch must reach the window");
+    assertEquals(mod.chromeState().frameless, false);
+    assertEquals(mod.chromeState().nativeDecorations, true);
+  }, true);
+  await run();
+});
+
+Deno.test("chromeState never claims minimize/maximize the window class does not have", async () => {
+  const run = withFakeWindow(async () => {
+    const mod = await import(
+      `@/adapters/outbound/platform/window-lifecycle.ts?t=${Date.now()}caps`
+    );
+    mod.adoptWindowLifecycle({ title: "x" });
+    const c = mod.chromeState();
+    // Verified against the runtime's own string table, not assumed: the window class
+    // exposes getSize/setSize/getPosition/setPosition/isResizable/setResizable/
+    // isAlwaysOnTop/setAlwaysOnTop/getOpacity/setOpacity/isVisible/focus/openDevtools/
+    // reload/executeJs/getNativeWindow/bind/unbind, and the only minimize/maximize
+    // strings in the binary belong to Intl.Locale.
+    assertEquals(c.canMinimize, false);
+    assertEquals(c.canMaximize, false);
+  });
+  await run();
 });
