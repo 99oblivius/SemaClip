@@ -21,8 +21,20 @@ set -euo pipefail
 APPDIR="${1:?usage: apply-windows-icon.sh <appdir> <icon.ico>}"
 ICO="${2:?usage: apply-windows-icon.sh <appdir> <icon.ico>}"
 
-EXE="$(find "$APPDIR" -maxdepth 1 -name '*.exe' -print -quit)"
-[ -n "$EXE" ] || { echo "no .exe in $APPDIR" >&2; exit 1; }
+# The LAUNCHER, which is <dirname>.exe. NOT the first .exe found: this directory also
+# carries sidecars (SemaClipUpdater.exe, and hidewin.exe for the console-hiding relay), and
+# `find -print -quit` returns whichever the filesystem lists first. Once hidewin.exe was
+# built first the icon landed on IT and the real launcher shipped bare — the owner noticed a
+# relay bearing the app icon and SemaClip.exe with none.
+NAME="$(basename "$APPDIR")"
+EXE="$APPDIR/$NAME.exe"
+if [ ! -f "$EXE" ]; then
+  # Fall back to the only .exe that is not a known sidecar.
+  EXE="$(find "$APPDIR" -maxdepth 1 -name '*.exe' \
+    ! -name 'hidewin.exe' ! -name 'SemaClipUpdater.exe' -print -quit)"
+fi
+[ -n "$EXE" ] && [ -f "$EXE" ] || { echo "no launcher .exe in $APPDIR (looked for $NAME.exe)" >&2; exit 1; }
+echo "launcher: $EXE"
 [ -f "$ICO" ] || { echo "no icon at $ICO" >&2; exit 1; }
 
 # A launcher with no icon resource yet. If it already has one the step is a no-op
