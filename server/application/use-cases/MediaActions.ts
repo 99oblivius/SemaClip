@@ -188,10 +188,15 @@ export class MediaActionsUseCase {
     if (!dir || !(await this.fs.exists(dir))) return { opened: false, dir: null };
     const cmd = Deno.build.os === "windows" ? "explorer" : "xdg-open";
     try {
+      // `explorer.exe` does not accept a forward-slashed path, and every path this
+      // process builds uses "/" — so handing it `dir` verbatim made the button a silent
+      // no-op on Windows (it resolves a relative path, or nothing at all). Every path
+      // that leaves the process must be host-native.
+      const native = this.fs.nativePath(dir);
       // Fire-and-forget: opening the folder in the OS file manager. No output is
       // wanted, and a console flash on Windows is avoided by the helper.
-      void runStatus(cmd, { args: [dir] });
-      return { opened: true, dir };
+      void runStatus(cmd, { args: [native] });
+      return { opened: true, dir: native };
     } catch {
       return { opened: false, dir };
     }

@@ -61,6 +61,9 @@ const fsFake: FileSystemPort = {
   async ensureDir() {},
   async remove() {},
   joinPath: (...s) => s.join("/"),
+  // Added with the port: paths handed to external programs must be host-native, and the
+  // fake must satisfy the interface or every test that builds a container fails to type.
+  nativePath: (p: string) => p,
   async listFiles() { return []; },
 };
 

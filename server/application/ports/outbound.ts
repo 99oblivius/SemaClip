@@ -162,6 +162,14 @@ export interface FileSystemPort {
   ensureDir(path: string): Promise<void>;
   remove(path: string): Promise<void>;
   joinPath(...segments: string[]): string;
+  /**
+   * The path in the form the OS expects, for anything that LEAVES this process — a
+   * spawned argument, a shell command, or a path shown to the user. In-process Deno APIs
+   * accept "/" on every platform, but external programs may not: `explorer.exe` needs
+   * backslashes, and the Open Folder button was a silent no-op because it was handed a
+   * forward-slashed path.
+   */
+  nativePath(path: string): string;
   /** Immediate children (files only), names sorted. Folder import scan. */
   listFiles(dir: string): Promise<string[]>;
 }

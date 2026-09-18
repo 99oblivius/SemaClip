@@ -12,7 +12,7 @@
  * immediately and always worked.
  */
 import { assert, assertEquals } from "@std/assert";
-import { boundedSignal, fetchWithTimeout, isTimeoutError, MEDIA_TIMEOUT_MS, METADATA_TIMEOUT_MS } from "@/adapters/outbound/net/fetch-timeout.ts";
+import { boundedSignal, fetchWithTimeout, isTimeoutError, CHUNK_TIMEOUT_MS, MEDIA_TIMEOUT_MS, METADATA_TIMEOUT_MS } from "@/adapters/outbound/net/fetch-timeout.ts";
 
 /** Starts a listener that accepts connections and never replies. */
 function silentServer(): { url: string; close: () => void; hits: () => number } {
@@ -94,14 +94,26 @@ Deno.test("a caller's cancellation still aborts immediately, not at the deadline
   }
 });
 
-Deno.test("the budgets are ordered: metadata is seconds, media is minutes", () => {
+Deno.test("the budgets are ordered: metadata fails fast, media is lenient but visible", () => {
   assert(
     METADATA_TIMEOUT_MS <= 30_000,
     "small JSON must fail fast; a user waiting on a token should not wait a minute",
   );
   assert(
-    MEDIA_TIMEOUT_MS >= 60_000,
+    MEDIA_TIMEOUT_MS >= 30_000,
     "a media payload can be tens of MB, so its budget bounds a STALL, not slow progress",
+  );
+  // The reason this cap exists rather than a generous one: 120s combined with 6 retries
+  // and exponential backoff meant a failing chunk produced THIRTEEN MINUTES of total
+  // silence, which the owner reported as a frozen download and could not distinguish from
+  // a hang. A single HLS chunk is a few MB, so 45s is already lenient.
+  assert(
+    MEDIA_TIMEOUT_MS <= 60_000,
+    "a media timeout long enough to hide a stall behind minutes of silence is a defect",
+  );
+  assert(
+    CHUNK_TIMEOUT_MS < MEDIA_TIMEOUT_MS,
+    "one chunk is smaller than a whole payload, so its budget must be tighter",
   );
 });
 

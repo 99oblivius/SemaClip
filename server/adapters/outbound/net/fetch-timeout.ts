@@ -27,11 +27,22 @@
 export const METADATA_TIMEOUT_MS = 15_000;
 
 /**
- * A media payload. Deliberately generous: a 1080p60 chunk is a few MB and a managed
- * ffmpeg download is ~80MB, and killing a slow-but-progressing transfer would be worse
- * than waiting. This bounds a STALL, not a slow connection.
+ * A media payload. Generous enough for a real transfer, short enough to be visible.
+ *
+ * This was 120s, which combined with 6 retries and exponential backoff meant a failing
+ * chunk produced **13 minutes of total silence** before the first error: no log line, no
+ * progress, nothing in the UI. The owner reported that as "the download is frozen and no
+ * backend actions happen" — and could not tell it apart from a hang, because it looked
+ * exactly like one. A single HLS chunk is a few MB; 45s is already lenient.
  */
-export const MEDIA_TIMEOUT_MS = 120_000;
+export const MEDIA_TIMEOUT_MS = 45_000;
+
+/**
+ * One HLS chunk. Shorter than MEDIA_TIMEOUT_MS because a chunk is small: this budget
+ * exists to bound a stall, and six attempts at 45s still lands inside a minute of
+ * backoff rather than a quarter hour.
+ */
+export const CHUNK_TIMEOUT_MS = 25_000;
 
 /**
  * Combines a caller's cancellation signal with a timeout.

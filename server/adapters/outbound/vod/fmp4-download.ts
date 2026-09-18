@@ -16,7 +16,7 @@
  */
 import { Fmp4BoxParser, serializeIndex, type FragmentIndex, type FragmentSpan } from "./fmp4.ts";
 import { spawnChild } from "@/adapters/outbound/process/spawn.ts";
-import { fetchWithTimeout, MEDIA_TIMEOUT_MS } from "@/adapters/outbound/net/fetch-timeout.ts";
+import { fetchWithTimeout, MEDIA_TIMEOUT_MS, CHUNK_TIMEOUT_MS } from "@/adapters/outbound/net/fetch-timeout.ts";
 
 export interface Fmp4DownloadProgress {
   downloadedSec: number;
@@ -47,21 +47,36 @@ export interface Fmp4DownloadOptions {
 
 const CHUNK_RETRY_ATTEMPTS = 6;
 
-async function fetchWithRetry(url: string, signal?: AbortSignal): Promise<Response> {
+async function fetchWithRetry(url: string, signal?: AbortSignal, label = ""): Promise<Response> {
   let lastErr: unknown = null;
+  const host = (() => {
+    try { return new URL(url).host; } catch { return "?"; }
+  })();
   for (let attempt = 0; attempt < CHUNK_RETRY_ATTEMPTS; attempt++) {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    const t0 = performance.now();
     try {
-      // MEDIA budget: one HLS chunk. Retried below, so a stall becomes an attempt
-      // failure rather than a hung download.
-      const res = await fetchWithTimeout(url, signal ? { signal } : {}, MEDIA_TIMEOUT_MS);
-      if (res.ok) return res;
+      const res = await fetchWithTimeout(url, signal ? { signal } : {}, CHUNK_TIMEOUT_MS);
+      if (res.ok) {
+        if (attempt > 0) {
+          console.log(`[fmp4] chunk ${label} ok on attempt ${attempt + 1} (${host})`);
+        }
+        return res;
+      }
       lastErr = new Error(`chunk fetch ${res.status}: ${url}`);
+      // The single most useful line for a CDN refusal: WHICH status, and the host.
+      console.warn(`[fmp4] chunk ${label} HTTP ${res.status} from ${host} — ${url.slice(0, 120)}`);
       // 4xx other than 429 will not heal — fail fast.
       if (res.status < 500 && res.status !== 429) throw lastErr;
     } catch (err) {
       if (signal?.aborted) throw err;
       lastErr = err;
+      const ms = Math.round(performance.now() - t0);
+      // Named, timed, and attributed: a stall with no line is what made this look frozen.
+      console.warn(
+        `[fmp4] chunk ${label} attempt ${attempt + 1}/${CHUNK_RETRY_ATTEMPTS} failed after ${ms}ms ` +
+          `(${err instanceof Error ? err.name : "?"}: ${err instanceof Error ? err.message : err})`,
+      );
     }
     const backoffMs = Math.min(32_000, 1000 * 2 ** attempt);
     await new Promise((r) => setTimeout(r, backoffMs));
@@ -244,7 +259,7 @@ export async function downloadFmp4(
     let nextWrite = firstIndex;
 
     const fetchOne = (index: number) =>
-      fetchWithRetry(chunks[index]!.url, opts.signal).then(async (res) => ({
+      fetchWithRetry(chunks[index]!.url, opts.signal, `${index + 1}/${chunks.length}`).then(async (res) => ({
         index,
         data: new Uint8Array(await res.arrayBuffer()),
       }));

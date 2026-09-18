@@ -66,8 +66,27 @@ class DenoFileSystem implements FileSystemPort {
   async remove(path: string): Promise<void> {
     await Deno.remove(path, { recursive: true });
   }
+  /**
+   * Join with the HOST separator, and normalise whatever the caller passed.
+   *
+   * This used to force "/" as the separator on every platform. Mixed separators work in
+   * Node/Deno path APIs, but NOT everywhere a path is handed to the OS: spawning
+   * `explorer.exe` with `C:/Users/.../AppData/Roaming/SemaClip/cache/vods/<id>` fails
+   * where the back-slashed form opens, which is the owner's "Open Folder button stopped
+   * opening the file explorer". Any path that leaves this process — a spawn argument, a
+   * shell, an OS dialog — must be host-native.
+   */
   joinPath(...segments: string[]): string {
-    return segments.join("/").replace(/\/+/g, "/");
+    const sep = Deno.build.os === "windows" ? "\\" : "/";
+    return segments
+      .filter((seg) => seg.length > 0)
+      .join(sep)
+      .replace(/[\\/]+/g, sep);
+  }
+
+  /** A path in the form the OS expects, for anything spawned or shown to the user. */
+  nativePath(path: string): string {
+    return Deno.build.os === "windows" ? path.replace(/\//g, "\\") : path;
   }
 }
 
