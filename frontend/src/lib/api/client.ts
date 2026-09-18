@@ -253,6 +253,18 @@ export async function getUpdateStatus(): Promise<UpdateStatus> {
   return await r.json();
 }
 
+/**
+ * Closes and reopens the app so a staged update installs.
+ *
+ * The reply says a restart was STARTED — the process exits immediately afterwards, so the
+ * caller cannot observe success any other way and must not treat a missing response as a
+ * failure.
+ */
+export async function restartApp(): Promise<{ restarting: boolean; error: string | null }> {
+  const r = await fetch('/api/window/restart', { method: 'POST' });
+  return await r.json();
+}
+
 export async function getWindowChrome(): Promise<WindowChrome> {
   const r = await fetch('/api/window');
   if (!r.ok) throw new Error(`window chrome: ${r.status}`);

@@ -1,6 +1,7 @@
 <script lang="ts">
   import '../app.css';
   import Icon from '$lib/components/Icon.svelte';
+  import UpdateBanner from '$lib/components/UpdateBanner.svelte';
   import ToolProvisionModal from '$lib/components/ToolProvisionModal.svelte';
   import { wsStore } from '$lib/stores/ws';
   import { fadeIn } from '$lib/actions/gsap';
@@ -205,6 +206,11 @@
         {$wsStore.connected ? 'ready' : 'connecting'}
       </span>
     </header>
+
+    <!-- Staged-update prompt: below the header, above every page, so it cannot be missed
+         on any navigation. It appears when the runtime reports a stage (pushed over
+         /api/events) and stays until acted on. -->
+    <UpdateBanner />
 
     <div class="flex min-h-0 flex-1">
       <!-- Rail (56px): 2px accent left border marks active -->

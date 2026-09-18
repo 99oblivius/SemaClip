@@ -20,6 +20,7 @@
  * "update ready" forever with nothing happening.
  */
 import { ensureSidecar } from "@/adapters/outbound/platform/sidecar.ts";
+import { emitAppEvent } from "@/application/events.ts";
 
 /** One update check per 6h: often enough to keep up with continuous development. */
 const INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -156,10 +157,16 @@ export async function startAutoUpdate(baseUrl?: string): Promise<void> {
     onUpdateReady(version) {
       status.pendingVersion = version;
       console.log(`Updates: ${version} staged, applies on next launch`);
+      // PUSHED, not polled: the user should be told the moment this happens so they can
+      // choose to restart into it. `canApplyByRestart` is false on Windows, where the
+      // runtime stages but cannot swap a loaded DLL — the UI must not offer a restart
+      // that would silently do nothing.
+      emitAppEvent({ type: "update-staged", version, canApplyByRestart: status.canApply });
     },
     onRollback(reason) {
       status.lastRollback = reason;
       console.warn("Updates: previous launch failed, rolled back —", reason);
+      emitAppEvent({ type: "update-rollback", version: reason, canApplyByRestart: status.canApply });
     },
   });
 }

@@ -192,6 +192,51 @@ export function setWindowTitle(title: string): boolean {
  * OS button left, and a titlebar-less window with no way to close would be unusable. Uses
  * the stored handle, never a new construction.
  */
+/**
+ * Restarts the app so a STAGED update is applied.
+ *
+ * The runtime applies a staged update in the launcher, before anything else runs on the
+ * next start — so "restart" is the only honest meaning of "apply now", and there is no
+ * in-process apply to call (the docs expose autoUpdate's callbacks and nothing more; the
+ * running dylib is untouched until a relaunch).
+ *
+ * The relaunch is spawned AFTER this process exits, because a Windows launcher cannot
+ * replace a DLL that a live process has loaded. `cmd /c start` (Windows) and a detached
+ * `sh -c` (POSIX) both outlive us; the Windows command re-runs the SIDECAR, which applies
+ * the update and relaunches, while POSIX just starts the binary again and lets the
+ * runtime's own launcher do the swap. Failures are reported, never silent: a restart that
+ * did not happen must not look like one that did.
+ */
+export async function restartApp(): Promise<{ restarting: boolean; error: string | null }> {
+  try {
+    const exe = Deno.execPath();
+    const dir = exe.includes("/") ? exe.slice(0, exe.lastIndexOf("/"))
+      : exe.includes("\\") ? exe.slice(0, exe.lastIndexOf("\\"))
+      : ".";
+
+    if (Deno.build.os === "windows") {
+      // Prefer the sidecar: it applies any staged update, then launches the app.
+      const sidecar = `${dir}\\SemaClipUpdater.exe`;
+      const target = await Deno.stat(sidecar).then(() => true).catch(() => false)
+        ? `${dir}\\Launch SemaClip (updates).cmd`
+        : exe;
+      new Deno.Command("cmd", { args: ["/c", "start", "", target], cwd: dir }).spawn();
+    } else {
+      // `setsid`-style detach: the child must not die with this process.
+      new Deno.Command("sh", {
+        args: ["-c", `sleep 2; exec "${exe}" >/dev/null 2>&1 &`],
+        cwd: dir,
+      }).spawn();
+    }
+    // Give the spawn a moment to be registered before the process goes away.
+    await new Promise((r) => setTimeout(r, 250));
+    setTimeout(() => Deno.exit(0), 150);
+    return { restarting: true, error: null };
+  } catch (err) {
+    return { restarting: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export function closeWindow(): boolean {
   if (!inDesktopRuntime() || !windowHandle) return false;
   try {

@@ -44,9 +44,16 @@ Deno.test("run: arguments with spaces survive verbatim", async () => {
 });
 
 Deno.test("run: binary output is not corrupted (ffmpeg writes to pipes)", async () => {
-  const r = await run("sh", { args: ["-c", "printf '\\xff\\xfe\\x00\\x01'"] });
-  assertEquals(r.stdout.length, 4);
-  assertEquals([...r.stdout], [0xff, 0xfe, 0x00, 0x01]);
+  // The bytes are emitted by DENO, not by a shell. `sh -c "printf '\\xff...'"` looked
+  // equivalent but tested the SHELL, not the pipe: /bin/sh is bash on Arch and DASH on
+  // the Ubuntu runner, and dash's printf does not interpret \xNN — it printed the escape
+  // text literally, so CI saw 16 bytes where this machine saw 4. A test about binary-safe
+  // pipes must not depend on which shell happens to be installed.
+  const r = await run(Deno.execPath(), {
+    args: ["eval", "Deno.stdout.writeSync(new Uint8Array([0xff, 0xfe, 0x00, 0x01]))"],
+  });
+  assertEquals(r.stdout.length, 4, "the pipe must carry exactly the bytes written");
+  assertEquals([...r.stdout], [0xff, 0xfe, 0x00, 0x01], "and not corrupt them");
 });
 
 Deno.test("run: cwd is honoured", async () => {

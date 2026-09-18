@@ -41,8 +41,10 @@ import { run, spawnChild } from "@/adapters/outbound/process/spawn.ts";
 import {
   chromeState,
   closeWindow,
+  restartApp,
 } from "@/adapters/outbound/platform/window-lifecycle.ts";
 import { updateStatus } from "@/adapters/outbound/platform/auto-update.ts";
+import { emitAppEvent, subscribeAppEvents, sseFrame } from "@/application/events.ts";
 
 /**
  * How many bytes of `mediaPath` may be served right now.
@@ -855,6 +857,74 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   // mechanism. A packaged build answers with its baked version; a dev run answers with
   // nulls and the UI shows the dev case rather than inventing a version.
   app.get("/api/update", (c) => c.json(updateStatus()));
+
+  // ── Dev hook: release a staged-update event without a compiled release ────────
+  //
+  // The real stage needs a packaged binary polling a real manifest, so the whole
+  // prompt path (SSE → EventSource → banner → restart) would otherwise be verifiable
+  // only on a machine running a published build. Gated on an explicit env var, never
+  // registered otherwise, and it cannot stage anything — it only emits the event the
+  // runtime's own callback emits.
+  if (Deno.env.get("SEMACLIP_DEV_HOOKS") === "1") {
+    app.post("/api/_test/stage-update", async (c) => {
+      const body = await c.req.json().catch(() => ({})) as { version?: string; canApplyByRestart?: boolean };
+      const version = body.version ?? "0.0.0-test";
+      const canRestart = body.canApplyByRestart ?? (Deno.build.os !== "windows");
+      emitAppEvent({ type: "update-staged", version, canApplyByRestart: canRestart });
+      return c.json({ emitted: version });
+    });
+  }
+
+  // App events, so a staged update reaches the UI the instant it happens instead of at
+  // the next poll. A late subscriber is replayed what it missed, because the update
+  // check runs during boot and can finish before the webview has connected.
+  app.get("/api/events", (c) => {
+    const body = new ReadableStream({
+      start(controller) {
+        const enc = new TextEncoder();
+        const send = (e: Parameters<typeof sseFrame>[0]) => {
+          try {
+            controller.enqueue(enc.encode(sseFrame(e)));
+          } catch {
+            // The client went away; unsubscribe below runs from the abort handler.
+          }
+        };
+        const unsubscribe = subscribeAppEvents(send);
+        // A keep-alive keeps intermediaries from closing an idle stream. Comment frames
+        // are ignored by EventSource, so this cannot be mistaken for an event.
+        const beat = setInterval(() => {
+          try {
+            controller.enqueue(enc.encode(": keep-alive\n\n"));
+          } catch {
+            // closed
+          }
+        }, 25000);
+        c.req.raw.signal.addEventListener("abort", () => {
+          clearInterval(beat);
+          unsubscribe();
+          try {
+            controller.close();
+          } catch {
+            // already closed
+          }
+        });
+      },
+    });
+    return c.newResponse(body, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-store",
+        Connection: "keep-alive",
+      },
+    });
+  });
+
+  // Restart to apply a staged update. The reply says whether a restart was STARTED —
+  // the process exits immediately after, so a client cannot observe success any other way.
+  app.post("/api/window/restart", async (c) => {
+    const result = await restartApp();
+    return c.json(result, result.restarting ? 200 : 500);
+  });
 
   app.post("/api/window/close", (c) => {
     // Fire the close and report whether it was accepted; the process exits from the
