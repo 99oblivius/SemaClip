@@ -621,3 +621,74 @@ func TestWriteVersionFallsBackWhenBundleIsReadOnly(t *testing.T) {
 		t.Fatalf("version not recorded anywhere: %q", got)
 	}
 }
+
+// localPath decides whether a URL names a local file. It had NO test, which is how a
+// real bug survived: the leading slash was stripped unconditionally, so a POSIX
+// `file:///tmp/x` became the RELATIVE `tmp/x` and the file:// QA path — the only way to
+// exercise an update end to end before publishing — silently never worked.
+func TestLocalPath(t *testing.T) {
+	cases := []struct {
+		url   string
+		want  string
+		local bool
+	}{
+		// POSIX: the root must survive.
+		{"file:///tmp/serve/latest.json", "/tmp/serve/latest.json", true},
+		{"file:///home/user/x.zip", "/home/user/x.zip", true},
+		// Windows: the slash before a drive letter is part of the URL, not the path,
+		// so it is dropped. Separator translation is filepath.FromSlash's job and is a
+		// no-op when this runs on POSIX, so the expectation here uses forward slashes —
+		// on Windows the same input yields `C:\Users\x\latest.json`.
+		{"file:///C:/Users/x/latest.json", "C:/Users/x/latest.json", true},
+		{"file://C:/Users/x/latest.json", "C:/Users/x/latest.json", true},
+		// Anything else is not a local path.
+		{"https://example.com/latest.json", "", false},
+		{"http://example.com/x", "", false},
+		{"", "", false},
+	}
+	for _, c := range cases {
+		got, ok := localPath(c.url)
+		if ok != c.local {
+			t.Errorf("localPath(%q) local=%v, want %v", c.url, ok, c.local)
+			continue
+		}
+		if ok && got != c.want {
+			t.Errorf("localPath(%q) = %q, want %q", c.url, got, c.want)
+		}
+	}
+}
+
+// --force is the REPAIR path: install the published payload even when the version
+// already matches. It was a silent no-op — Apply returned before resolving the manifest
+// entry, so the flag documented exactly this behaviour and then did nothing.
+func TestForceReinstallsAtTheSameVersion(t *testing.T) {
+	dir := t.TempDir()
+	mkBundle(t, dir, "v26.2")
+	// Damage the payload the way a partial install or a bad copy would.
+	write(t, filepath.Join(dir, "SemaClip.dll"), "DAMAGED")
+
+	zipPath := filepath.Join(t.TempDir(), "payload.zip")
+	mkZip(t, zipPath, "SemaClip", "v26.2") // the SAME version as installed
+	u, _ := newTestUpdater(t, dir, map[string]any{
+		"version": "v26.2",
+		"artifacts": map[string]any{"win-x64": map[string]string{
+			"name": "payload.zip", "sha256": sha256File(t, zipPath),
+		}},
+	}, zipPath)
+
+	// A normal run must leave an up-to-date bundle alone.
+	if err := u.Apply(false); err != nil {
+		t.Fatalf("apply(false): %v", err)
+	}
+	if got := read(t, filepath.Join(dir, "SemaClip.dll")); got != "DAMAGED" {
+		t.Fatalf("an up-to-date bundle must not be rewritten, got %q", got)
+	}
+
+	// --force reinstalls the published payload over the damage.
+	if err := u.Apply(true); err != nil {
+		t.Fatalf("apply(true): %v", err)
+	}
+	if got := read(t, filepath.Join(dir, "SemaClip.dll")); got != "payload v26.2" {
+		t.Fatalf("--force must reinstall the published payload, got %q", got)
+	}
+}

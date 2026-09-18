@@ -282,6 +282,17 @@ jobs:
           # here is invisible until a Windows client tries to update.
           unzip -l "SemaClip-$V-win-x64-portable.zip" | grep -q "SemaClip/version.txt" \
             || { echo "::error::portable zip has no version.txt — the payload cannot identify itself"; exit 1; }
+
+          # The MSI's cabinet cannot carry a file beside the payload, so the sidecar
+          # updater rides INSIDE the payload DLL's virtual filesystem and the app writes
+          # it out at first launch. Assert it is really in there: without it a Windows
+          # install can never apply an update, and nothing else in this pipeline would
+          # notice — the whole mechanism would be absent while every check passed.
+          if ! grep -qa "SemaClipUpdater.exe" dist/SemaClip/SemaClip.dll; then
+            echo "::error::the payload does not contain the bundled sidecar updater — Windows could never apply an update"
+            exit 1
+          fi
+          echo "payload carries the sidecar updater (Windows can apply updates)" 
           echo "portable payload contents:"
           unzip -l "SemaClip-$V-win-x64-portable.zip" | tail -n +4 | head -n -2
 
@@ -629,10 +640,19 @@ jobs:
 
           # The newest release other than this one that actually carries a Linux
           # runtime dylib — a release without one cannot be a diff base.
+          #
+          # DO NOT filter on isPrerelease. This used to read `select(.isPrerelease)`, from
+          # when every build published as a prerelease. Removing the nightly/stable split
+          # made releases NORMAL releases (publish-release.sh passes no --prerelease), so
+          # that filter matched nothing, `found` stayed false, and the ENTIRE patch job was
+          # skipped on every run — silently, because the verify step reads an empty
+          # `patches` object as "first release, nothing to verify" and passes. The result
+          # was that no Linux client could ever update: the manifest served `patches: {}`
+          # forever while the release that should have been its diff base sat right there.
           prev=""
           for tag in $(gh release list --repo "$GITHUB_REPOSITORY" --limit 30 \
                          --exclude-drafts --json tagName,isPrerelease,createdAt \
-                         --jq 'sort_by(.createdAt) | reverse | .[] | select(.isPrerelease) | .tagName'); do
+                         --jq 'sort_by(.createdAt) | reverse | .[] | .tagName'); do
             [ "$tag" = "$CUR" ] && continue
             if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
                  --jq '.assets[].name' | grep -q -- '-linux-x64-runtime\.so$'; then
@@ -924,12 +944,25 @@ jobs:
           echo "landing page verified: ${#LINKS[@]} download link(s) resolve, version $V present"
 
       - name: Verify every published patch applies
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           V="${{ needs.version.outputs.version }}"
           n="$(python3 -c 'import json;print(len(json.load(open("back/live-latest.json")).get("patches",{})))')"
           if [ "$n" = "0" ]; then
-            echo "::notice::live manifest lists no patches (first release, or patches disabled) — nothing to verify"
+            # An empty `patches` is legitimate ONLY for the first release of a line.
+            # Otherwise it means the patch job skipped or failed, and treating that as
+            # "nothing to verify" is exactly how the Linux updater stayed dead for every
+            # release: the generator's base-finder filtered on isPrerelease and matched
+            # nothing, the patch job never ran, and this check reported success.
+            prior="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 30 --exclude-drafts \
+                       --json tagName --jq 'length')"
+            if [ "${prior:-0}" -gt 1 ]; then
+              echo "::error::manifest lists no patches but the repo has $prior releases — the patch job produced nothing, so no existing client can update"
+              exit 1
+            fi
+            echo "::notice::live manifest lists no patches and this is the only release — first release of the line, nothing to verify"
             exit 0
           fi
 

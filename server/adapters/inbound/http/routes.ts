@@ -42,6 +42,7 @@ import {
   chromeState,
   closeWindow,
 } from "@/adapters/outbound/platform/window-lifecycle.ts";
+import { updateStatus } from "@/adapters/outbound/platform/auto-update.ts";
 
 /**
  * How many bytes of `mediaPath` may be served right now.
@@ -849,6 +850,11 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   // button for something the window class cannot do. Measured against the runtime:
   // minimize/maximize are ABSENT from BrowserWindow.
   app.get("/api/window", (c) => c.json(chromeState()));
+
+  // Real update state, so Settings reports what is true instead of describing the
+  // mechanism. A packaged build answers with its baked version; a dev run answers with
+  // nulls and the UI shows the dev case rather than inventing a version.
+  app.get("/api/update", (c) => c.json(updateStatus()));
 
   app.post("/api/window/close", (c) => {
     // Fire the close and report whether it was accepted; the process exits from the

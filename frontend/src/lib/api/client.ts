@@ -229,6 +229,30 @@ export interface WindowChrome {
   canMaximize: boolean;
 }
 
+/**
+ * Real update state from the runtime, not a description of the mechanism.
+ *
+ * `current` is the version baked into the binary (null under `deno run`);
+ * `pendingVersion` is set once a patch is staged; on Windows `sidecarPath` /
+ * `sidecarLauncherPath` name the updater that applies it, and `sidecarError` explains
+ * why they are missing when they are.
+ */
+export interface UpdateStatus {
+  current: string | null;
+  pendingVersion: string | null;
+  lastRollback: string | null;
+  canApply: boolean;
+  sidecarPath: string | null;
+  sidecarLauncherPath: string | null;
+  sidecarError: string | null;
+}
+
+export async function getUpdateStatus(): Promise<UpdateStatus> {
+  const r = await fetch('/api/update');
+  if (!r.ok) throw new Error(`update status: ${r.status}`);
+  return await r.json();
+}
+
 export async function getWindowChrome(): Promise<WindowChrome> {
   const r = await fetch('/api/window');
   if (!r.ok) throw new Error(`window chrome: ${r.status}`);

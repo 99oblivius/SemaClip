@@ -197,10 +197,11 @@ func (u *Updater) Check() (CheckResult, error) {
 		return res, fmt.Errorf("parse manifest: %w", err)
 	}
 	res.Latest = m.Version
-	if m.Version == installed {
-		return res, nil
-	}
 
+	// The entry is resolved even when the versions MATCH, because --force installs the
+	// published payload to repair a damaged bundle. Returning before this point left
+	// Entry empty, so force had nothing to install and the documented repair flag was a
+	// no-op. `res.Available` stays false for a match, so a normal run still does nothing.
 	entry, ok := m.Artifacts["win-x64"]
 	if !ok {
 		// Patches-only manifest: no Windows artifact to install. This is the
@@ -211,8 +212,8 @@ func (u *Updater) Check() (CheckResult, error) {
 	if entry.SHA256 == "" {
 		return res, fmt.Errorf("manifest entry for win-x64 has no sha256 — refusing to install unverified bytes")
 	}
-	res.Available = true
 	res.Entry = entry
+	res.Available = m.Version != installed
 	return res, nil
 }
 
@@ -250,13 +251,16 @@ func (u *Updater) Apply(force bool) error {
 	if err != nil {
 		return err
 	}
-	if !chk.Available {
-		if !force {
-			u.log("up to date (%s), launching", chk.Installed)
-			return nil
-		}
-		// --force with nothing published for this platform is a no-op, not an
-		// error: there is genuinely nothing to install.
+	if !chk.Available && !force {
+		u.log("up to date (%s), launching", chk.Installed)
+		return nil
+	}
+	// --force means "install the published payload even if the version matches", which
+	// is the repair path for a bundle whose files were damaged or partially written.
+	// It used to return here, so the flag documented exactly that behaviour and then did
+	// nothing — a silently useless repair command.
+	if !chk.Available && force && chk.Entry.Name == "" {
+		// Genuinely nothing published for this platform: a no-op, not an error.
 		u.log("nothing published for win-x64 (%s is latest), launching", chk.Latest)
 		return nil
 	}
@@ -357,15 +361,30 @@ func (u *Updater) download(entry ManifestEntry, dest string) error {
 }
 
 // localPath reports whether url names a local file, and where it is.
-// Handles file:///C:/x, file://C:/x and a bare drive path.
+// Handles file:///C:/x, file://C:/x, file:///tmp/x and a bare drive path.
+//
+// The leading slash is stripped ONLY when a drive letter follows it. Stripping it
+// unconditionally is a real bug on POSIX: `file:///tmp/x` became the RELATIVE path
+// `tmp/x`, which resolves against the working directory, so a local manifest or payload
+// silently failed to open ("open tmp/uptest/...: no such file or directory") and the
+// whole file:// QA path — the one way to exercise an update before publishing — did not
+// work at all. Windows still needs the strip, so it is conditioned rather than removed.
 func localPath(url string) (string, bool) {
 	const scheme = "file://"
 	if !strings.HasPrefix(strings.ToLower(url), scheme) {
 		return "", false
 	}
 	p := url[len(scheme):]
-	p = strings.TrimPrefix(p, "/")
+	// A leading slash before a drive letter ("/C:/x") is part of the URL, not the path.
+	if len(p) >= 3 && p[0] == '/' && isDriveLetter(p[1]) && p[2] == ':' {
+		p = p[1:]
+	}
 	return filepath.FromSlash(p), true
+}
+
+// isDriveLetter reports whether b is an ASCII letter usable as a Windows drive.
+func isDriveLetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 // copyVerified copies src to dest, refusing the copy unless its sha256 matches.

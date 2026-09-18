@@ -19,6 +19,8 @@
  * status is surfaced in-app rather than hidden, so a Windows user is not shown
  * "update ready" forever with nothing happening.
  */
+import { ensureSidecar } from "@/adapters/outbound/platform/sidecar.ts";
+
 /** One update check per 6h: often enough to keep up with continuous development. */
 const INTERVAL_MS = 6 * 60 * 60 * 1000;
 
@@ -39,6 +41,16 @@ export interface UpdateStatus {
   lastRollback: string | null;
   /** Applying updates is macOS/Linux only — Windows stages but never swaps. */
   canApply: boolean;
+  /**
+   * Windows: the updater that can apply a staged update, and the launcher that runs it.
+   * Null elsewhere, and null here when extraction failed (then `sidecarError` says why).
+   * The UI names these so a user is told what to run rather than shown a promise the
+   * platform cannot keep.
+   */
+  sidecarPath: string | null;
+  sidecarLauncherPath: string | null;
+  /** Why the sidecar could not be placed, when it could not. Never swallowed. */
+  sidecarError: string | null;
 }
 
 const status: UpdateStatus = {
@@ -46,6 +58,9 @@ const status: UpdateStatus = {
   pendingVersion: null,
   lastRollback: null,
   canApply: Deno.build.os !== "windows",
+  sidecarPath: null,
+  sidecarLauncherPath: null,
+  sidecarError: null,
 };
 
 export function updateStatus(): UpdateStatus {
@@ -56,10 +71,32 @@ export function updateStatus(): UpdateStatus {
  * Starts the updater. Safe to call unconditionally: it is inert under
  * `deno run` and on a build with no release.baseUrl configured.
  */
-export function startAutoUpdate(baseUrl?: string): void {
+export async function startAutoUpdate(baseUrl?: string): Promise<void> {
   if (!status.current) {
     console.log("Updates: disabled (no version baked in — dev run)");
     return;
+  }
+
+  // WINDOWS FIRST: the updater's swap needs a real file outside the payload's virtual
+  // filesystem, and this is the only process that can read the embedded copy. Doing it
+  // before the autoUpdate() call means the check's outcome is always actionable, and
+  // it is cheap — a stat on every launch after the first.
+  if (Deno.build.os === "windows") {
+    const sc = await ensureSidecar();
+    status.sidecarPath = sc.path;
+    status.sidecarLauncherPath = sc.launcherPath;
+    status.sidecarError = sc.error;
+    if (sc.path) {
+      console.log(
+        `Updates: sidecar ${sc.extracted ? "placed" : "present"} at ${sc.path}` +
+          (sc.launcherPath ? ` (run ${sc.launcherPath} to apply updates)` : ""),
+      );
+    } else {
+      // The one combination that cannot self-update. Say so plainly.
+      console.warn(
+        `Updates: Windows sidecar could not be placed — staged updates cannot be applied. ${sc.error ?? ""}`,
+      );
+    }
   }
   // deno.json's desktop.release.baseUrl is baked into the binary and
   // Deno.autoUpdate() DEFAULTS to it ("This is the only server URL the runtime

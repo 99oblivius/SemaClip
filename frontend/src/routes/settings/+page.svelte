@@ -1,6 +1,6 @@
 <script lang="ts">
   import { createQuery, createMutation } from '@tanstack/svelte-query';
-  import { apiClient } from '$lib/api/client';
+  import { apiClient, getUpdateStatus } from '$lib/api/client';
   import Icon from '$lib/components/Icon.svelte';
   import { fadeIn } from '$lib/actions/gsap';
   import { selectUiScale, confirmUiScaleSaved } from '$lib/stores/ui-scale';
@@ -21,6 +21,13 @@
     uiScale = next;
     selectUiScale(next);
   }
+
+  // Real update state from the runtime (nulls in a dev run, where updates are inert).
+  const updateStatusQuery = createQuery(() => ({
+    queryKey: ['update-status'],
+    queryFn: () => getUpdateStatus(),
+    refetchInterval: 30000,
+  }));
 
   const devicesQuery = createQuery(() => ({
     queryKey: ['system', 'devices'],
@@ -358,34 +365,69 @@
         </div>
       </section>
 
-      <!-- Updates. Reflects the real update state rather than a phase placeholder:
-           the version comes from the build, and the Windows caveat is
-           the one thing a user needs to know (its update is applied by the bundled
-           sidecar on the next launch, not while the app runs). -->
-      <section class="flex flex-col gap-3">
-        <h2 class="font-display text-sm font-medium text-ash uppercase tracking-wider">Updates</h2>
-        <div class="flex flex-col gap-2 rounded-md border border-border bg-surface p-4">
-          <div class="flex items-center justify-between">
-            <div class="flex flex-col gap-0.5">
-              <span class="text-sm text-ink">SemaClip {__APP_VERSION__}</span>
-              <span class="font-mono text-xs text-ash-dim">
-                Pre-alpha. Development is continuous, so every release is just the
-                next build along one line.
+      <!-- Updates. Reports the RUNTIME's real state (GET /api/update): the version baked
+             into this build, whether a patch is staged, and - on Windows - the updater
+             that applies it. A dev run has no baked version, which is shown as such
+             rather than papered over with the frontend's build number. -->
+        <section class="flex flex-col gap-3">
+          <h2 class="font-display text-sm font-medium text-ash uppercase tracking-wider">Updates</h2>
+          <div class="flex flex-col gap-2 rounded-md border border-border bg-surface p-4">
+            <div class="flex items-center justify-between">
+              <div class="flex flex-col gap-0.5">
+                <span class="text-sm text-ink">
+                  SemaClip {updateStatusQuery.data?.current ?? __APP_VERSION__}
+                </span>
+                <span class="font-mono text-xs text-ash-dim">
+                  {#if !updateStatusQuery.data?.current}
+                    Development build - no version is baked in, so updates are off.
+                  {:else if updateStatusQuery.data?.pendingVersion}
+                    {updateStatusQuery.data.pendingVersion} is staged and installs on the
+                    next launch.
+                  {:else}
+                    Up to date. Development is continuous, so every release is the next
+                    build along one line.
+                  {/if}
+                </span>
+              </div>
+              <span class="rounded border border-border px-2 py-1 font-mono text-xs text-ash-dim">
+                pre-alpha
               </span>
             </div>
-            <span class="rounded border border-border px-2 py-1 font-mono text-xs text-ash-dim">
-              pre-alpha
-            </span>
-          </div>
-          <p class="border-t border-border pt-2 text-xs text-ash-dim">
-            Updates download in the background and are applied on the next launch.
-            On Windows the bundled updater applies them while the app is closed, so
-            a restart is what installs them — you are never interrupted mid-task.
-          </p>
-        </div>
-      </section>
 
-      <!-- Save status -->
+            {#if updateStatusQuery.data?.lastRollback}
+              <p class="border-t border-border pt-2 text-xs text-warning">
+                The previous launch failed and was rolled back: {updateStatusQuery.data.lastRollback}
+              </p>
+            {/if}
+
+            {#if updateStatusQuery.data?.current && !updateStatusQuery.data.canApply}
+              <div class="flex flex-col gap-1 border-t border-border pt-2">
+                <p class="text-xs text-ash-dim">
+                  Windows cannot swap a running program, so updates are applied while the
+                  app is closed.
+                </p>
+                {#if updateStatusQuery.data.sidecarLauncherPath}
+                  <p class="font-mono text-[10px] text-ash-dim break-all">
+                    Run <span class="text-ash">{updateStatusQuery.data.sidecarLauncherPath}</span>
+                    to install them.
+                  </p>
+                {:else}
+                  <!-- Only when placement failed. An install in this state cannot
+                       update itself, and saying so beats claiming otherwise. -->
+                  <p class="text-xs text-warning">
+                    The bundled updater could not be placed, so updates cannot be applied
+                    on this install.
+                    {#if updateStatusQuery.data.sidecarError}
+                      <span class="font-mono text-[10px]">{updateStatusQuery.data.sidecarError}</span>
+                    {/if}
+                  </p>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        </section>
+
+        <!-- Save status -->
       <div class="flex items-center justify-end gap-3 pb-4">
         {#if updateMutation.isError}
           <span class="font-mono text-xs text-error">{updateMutation.error?.message ?? 'Save failed'}</span>

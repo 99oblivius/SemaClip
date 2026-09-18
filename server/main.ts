@@ -206,4 +206,8 @@ console.log(`  Engine:   ${ENGINE_BINARY}`);
 
 // Update check. Inert under `deno run` (no baked-in version) and when no
 // release URL is configured, so this changes nothing in development.
-startAutoUpdate();
+//
+// Awaited because on Windows it first places the sidecar updater at a real per-user
+// path — the payload's virtual filesystem is readable only from this process, so if
+// that does not complete there is no way for a staged update to ever be applied.
+await startAutoUpdate();
