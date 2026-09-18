@@ -46,12 +46,38 @@ if gh release view "$TAG" --repo "$repo" --json assets --jq '.assets | length' \
 fi
 
 # ── 2. create the release with no assets ─────────────────────────────────────
+# The create is RETRIED and its failure is FATAL. `set -uo pipefail` has no `-e`, so the
+# original version continued past a failed create and then reported eight lines of
+# "release not found" from the upload loop — burying the one error that mattered (a
+# transient HTTP 500 from the releases endpoint). A publish failure must name itself.
 echo "creating release $TAG"
-gh release create "$TAG" \
-  --repo "$repo" \
-  --target "${GITHUB_SHA:?GITHUB_SHA required}" \
-  --title "$TITLE" \
-  --notes-file "$NOTES"
+created=no
+# Three attempts, short backoff: the whole publish must finish in ~2 minutes, so a create
+# that is still failing after ~30s is not going to succeed and must fail loudly NOW rather
+# than burn the budget retrying uploads against a release that does not exist.
+for attempt in 1 2 3; do
+  if gh release create "$TAG" \
+      --repo "$repo" \
+      --target "${GITHUB_SHA:?GITHUB_SHA required}" \
+      --title "$TITLE" \
+      --notes-file "$NOTES" 2>/tmp/create_err; then
+    echo "  + release $TAG created (attempt $attempt)"
+    created=yes
+    break
+  fi
+  echo "  . create attempt $attempt failed: $(tail -1 /tmp/create_err)"
+  # A 422 "already exists" is not retryable: another run made it, or a stub survived.
+  if grep -q "already_exists" /tmp/create_err 2>/dev/null; then
+    echo "::error::release $TAG already exists — refusing to continue"
+    exit 1
+  fi
+  gh release delete "$TAG" --repo "$repo" --yes --cleanup-tag 2>/dev/null || true
+  sleep $((attempt * 5))
+done
+if [ "$created" != yes ]; then
+  echo "::error::could not create release $TAG — last error: $(tail -3 /tmp/create_err)"
+  exit 1
+fi
 
 # ── 3. upload serially, with retries ────────────────────────────────────────
 failed=0
