@@ -20,18 +20,32 @@
  * the app's own log read `frameless=true decorations=none`. Creating a SECOND window would
  * apply the option but would also leave the original on screen (the blank-window bug).
  *
- * So the frame is removed the way a native toolkit removes it: clear the frame bits and tell the
- * OS the frame changed. Measured on the live window: 0x14CF0000 -> 0x14000000, i.e. caption,
- * thick frame, system menu and both button boxes gone.
+ * So the frame is removed the way a native toolkit removes it: clear the CAPTION only and tell the
+ * OS the frame changed. Measured on the live window: 0x14CF0000 -> 0x140F0000 — the title bar and
+ * its buttons gone, `WS_THICKFRAME` deliberately kept because that bit IS the resize border (see
+ * the note on `removeNativeFrame`).
  *
  * ── WHAT THE RUNTIME STILL DOES NOT OFFER ─────────────────────────────────────────────────
  * There is no minimize or maximize anywhere in the window class (re-verified against the
  * installed runtime: the only `minimize`/`maximize` strings in it belong to `Intl.Locale`). With
- * the native buttons gone, the app draws its own and implements them:
- *   - minimize -> hide the window (ShowWindow SW_MINIMIZE needs a taskbar entry the frameless
- *     window can lose, and the runtime's own `hide` restores cleanly on click).
- *   - maximize -> resize to the work area, tracked here so a second click restores.
+ * the native buttons gone, the app draws its own and implements them against the OS:
+ *   - minimize -> `SW_MINIMIZE`, so the window keeps a taskbar button (see `minimizeWindow`).
+ *   - maximize -> `SW_MAXIMIZE` / `SW_RESTORE`.
  *   - close    -> the runtime's `close()`.
+ *
+ * ── THE MINIMUM SIZE, AND WHY IT IS NOT ENFORCED NATIVELY ─────────────────────────────────
+ * The runtime exposes no minimum-size option, and there are only two native channels for one:
+ *
+ *   1. `WM_GETMINMAXINFO`, which requires INSTALLING A WINDOW PROC on a window this process does not
+ *      own the proc of. Measured: a Deno FFI callback installed with `SetWindowLongPtrW(GWLP_WNDPROC)`
+ *      HANGS the app the first time Windows sends a message — it was tried both thread-safe and
+ *      plain, with per-step logging, and the launch never got past window selection. A hook that can
+ *      wedge the app is far worse than the cosmetic problem it fixes, so it was removed.
+ *   2. `WM_SIZING`/`WM_WINDOWPOSCHANGING`, same requirement, same risk.
+ *
+ * So the floor is enforced where it is safe: the resize event corrects an undersized window (see
+ * `enforceMinimumSize`). That CAN look like a snap-back, which is the honest trade — the alternative
+ * measured as a hang. If Deno ever exposes a minimum size, this is the place to delete.
  */
 
 const GWL_STYLE = -16;
@@ -41,6 +55,37 @@ const WS_THICKFRAME = 0x00040000;
 const WS_SYSMENU = 0x00080000;
 const WS_MINIMIZEBOX = 0x00020000;
 const WS_MAXIMIZEBOX = 0x00010000;
+/**
+ * DWM border colour, for the thin frame DWM paints around a resizable window.
+ *
+ * `WS_THICKFRAME` is what keeps edge-resizing alive, and DWM draws a ~1px frame for it. That frame
+ * follows the SYSTEM's light/dark setting, which is why a dark app shows a thin light bar along the
+ * top: it is not the caption (that bit is cleared) and not the app's own paint. This attribute is
+ * the documented way to set its colour, so the app can make it match its own background.
+ */
+const DWMWA_BORDER_COLOR = 34;
+/**
+ * Immersive dark mode, which also darkens the frame DWM draws.
+ *
+ * 20 on Windows 10 20H1+ and Windows 11; 19 on the earliest builds that had the feature. Both are
+ * attempted, newest first, because a wrong attribute index is simply ignored.
+ */
+const DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+const DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19;
+
+/**
+ * The app's foundation colour (`--color-foundation: #0b0b10` in app.css) as a Win32 COLORREF.
+ *
+ * COLORREF is `0x00BBGGRR`, the reverse of the usual RGB hex: `#0b0b10` is R=0x0b G=0x0b B=0x10,
+ * so the value is `(B << 16) | (G << 8) | R`. Painted on DWM's frame it makes the 1px border
+ * vanish into the app's own background instead of showing the system's light grey.
+ */
+const FOUNDATION_COLORREF = (0x10 << 16) | (0x0b << 8) | 0x0b;
+
+/** Not a frame bit: a DISABLED window ignores the mouse, so it can never be the drag target. */
+const WS_DISABLED = 0x08000000;
+/** The runtime's own helpers are popups; the app's window is not. */
+const WS_POPUP = 0x80000000;
 
 const SWP_NOSIZE = 0x0001;
 const SWP_NOMOVE = 0x0002;
@@ -84,12 +129,36 @@ const USER32_SYMBOLS = {
   ShowWindow: { parameters: ["pointer", "i32"], result: "bool" },
   IsWindowVisible: { parameters: ["pointer"], result: "bool" },
   GetWindowRect: { parameters: ["pointer", "pointer"], result: "bool" },
+  GetClassNameW: { parameters: ["pointer", "buffer", "i32"], result: "i32" },
+  IsWindow: { parameters: ["pointer"], result: "bool" },
   IsZoomed: { parameters: ["pointer"], result: "bool" },
   IsIconic: { parameters: ["pointer"], result: "bool" },
   ReleaseCapture: { parameters: [], result: "bool" },
+  ClientToScreen: { parameters: ["pointer", "pointer"], result: "bool" },
   SendMessageW: { parameters: ["pointer", "u32", "usize", "isize"], result: "isize" },
   GetSystemMetrics: { parameters: ["i32"], result: "i32" },
 } as const;
+
+/**
+ * dwmapi, for the frame colour. Loaded lazily and separately: DWM is absent on the Server Core
+ * images and on any Windows older than Vista, and a missing dwmapi must not stop the app from
+ * starting — the frame simply keeps its system colour.
+ */
+const DWM_SYMBOLS = {
+  DwmSetWindowAttribute: { parameters: ["pointer", "u32", "pointer", "u32"], result: "i32" },
+} as const;
+
+let dwmapi: Deno.DynamicLibrary<typeof DWM_SYMBOLS> | null = null;
+function dwm(): Deno.DynamicLibrary<typeof DWM_SYMBOLS> | null {
+  if (dwmapi) return dwmapi;
+  if (Deno.build.os !== "windows") return null;
+  try {
+    dwmapi = Deno.dlopen("dwmapi.dll", DWM_SYMBOLS);
+    return dwmapi;
+  } catch {
+    return null;
+  }
+}
 
 function api(): Deno.DynamicLibrary<typeof USER32_SYMBOLS> | null {
   if (user32) return user32;
@@ -117,8 +186,9 @@ function api(): Deno.DynamicLibrary<typeof USER32_SYMBOLS> | null {
  * makes this return nothing at the exact moment it is called — the frame would survive on the one
  * code path that can remove it. A hidden or not-yet-shown window still has the style bits.
  *
- * A process can own more than one top-level window (measured: two for this app), so all of them
- * are returned and the frame is removed from each.
+ * A process can own more than one top-level window (the count varies with the runtime's internal
+ * helpers — a live check found one, earlier ones two), so all of them are returned and the frame is
+ * removed from each.
  */
 function ownTopLevelWindows(): Deno.PointerValue[] {
   const lib = api();
@@ -141,19 +211,99 @@ function ownTopLevelWindows(): Deno.PointerValue[] {
 }
 
 /**
- * This process's main top-level window, or null.
+ * This process's main APPLICATION window, or null.
  *
- * Cached once found: the frame state cannot change after removal, and re-enumerating on every
- * read would make a cheap status query walk the whole window list.
+ * ── THE RULE, AND THE TWO WRONG ONES BEFORE IT ────────────────────────────────────────────
+ * The app window is the process's LARGEST top-level window that is neither DISABLED nor a POPUP.
+ * That is all, and each clause is here because the alternative misfired on a real build:
+ *
+ *   - VISIBILITY CANNOT BE REQUIRED. Adoption runs during startup, BEFORE the runtime shows the
+ *     window (documented, and the reason an earlier visibility filter returned nothing). Ranking
+ *     visible-first and falling back to "largest of anything" is what selected a hidden, DISABLED
+ *     popup — and every native call after that (frame removal, drag, minimum size) was aimed at a
+ *     window nobody can see, while the real one kept its title bar.
+ *   - `framed` (caption/thickframe) CANNOT BE REQUIRED. This module's own job is to CLEAR the
+ *     caption, so a window that has already been processed would stop qualifying.
+ *   - A DISABLED window ignores the mouse, so as a drag target it is inert by definition. A POPUP
+ *     is the runtime's own helper. Excluding both leaves the app window and nothing else.
+ *
+ * Among what remains, a VISIBLE one wins (it is the window the user has), and otherwise the
+ * largest — because at adoption the app window exists but is not shown yet.
+ *
+ * Every candidate is logged with its style, class and size, so which window was chosen — and what
+ * the alternatives were — is answerable from the owner's log alone. That diagnostic is what this
+ * whole class of bug was missing.
  */
 export function findOwnWindow(): Deno.PointerValue {
-  if (hwnd !== null) return hwnd;
-  const windows = ownTopLevelWindows();
-  // Prefer a window that is actually visible, so the one reported as "the" window is the one a
-  // user would call the window — but fall back to any, because at adoption none may be shown yet.
   const lib = api();
-  const visible = lib ? windows.find((w) => lib.symbols.IsWindowVisible(w)) : undefined;
-  hwnd = visible ?? windows[0] ?? null;
+  if (!lib) return null;
+  // A cached handle is reused only while it is still a usable window. `IsWindow` catches one that
+  // was destroyed, and the DISABLED check catches the case that caused the reported symptoms: a
+  // hidden, disabled placeholder picked during startup and then kept for ever, while the real
+  // window kept its title bar and never received the drag or the size floor.
+  if (hwnd !== null) {
+    if (lib.symbols.IsWindow(hwnd)) {
+      const cachedStyle = lib.symbols.GetWindowLongW(hwnd, GWL_STYLE);
+      if ((cachedStyle & WS_DISABLED) === 0 && (cachedStyle & WS_POPUP) === 0) return hwnd;
+    }
+    hwnd = null;
+  }
+  const windows = ownTopLevelWindows();
+
+  /**
+   * Describe a window for the log — and NEVER throw.
+   *
+   * This diagnostic is what made the "every window fix missed" class of bug answerable from the
+   * owner's log. It also killed the app once: a pointer was interpolated directly, a Deno FFI
+   * pointer has no primitive conversion, and the resulting TypeError propagated out of
+   * `removeNativeFrame` and out of `main.ts` — so a LOGGING fault meant no window setup at all, and
+   * the app exited before it could show anything. Diagnosis must never be able to do that.
+   */
+  const describe = (w: Deno.PointerValue): string => {
+    try {
+      const style = lib.symbols.GetWindowLongW(w, GWL_STYLE);
+      const rect = new Int32Array(4);
+      lib.symbols.GetWindowRect(w, Deno.UnsafePointer.of(rect));
+      const classes = new Uint8Array(64);
+      lib.symbols.GetClassNameW(w, classes, 32);
+      const className = new TextDecoder("utf-16le").decode(classes).replace(/\0.*$/s, "");
+      // The pointer address as a NUMBER: interpolating the pointer itself is what threw.
+      return `hwnd=${Deno.UnsafePointer.value(w)} class=${className} ` +
+        `style=0x${(style >>> 0).toString(16).toUpperCase()} ` +
+        `${rect[2]! - rect[0]!}x${rect[3]! - rect[1]!} ` +
+        `visible=${lib.symbols.IsWindowVisible(w)} ` +
+        `disabled=${(style & WS_DISABLED) !== 0} popup=${(style & WS_POPUP) !== 0}`;
+    } catch (err) {
+      return `hwnd=? (describe failed: ${err instanceof Error ? err.message : String(err)})`;
+    }
+  };
+
+  const candidates = windows.map((w) => {
+    const style = lib.symbols.GetWindowLongW(w, GWL_STYLE);
+    const rect = new Int32Array(4);
+    lib.symbols.GetWindowRect(w, Deno.UnsafePointer.of(rect));
+    return {
+      w,
+      area: Math.max(0, rect[2]! - rect[0]!) * Math.max(0, rect[3]! - rect[1]!),
+      visible: lib.symbols.IsWindowVisible(w),
+      disabled: (style & WS_DISABLED) !== 0,
+      popup: (style & WS_POPUP) !== 0,
+    };
+  });
+  console.log(
+    `window: candidates (${candidates.length}): ` + candidates.map((c) => describe(c.w)).join(" | "),
+  );
+
+  const sane = candidates.filter((c) => !c.disabled && !c.popup).sort((a, b) => b.area - a.area);
+  const pick = sane.find((c) => c.visible) ?? sane[0] ?? null;
+  if (pick === null) {
+    // Nothing that can be the app window yet. NOT cached, so the next call re-resolves — a
+    // startup-order race must not cost the window every later operation.
+    console.error("window: no candidate is usable as the app window yet");
+    return null;
+  }
+  hwnd = pick.w;
+  console.log(`window: chose ${describe(pick.w)}`);
   return hwnd;
 }
 
@@ -202,45 +352,105 @@ export function removeNativeFrame(): { ok: boolean; style: number; error: string
     return { ok: false, style: 0, error: "no window found for this process" };
   }
   try {
-    // EVERY window this process owns, because a leftover decorated one would sit there with no
-    // chrome drawn over it — the exact symptom this exists to remove.
-    const windows = ownTopLevelWindows();
-    if (windows.length === 0) {
-      return { ok: false, style: 0, error: "no window found for this process" };
-    }
-    let last = 0;
-    let allFrameless = true;
-    for (const w of windows) {
-      const before = lib.symbols.GetWindowLongW(w, GWL_STYLE);
-      // ONLY the caption is cleared. Everything else is deliberately KEPT, because each bit is a
-      // native behaviour the user expects and none of them draws a title bar on its own:
-      //   WS_THICKFRAME  - the resize borders and the edge the OS uses for snap (see the note on
-      //                    this function: clearing it is what broke edge-resizing);
-      //   WS_SYSMENU     - the window menu (Alt+Space) and the taskbar's own right-click menu;
-      //   WS_MINIMIZEBOX - REQUIRED for SW_MINIMIZE to do anything: the OS refuses to iconify a
-      //                    window whose style says it cannot be minimized, so clearing it would
-      //                    turn the app's minimize button into a silent no-op;
-      //   WS_MAXIMIZEBOX - likewise for maximize and for the snap layouts on hover.
-      // The min/max/close BUTTONS are part of the caption, so clearing that removes them visually
-      // while these bits keep the behaviours the app's own buttons drive.
-      const after = before & ~WS_CAPTION;
-      lib.symbols.SetWindowLongW(w, GWL_STYLE, after);
-      lib.symbols.SetWindowPos(
-        w,
-        null,
-        0,
-        0,
-        0,
-        0,
-        SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED,
-      );
-      last = lib.symbols.GetWindowLongW(w, GWL_STYLE);
-      if ((last & WS_CAPTION) === WS_CAPTION) allFrameless = false;
-    }
-    return { ok: allFrameless, style: last, error: null };
+    // ONLY the window that was CHOSEN as the app window.
+    //
+    // The first version looped over EVERY top-level window the process owns, "so a leftover decorated
+    // one could not sit there" — which is wrong twice over, and the log is what gave it away:
+    //
+    //   * It reported the style of the LAST window it touched, so `measured style=` described
+    //     whichever window happened to be enumerated last. This process owns two IME helpers
+    //     (`IME`, `MSCTFIME UI`, style 0x8C000000), so the log insisted the app window was
+    //     0x8C000000 — WS_POPUP|WS_CLIPSIBLINGS|WS_DISABLED, no caption, no thickframe — while an
+    //     external probe of the same window read 0x140F0000. A whole investigation was built on that
+    //     one misleading number.
+    //   * It CLEARED THE CAPTION off the IME windows. Those are the OS input-method windows; their
+    //     style is not the app's to edit, and a window with its caption cleared is not what the IME
+    //     expects.
+    //
+    // A window the app has not chosen is not the app's to modify.
+    const before = lib.symbols.GetWindowLongW(h, GWL_STYLE);
+    // ONLY the caption is cleared. Everything else is deliberately KEPT, because each bit is a
+    // native behaviour the user expects and none of them draws a title bar on its own:
+    //   WS_THICKFRAME  - the resize borders and the edge the OS uses for snap (see the note on
+    //                    this function: clearing it is what broke edge-resizing);
+    //   WS_SYSMENU     - the window menu (Alt+Space) and the taskbar's own right-click menu;
+    //   WS_MINIMIZEBOX - REQUIRED for SW_MINIMIZE to do anything: the OS refuses to iconify a
+    //                    window whose style says it cannot be minimized, so clearing it would
+    //                    turn the app's minimize button into a silent no-op;
+    //   WS_MAXIMIZEBOX - likewise for maximize and for the snap layouts on hover.
+    // The min/max/close BUTTONS are part of the caption, so clearing that removes them visually
+    // while these bits keep the behaviours the app's own buttons drive.
+    const after = before & ~WS_CAPTION;
+    lib.symbols.SetWindowLongW(h, GWL_STYLE, after);
+    lib.symbols.SetWindowPos(
+      h,
+      null,
+      0,
+      0,
+      0,
+      0,
+      SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED,
+    );
+    const confirmed = lib.symbols.GetWindowLongW(h, GWL_STYLE);
+    return { ok: (confirmed & WS_CAPTION) !== WS_CAPTION, style: confirmed, error: null };
   } catch (err) {
     return { ok: false, style: 0, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/**
+ * Colour the frame DWM draws, and ask for dark mode.
+ *
+ * The thin light bar along the top of a dark app is DWM's frame: `WS_THICKFRAME` keeps resizing
+ * alive and DWM paints a ~1px border for it in the SYSTEM's light/dark colour, which the app's own
+ * CSS cannot influence. `DWMWA_BORDER_COLOR` sets that colour directly, and
+ * `DWMWA_USE_IMMERSIVE_DARK_MODE` darkens the rest of the frame chrome DWM still owns.
+ *
+ * Both are best-effort: DWM may be absent (Server Core) or the build may predate the attribute, and
+ * a frame that keeps the system colour is cosmetic. The result is MEASURED (the HRESULT) so a
+ * silent no-op is visible in the log rather than assumed to have worked.
+ */
+export function applyDwmFrame(options: { borderColor?: number; dark?: boolean } = {}): {
+  border: number;
+  dark: number;
+} {
+  const lib = dwm();
+  const h = findOwnWindow();
+  if (!lib || h === null) return { border: -1, dark: -1 };
+  const out = { border: -1, dark: -1 };
+  try {
+    if (options.dark !== false) {
+      const value = new Int32Array([1]);
+      out.dark = lib.symbols.DwmSetWindowAttribute(
+        h,
+        DWMWA_USE_IMMERSIVE_DARK_MODE,
+        Deno.UnsafePointer.of(value),
+        4,
+      );
+      if (out.dark !== 0) {
+        // Older builds use 19. Retried rather than assumed, because a wrong index is ignored.
+        out.dark = lib.symbols.DwmSetWindowAttribute(
+          h,
+          DWMWA_USE_IMMERSIVE_DARK_MODE_OLD,
+          Deno.UnsafePointer.of(value),
+          4,
+        );
+      }
+    }
+    if (options.borderColor !== undefined) {
+      // COLORREF is 0x00BBGGRR — the reverse of the usual RGB hex.
+      const color = new Int32Array([options.borderColor & 0xffffff]);
+      out.border = lib.symbols.DwmSetWindowAttribute(
+        h,
+        DWMWA_BORDER_COLOR,
+        Deno.UnsafePointer.of(color),
+        4,
+      );
+    }
+  } catch {
+    // Reported through the sentinel values; never fatal.
+  }
+  return out;
 }
 
 /** Show and focus the window (used by minimize's counterpart and by a taskbar click). */
@@ -290,26 +500,53 @@ export function isMinimized(): boolean {
 /**
  * Start dragging the window, from a mouse press in the app's own chrome bar.
  *
- * `-webkit-app-region: drag` DOES NOTHING HERE. That CSS is an Electron extension; this app runs
- * on the `webview` backend (WebView2 on Windows, WebKitGTK on Linux), and searching the installed
- * runtime for `app-region` returns ZERO matches — which is why the chrome "can't be dragged
- * around". The mechanism every Win32 app uses instead is to release the mouse capture and ask the
- * OS to run its own move loop:
+ * `-webkit-app-region: drag` DOES NOTHING HERE. That CSS is an Electron extension; this app runs on
+ * the `webview` backend (WebView2 on Windows, WebKitGTK on Linux), and searching the installed
+ * runtime for `app-region` returns ZERO matches — which is why the chrome "can't be dragged around".
+ * The mechanism every Win32 app uses instead is to release the mouse capture and ask the OS to run
+ * its own move loop:
  *
- *   ReleaseCapture(); SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+ *   ReleaseCapture(); SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, MAKELPARAM(pt.x, pt.y));
  *
- * The OS then moves the window until the button is released, with snapping, double-click-to-
- * maximize and the drag-threshold behaviour that a hand-rolled position loop never reproduces.
- * It needs a REAL mouse press to have happened (the OS reads the button state), which is why this
- * is called from a mousedown handler rather than a click.
+ * The OS then moves the window until the button is released, with snapping, double-click-to-maximize
+ * and the drag-threshold behaviour a hand-rolled position loop never reproduces.
+ *
+ * ── THE lParam IS NOT OPTIONAL ────────────────────────────────────────────────────────────
+ * The press must be reported in SCREEN coordinates inside `lParam`, and that was the bug: sending
+ * `0` puts the point at the top-left of the desktop, and Windows then decides the click is not on
+ * the window's caption at all — so the move loop never starts, `SendMessage` returns normally, and
+ * the app cheerfully reports success while nothing moves. Client coordinates come from the DOM, so
+ * `ClientToScreen` converts them first.
+ *
+ * It also needs a REAL mouse press to have happened (the OS reads the button state), which is why
+ * this is called from a mousedown handler rather than a click.
  */
-export function beginDrag(): boolean {
+/**
+ * Pack a point into the `lParam` a non-client message expects.
+ *
+ * `MAKELPARAM(x, y)` — x in the low word, y in the high word, each a SIGNED 16-bit value. Exported
+ * because this is where the drag bug lived: sending `0` put the press at the top-left of the
+ * desktop, Windows decided the click was not on the caption, and the move loop never started while
+ * the app still reported success. `lParam` is not observable without a real window, so the packing
+ * is a pure function here and pinned by a test.
+ */
+export function makeLParam(x: number, y: number): bigint {
+  return BigInt(((Math.round(y) & 0xffff) << 16) | (Math.round(x) & 0xffff));
+}
+
+export function beginDrag(clientX: number, clientY: number): boolean {
   const lib = api();
   const h = findOwnWindow();
   if (!lib || h === null) return false;
   try {
+    // Client -> screen, because the lParam of an NC message is in screen coordinates.
+    const pt = new Int32Array([Math.round(clientX), Math.round(clientY)]);
+    lib.symbols.ClientToScreen(h, Deno.UnsafePointer.of(pt));
+    const x = pt[0]!;
+    const y = pt[1]!;
+    const lparam = makeLParam(x, y);
     lib.symbols.ReleaseCapture();
-    lib.symbols.SendMessageW(h, WM_NCLBUTTONDOWN, BigInt(HTCAPTION), 0n);
+    lib.symbols.SendMessageW(h, WM_NCLBUTTONDOWN, BigInt(HTCAPTION), lparam);
     return true;
   } catch {
     return false;

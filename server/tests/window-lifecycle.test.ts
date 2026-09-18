@@ -378,3 +378,80 @@ Deno.test("Linux gets the same window control surface as Windows", async () => {
   assert(gtk.includes("gtk_window_begin_move_drag"), "the move loop is what makes dragging native");
   assert(gtk.includes("gtk_window_iconify"), "minimize must leave a taskbar entry");
 });
+
+/**
+ * The drag must carry the press point, and the frame removal must touch ONLY the app window.
+ *
+ * Both are pinned as pure/source invariants because neither is observable without a real window, and
+ * both shipped as defects that were measured in the owner's VM:
+ *
+ *   1. `SendMessage(WM_NCLBUTTONDOWN, HTCAPTION, 0)` puts the press at the top-left of the DESKTOP, so
+ *      Windows decides the click is not on the caption and the move loop never starts — while the app
+ *      reported `{"dragging":true}`. The packing is the thing that was wrong, so it is a function.
+ *   2. `removeNativeFrame` looped over EVERY top-level window the process owns and returned the LAST
+ *      one's style. This process also owns two IME helper windows (`IME`, `MSCTFIME UI`, style
+ *      0x8C000000), so the log reported `measured style=0x8C000000` for a window that was actually
+ *      0x140F0000 — and it cleared the caption off the OS's input-method windows as well.
+ */
+Deno.test("the drag packs the press point into lParam, never 0", async () => {
+  const src = await Deno.readTextFile(
+    new URL("../adapters/outbound/platform/win-frame.ts", import.meta.url),
+  );
+  assert(
+    src.includes("makeLParam"),
+    "the lParam must be built from the press point: a zero press point starts no move loop",
+  );
+  // The message call must use it, not a literal. Comments also mention this message, so the match
+  // requires a line that actually CALLS it (an indented statement, not a `*` comment).
+  const call = src.split("\n").find((l) =>
+    l.includes("SendMessageW(") && l.includes("WM_NCLBUTTONDOWN") && !l.trimStart().startsWith("*")
+  );
+  assert(call, "the move-loop message must be sent");
+  assert(
+    !/WM_NCLBUTTONDOWN,\s*BigInt\(HTCAPTION\),\s*0n\)/.test(call!),
+    "lParam 0 means (0,0) on the desktop: the press misses the caption and nothing moves",
+  );
+  assert(call!.includes("lparam"), "the packed press point must be passed through");
+});
+
+Deno.test("the frame removal touches ONLY the chosen window, never the whole process", async () => {
+  const src = await Deno.readTextFile(
+    new URL("../adapters/outbound/platform/win-frame.ts", import.meta.url),
+  );
+  const body = src.slice(
+    src.indexOf("export function removeNativeFrame"),
+    src.indexOf("/**\n * Colour the frame DWM draws"),
+  );
+  assert(
+    !body.includes("ownTopLevelWindows()"),
+    "iterating every owned window clears the caption off the runtime's IME helpers and reports the " +
+      "wrong window's style in the log",
+  );
+  assert(
+    body.includes("findOwnWindow()"),
+    "the frame is removed from the window that was chosen as the app window",
+  );
+});
+
+/**
+ * The frame-removal reporting must be MEASURED from the window it acted on.
+ *
+ * The value is what every later diagnosis is read from, and it was wrong for a whole investigation.
+ */
+Deno.test("the frame removal reports the measured style of the window it acted on", async () => {
+  const src = await Deno.readTextFile(
+    new URL("../adapters/outbound/platform/win-frame.ts", import.meta.url),
+  );
+  const body = src.slice(
+    src.indexOf("export function removeNativeFrame"),
+    src.indexOf("/**\n * Colour the frame DWM draws"),
+  );
+  assert(
+    body.includes("GetWindowLongW(h, GWL_STYLE)") && body.includes("const confirmed"),
+    "the returned style must be read BACK from the window, not derived from the mask",
+  );
+  assert(
+    body.includes("(confirmed & WS_CAPTION) !== WS_CAPTION"),
+    "frameless is reported from the measured bits",
+  );
+});

@@ -57,6 +57,7 @@ import {
   isMaximized as winIsMaximized,
   measureWindow as measureWin32Window,
   minimizeWindow as winMinimizeWindow,
+  applyDwmFrame,
   removeNativeFrame,
   resizeBorderPx as winResizeBorderPx,
   showWindow as winShowWindow,
@@ -230,6 +231,11 @@ function applyFrameRemoval(wantFrameless: boolean): void {
     state.actual = measured;
     state.frameless = frameless;
     state.nativeDecorations = !frameless;
+
+    // The thin light bar along the top is DWM's own frame (it follows the SYSTEM's light/dark
+    // setting, which the app's CSS cannot influence). Coloured to match the app's foundation.
+    const dwm = applyDwmFrame({ borderColor: 0x100b0b, dark: true });
+    console.log(`window: dwm frame dark=${dwm.dark} borderColor=${dwm.border} (0 = applied)`);
     // The app draws its own buttons when there is no frame, so it can always provide all three.
     // Reported as a capability of the CHROME, not of the window class (which has none).
     state.canMinimize = frameless;
@@ -294,23 +300,42 @@ function applyFrameRemoval(wantFrameless: boolean): void {
 }
 
 /**
- * Keep the window at or above the minimum size.
+ * Keep the window at or above the minimum size, WITHOUT fighting a drag in progress.
  *
- * The runtime has no min-size option, so the floor is enforced by correcting a too-small resize.
- * Called from the window's own resize handler.
+ * ── THE TWO WRONG VERSIONS BEFORE THIS ONE ────────────────────────────────────────────────
+ * 1. A native floor via `WM_GETMINMAXINFO`, which needs a window proc installed on a window whose
+ *    proc this process does not own. Implemented, measured, and REMOVED: it HUNG the app the first
+ *    time Windows sent a message (both thread-safe and plain callbacks, with per-step logging). A
+ *    hook that can wedge the app is far worse than the cosmetic problem it fixes.
+ * 2. Correcting the size ON EVERY `resize` event. The user drags below the floor, the window is
+ *    snapped back, they drag again, and it is snapped back again — on every mouse move. That is the
+ *    reported "snaps back every time I move making it glitch visually", and the flicker was caused by
+ *    the FIX, not by the resize.
+ *
+ * The correction is therefore DEFERRED until the drag has settled. A resize arrives continuously
+ * while the pointer moves, so each event cancels the previous timer and only the final size is
+ * corrected — one quiet adjustment after the mouse stops, instead of a fight during the drag. The
+ * window is never smaller than the layout allows either way; it just is not yanked mid-motion.
  */
+const MIN_SIZE_SETTLE_MS = 220;
+let minSizeTimer: number | null = null;
+
 export function enforceMinimumSize(): void {
-  const size = windowHandle?.getSize?.();
-  if (!size) return;
-  const [w, h] = size;
-  const targetW = Math.max(w, MIN_WINDOW_WIDTH);
-  const targetH = Math.max(h, MIN_WINDOW_HEIGHT);
-  if (targetW === w && targetH === h) return;
-  try {
-    windowHandle?.setSize?.(targetW, targetH);
-  } catch {
-    // A refused resize is cosmetic; never let it break the window.
-  }
+  if (minSizeTimer !== null) clearTimeout(minSizeTimer);
+  minSizeTimer = setTimeout(() => {
+    minSizeTimer = null;
+    const size = windowHandle?.getSize?.();
+    if (!size) return;
+    const [w, h] = size;
+    const targetW = Math.max(w, MIN_WINDOW_WIDTH);
+    const targetH = Math.max(h, MIN_WINDOW_HEIGHT);
+    if (targetW === w && targetH === h) return;
+    try {
+      windowHandle?.setSize?.(targetW, targetH);
+    } catch {
+      // A refused resize is cosmetic; never let it break the window.
+    }
+  }, MIN_SIZE_SETTLE_MS) as unknown as number;
 }
 
 /**
@@ -350,7 +375,9 @@ export function restoreWindow(): boolean {
  * Returns whether the platform accepted the request; a refusal is reported rather than hidden.
  */
 export function beginWindowDrag(x: number, y: number): boolean {
-  if (Deno.build.os === "windows") return winBeginDrag();
+  // Both platforms get the press position: Win32 needs it in the message's lParam (in screen
+  // coordinates) and GTK needs it for its own move loop.
+  if (Deno.build.os === "windows") return winBeginDrag(Math.round(x), Math.round(y));
   if (Deno.build.os === "linux") return gtkBeginMoveDrag(Math.round(x), Math.round(y));
   return false;
 }
@@ -482,7 +509,19 @@ export function adoptWindowLifecycle(options: ChromeOptions = {}): void {
   // for a window carrying WS_CAPTION|WS_THICKFRAME|WS_SYSMENU on Windows — a full native frame.
   // The UI then drew no chrome (it believed the frame was gone) over a window that had one, and
   // the log backed the wrong answer. The state is now MEASURED.
-  applyFrameRemoval(wantFrameless);
+  //
+  // Wrapped, because cosmetic chrome must never be able to take the app down. It did: a fault in
+  // the logging inside frame removal propagated out of main.ts and the app exited before it could
+  // show a window at all. Every step after the window exists is best-effort BY CONTRACT.
+  try {
+    applyFrameRemoval(wantFrameless);
+  } catch (err) {
+    state.adoptError = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    console.error(
+      `window: frame removal failed — ${state.adoptError}. The window keeps its native frame; ` +
+        `the app still runs (chrome-only fault)`,
+    );
+  }
 
   // The runtime exposes no minimum size, so the floor is held here.
   win.addEventListener("resize", () => enforceMinimumSize());
