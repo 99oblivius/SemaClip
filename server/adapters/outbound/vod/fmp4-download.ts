@@ -114,7 +114,7 @@ export async function downloadFmp4(
   if (!playlistRes.ok) throw new Error(`playlist fetch ${playlistRes.status}: ${playlistUrl}`);
   const chunks = parseMediaPlaylist(await playlistRes.text(), playlistUrl);
   if (chunks.length === 0) throw new Error("Media playlist has no chunks");
-  console.log(`[fmp4] playlist ok: ${chunks.length} chunks, first=${chunks[0]!.url.slice(0, 90)}`);
+  console.log(`[fmp4] playlist ok: ${chunks.length} chunks, first=${chunks[0]!.url}`);
 
   const totalSec = chunks.reduce((s, c) => s + c.durationSec, 0);
   const resumeSec = Math.max(0, opts.resumeSec ?? 0);

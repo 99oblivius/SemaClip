@@ -609,26 +609,45 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     const reader = proc.stdout?.getReader();
     if (!reader) throw new Error("ffmpeg waveform output was not captured");
 
-    let peakBuf: number[] = [];
-    let acc = new Float32Array(0);
+    const peakBuf: number[] = [];
+    // ── WHY A FIXED RING AND NOT A GROWING ARRAY ────────────────────────────────────
+    // This accumulated with `new Float32Array(acc.length + incoming.length)` and copied
+    // the WHOLE accumulator on every read from ffmpeg — the same O(n^2) shape that has
+    // already frozen this app twice (the fMP4 muxer's stdout, then the box parser).
+    // Measured for one 55-minute VOD at this route's 8kHz mono: 79-159GB copied, which is
+    // 8-17 seconds of pure memcpy, SYNCHRONOUSLY on the event loop that serves every
+    // request. The Review screen requests a waveform as soon as a download starts, so this
+    // ran while the download was live — and blocked HTTP for the duration, which is
+    // exactly the owner's "the download is frozen and no backend actions happen anymore".
+    //
+    // A peak needs exactly `totalSamples` samples, so nothing ever has to hold more than
+    // that: write into a buffer of exactly that size, collapse it to a peak when it fills,
+    // and start over. One copy-free path, constant memory, no reallocation.
+    const acc = new Float32Array(totalSamples);
+    let accLen = 0;
     let peakIdx = firstIndex;
     const peakTime = totalSamples / SAMPLE_RATE; // seconds per peak = samples ÷ samples/sec
+
+    /** Collapse the accumulator into one peak and reset it. */
+    const flushPeak = () => {
+      let max = 0;
+      for (let i = 0; i < accLen; i++) max = Math.max(max, Math.abs(acc[i] ?? 0));
+      peakBuf.push(max);
+      accLen = 0;
+    };
 
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (value) {
           const incoming = new Float32Array(value.buffer, value.byteOffset, Math.floor(value.length / 4));
-          const merged = new Float32Array(acc.length + incoming.length);
-          merged.set(acc);
-          merged.set(incoming, acc.length);
-          acc = merged;
-
-          while (acc.length >= totalSamples) {
-            let max = 0;
-            for (let i = 0; i < totalSamples; i++) max = Math.max(max, Math.abs(acc[i] ?? 0));
-            peakBuf.push(max);
-            acc = acc.slice(totalSamples);
+          let off = 0;
+          while (off < incoming.length) {
+            const take = Math.min(totalSamples - accLen, incoming.length - off);
+            acc.set(incoming.subarray(off, off + take), accLen);
+            accLen += take;
+            off += take;
+            if (accLen >= totalSamples) flushPeak();
           }
         }
 
@@ -643,11 +662,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
       }
 
       // Flush remainder.
-      if (acc.length > 0) {
-        let max = 0;
-        for (let i = 0; i < acc.length; i++) max = Math.max(max, Math.abs(acc[i] ?? 0));
-        peakBuf.push(max);
-      }
+      if (accLen > 0) flushPeak();
       if (peakBuf.length > 0) {
         const startTime = peakIdx * peakTime;
         peakIdx += peakBuf.length;
