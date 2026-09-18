@@ -8,6 +8,7 @@
   import type { Clip } from '$shared/types';
   import { onDestroy } from 'svelte';
   import { browser } from '$app/environment';
+  import { shouldReloadMedia } from './player-reload';
   
   interface Props {
     streamId: string;
@@ -169,11 +170,23 @@
       const v = videoEl;
       if (!v) return;
       if (v.paused || reloadInFlight) return;
-      if (performance.now() - lastProgressTime < STALL_MS) return;
-      // Only reload when there is genuinely new data to fetch — otherwise a
-      // finished-but-paused stream would reload forever.
-      if (frontierBytes <= frontierAtLastReload + REFRESH_MIN_GROWTH) return;
+      // A frontier BELOW the mark is not growth: it means the media was replaced (the video
+      // was deleted and downloaded again) and the mark belonged to the file that is gone.
+      // Without this the player kept comparing against the DELETED file's high-water mark,
+      // so `frontier <= mark + growth` stayed true forever and the new video took an
+      // extremely long time to appear (owner-reported).
+      const replaced = frontierBytes < frontierAtLastReload;
+      if (!shouldReloadMedia({
+        frontierBytes,
+        frontierAtLastReload,
+        sinceProgressMs: performance.now() - lastProgressTime,
+        paused: v.paused,
+        inFlight: reloadInFlight,
+        stallMs: STALL_MS,
+        minGrowth: REFRESH_MIN_GROWTH,
+      })) return;
       frontierAtLastReload = frontierBytes;
+      if (replaced) reloadCount = 0; // a fresh source: start the cache-buster over
       reloadMedia();
     }, 500);
     return () => clearInterval(id);

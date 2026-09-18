@@ -168,7 +168,19 @@ export class MediaActionsUseCase {
       state.hqPath = null;
       state.hqMp4 = null;
       const part = state.parts.find((x) => x.kind === "hq");
-      if (part && part.status === "done") part.status = "pending";
+      if (part) {
+        // Reset the COUNTERS, not just the status. Leaving `downloadedBytes`/`downloadedSec`
+        // behind made the view keep reporting the deleted file's full size as the video
+        // artifact after the delete — and, worse, immediately after a re-download started, so
+        // the UI showed a complete video the moment a new one began. That stale size is what
+        // the player reads, and it is why a re-downloaded video took an extremely long time to
+        // appear: the frontier never looked like it had dropped.
+        part.status = "pending";
+        part.percent = 0;
+        part.downloadedBytes = 0;
+        part.downloadedSec = 0;
+        delete part.error;
+      }
       await this.orchestrator.setState(streamId, state);
     }
     return { deleted: removed };
@@ -199,12 +211,24 @@ export class MediaActionsUseCase {
     }
     if (!removed) return { deleted: false };
     const state = await this.orchestrator.getState(streamId);
-    if (state.proxyPath?.startsWith(`${dir}/`) || state.proxyMp4?.startsWith(`${dir}/`)) {
-      state.proxyPath = null;
-      state.proxyMp4 = null;
-      state.proxyFrontierSec = 0;
-      await this.orchestrator.setState(streamId, state);
+    // Unconditional: the files are gone (checked above), so the references must go too, and
+    // the PART's counters with them. A stale `downloadedBytes` reports the deleted proxy as
+    // still on disk — and, once a re-download starts, as already complete, which is what the
+    // player reads to decide whether to reload.
+    state.proxyPath = null;
+    state.proxyMp4 = null;
+    state.proxyFrontierSec = 0;
+    {
+      const part = state.parts.find((x) => x.kind === "proxy");
+      if (part) {
+        part.status = "pending";
+        part.percent = 0;
+        part.downloadedBytes = 0;
+        part.downloadedSec = 0;
+        delete part.error;
+      }
     }
+    await this.orchestrator.setState(streamId, state);
     this.announce(streamId, "proxy");
     return { deleted: true };
   }
