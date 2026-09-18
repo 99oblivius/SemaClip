@@ -1014,6 +1014,38 @@ export class DownloadOrchestrator {
    * and any `scrub.*` leftovers are dead weight (they were the doubling the
    * owner flagged). Best-effort: a failed unlink never breaks the state.
    */
+  /**
+   * Delete the `.fragments` sidecars for this project's media.
+   *
+   * Deliberately fire-and-forget: a leftover index costs 33KB and is rewritten by the next
+   * download, so failing to remove one must never fail the download that just succeeded.
+   */
+  private removeFragmentIndexes(state: DownloadState): void {
+    const dirs = new Set<string>();
+    for (const p of [state.proxyPath, state.proxyMp4, state.hqPath, state.hqMp4]) {
+      if (!p) continue;
+      const slash = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+      if (slash > 0) dirs.add(p.slice(0, slash));
+    }
+    for (const dir of dirs) {
+      let names: string[] = [];
+      try {
+        names = [...Deno.readDirSync(dir)].filter((e) => e.isFile).map((e) => e.name);
+      } catch {
+        continue;
+      }
+      for (const name of names) {
+        if (!name.endsWith(".fragments")) continue;
+        // Only when its media actually finished beside it — an index with no media is
+        // already handled by the orphan sweep, and a media file that is still SHORT of its
+        // fragments would mean we are deleting a live map.
+        const media = `${dir}/${name.replace(/\.fragments$/, ".mp4")}`;
+        if (!names.includes(media.slice(media.lastIndexOf("/") + 1))) continue;
+        void Deno.remove(`${dir}/${name}`).catch(() => {});
+      }
+    }
+  }
+
   private async sweepLegacyArtifacts(state: DownloadState): Promise<void> {
     const dirs = new Set<string>();
     for (const p of [state.proxyPath, state.hqPath, state.proxyMp4, state.hqMp4]) {
@@ -1167,6 +1199,16 @@ export class DownloadOrchestrator {
     // completed project never keeps two copies of the same media.
     if (state.phase === "done") {
       await this.sweepLegacyArtifacts(state);
+      // The fragment index has served its purpose: it exists so the media route can clamp
+      // Range responses to a COMPLETE fragment of a file that is still being written. A
+      // finished file is served whole (`servableSizeFor` returns early unless the phase is
+      // "running"), nothing else reads the index, and the muxer never reads one back — it
+      // rewrites it from scratch and truncates the file on resume. So it goes when the
+      // download completes, and a re-download writes it again.
+      //
+      // ONLY on "done": a failed or cancelled download keeps its index so a resume still has
+      // the boundary map while it is running.
+      this.removeFragmentIndexes(state);
     }
     await this.setState(streamId, state);
     return state;

@@ -63,9 +63,27 @@
   // downloads query (no second poller). ──
   const downloads = downloadsQuery();
   const dlView = $derived(viewFor(downloads.data?.views, streamId));
+  /**
+   * How far the media exists, for the void band and the moving red cursor.
+   *
+   * Read from the artifact that is actually GROWING, not from `media.frontierSec`. The media
+   * value is composed server-side and was reporting the idle, empty PROXY at the start of a
+   * no-proxy download, so the whole timeline looked complete and neither the not-downloaded
+   * band nor the frontier cursor was drawn. Selecting a proxy resolution hid it, because then
+   * the proxy genuinely IS the growing artifact.
+   *
+   * Preferring the growing artifact here makes the indicator depend on what is on disk rather
+   * than on which mode the project happens to be in.
+   */
   const proxyFrontier = $derived.by(() => {
     const v = dlView;
-    if (!v || v.phase === 'idle' || v.phase === 'done') return Infinity;
+    if (!v || v.phase === 'idle') return Infinity;
+    // Complete: the media exists in full, whatever its artifact status says.
+    if (!v.media.playableIsGrowing) return Infinity;
+    const growing = v.artifacts.find((a) => a.status === 'running' && a.frontierSec && a.frontierSec > 0);
+    if (growing?.frontierSec) return growing.frontierSec;
+    // No running artifact with a frontier yet: fall back to the media value, which is at least
+    // 0 when nothing has landed (drawing the void across the whole timeline, correctly).
     return v.media.frontierSec;
   });
 
@@ -84,8 +102,12 @@
     if (!v.media.playableIsGrowing) return Infinity;
     const proxy = v.artifacts.find((a) => a.kind === 'proxy');
     const video = v.artifacts.find((a) => a.kind === 'video');
-    // The growing file review plays: the proxy when it has bytes, else the video.
-    const growing = (proxy && proxy.bytes > 0 ? proxy : video)?.frontierSec ?? 0;
+    // A RUNNING artifact wins over a complete one: during a re-download the old completed
+    // artifact still reports its full duration, which would claim the whole timeline is
+    // scrubbable while the new file is being written.
+    const running = v.artifacts.find((a) => a.status === 'running' && a.frontierSec && a.frontierSec > 0);
+    const fallback = proxy && proxy.bytes > 0 ? proxy : video;
+    const growing = (running ?? fallback)?.frontierSec ?? 0;
     return growing > 0 ? growing : Infinity;
   });
 

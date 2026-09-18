@@ -170,7 +170,26 @@ export function resolvePlayback(artifacts: ArtifactView[]): DownloadView["media"
   // complete artifact that never recorded its own totalSec — without it a finished file
   // reported frontier 0, which dimmed the entire timeline for a fully downloaded project.
   const durationSec = video?.totalSec ?? proxy?.totalSec ?? null;
-  const chosenArtifact = chosen !== null && chosen === proxyPlayable ? proxy : video;
+  // Which artifact carries the media being watched. Prefer the PLAYABLE one; when nothing is
+  // playable yet (the first seconds of a download) fall back to whichever artifact is RUNNING.
+  //
+  // The fallback is the fix for a missing scrub indicator: in a no-proxy download the video
+  // artifact is the growing file, but at the instant a client asks there may be no playable
+  // path yet, and this reported the PROXY (the idle, empty one) — so the whole timeline read as
+  // complete and neither the not-yet-downloaded area nor the moving cursor was drawn. Selecting
+  // a proxy resolution hid the bug, because then the chosen artifact is the proxy and it is
+  // genuinely the growing one.
+  const runningVideo = video?.status === "running" && (video.bytes ?? 0) > 0;
+  const runningProxy = proxy?.status === "running" && (proxy.bytes ?? 0) > 0;
+  const chosenArtifact = chosen !== null && chosen === proxyPlayable
+    ? proxy
+    : videoPlayable !== null
+      ? video
+      : runningVideo
+        ? video
+        : runningProxy
+          ? proxy
+          : video ?? proxy;
   const frontier = chosenArtifact?.onDisk
     ? (chosenArtifact.totalSec ?? durationSec ?? chosenArtifact.frontierSec ?? 0)
     : (chosenArtifact?.frontierSec ?? 0);
