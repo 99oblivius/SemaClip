@@ -68,7 +68,13 @@ def hint_for(asset: dict) -> str:
     if asset["os"] == "windows":
         if asset["name"].endswith(".msi"):
             return "Run the installer. It is unsigned, so Windows will warn about an unknown publisher."
-        return "Nothing to install. Unzip it anywhere and run <code>SemaClip.exe</code>."
+        # The portable build is the Windows download, and it keeps itself up to date when
+        # started through the bundled launcher — worth saying, since there is no installer.
+        return (
+            "Nothing to install. Unzip it anywhere you can write, then run "
+            "<code>SemaClip.exe</code>. Start it through "
+            "<code>Update and launch SemaClip.cmd</code> and it updates itself."
+        )
     if asset["os"] == "linux":
         if asset["name"].endswith(".AppImage"):
             return "Nothing to install. Mark it executable, then run it. It needs <code>webkit2gtk</code>."

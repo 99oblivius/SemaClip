@@ -465,9 +465,14 @@ jobs:
             echo "Linux: \`SemaClip.AppImage\` — mark it executable, then run. It needs"
             echo "\`webkit2gtk\` installed."
             echo
-            echo "Windows: \`SemaClip-$V-win-x64.msi\` is the installer."
-            echo "\`SemaClip-$V-win-x64-portable.zip\` needs no install: unzip it and run"
-            echo "\`SemaClip.exe\`."
+            echo "Windows: \`SemaClip-$V-win-x64-portable.zip\` needs no install — unzip it"
+            echo "somewhere you can write, then run \`SemaClip.exe\`. To let it update"
+            echo "itself, start it through \`Update and launch SemaClip.cmd\` instead."
+            echo
+            echo "There is no installer for now: the .msi installs per-machine under"
+            echo "Program Files, where the WebView2 runtime it depends on cannot write its"
+            echo "profile, so the window comes up blank. The portable build does not have"
+            echo "that problem."
             echo
             echo "Every artifact has a \`.sha256\` sidecar, so a download can be verified"
             echo "with \`sha256sum -c\`."
@@ -523,9 +528,17 @@ jobs:
           # `set -e`, a failing `[ -f ] && specs+=(...)` returns non-zero and aborts
           # the whole job, so an OS we do not build for would fail the release.
           specs=()
-          if [ -f "dist/SemaClip-$V-win-x64.msi" ]; then
-            specs+=("SemaClip-$V-win-x64.msi:windows:x64:Installer (.msi)")
-          fi
+          # The .msi is deliberately NOT listed. Its install is PER-MACHINE under
+          # %ProgramFiles%, and WebView2 defaults its user-data folder beside the
+          # executable, which is not writable there — the window comes up blank
+          # (denoland/deno#36768, still open, three independent reporters). There is no
+          # deno.json option for the folder and the runtime initialises WebView2 before
+          # our entrypoint runs, so the app cannot fix it from inside. The artifact is
+          # still BUILT and PUBLISHED (so the per-user install work has something to
+          # test), it is just not offered to users as a way to run the app.
+          #
+          # The portable zip has no such problem: unzipped anywhere writable, WebView2's
+          # default folder beside the exe works, and it now self-updates.
           if [ -f "dist/SemaClip-$V-win-x64-portable.zip" ]; then
             specs+=("SemaClip-$V-win-x64-portable.zip:windows:x64:Portable (.zip)")
           fi
