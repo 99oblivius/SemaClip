@@ -53,13 +53,25 @@
  */
 
 import {
+  beginDrag as winBeginDrag,
   isMaximized as winIsMaximized,
   measureWindow as measureWin32Window,
   minimizeWindow as winMinimizeWindow,
   removeNativeFrame,
+  resizeBorderPx as winResizeBorderPx,
   showWindow as winShowWindow,
   toggleMaximize as winToggleMaximize,
 } from "./win-frame.ts";
+import {
+  beginMoveDrag as gtkBeginMoveDrag,
+  beginResizeDrag as gtkBeginResizeDrag,
+  deiconify as gtkDeiconify,
+  iconify as gtkIconify,
+  measureDecorated as gtkMeasureDecorated,
+  removeDecorations as gtkRemoveDecorations,
+  toggleMaximizeGtk,
+  type ResizeEdge,
+} from "./gtk-frame.ts";
 
 type Win = {
   addEventListener(type: string, fn: (e: { preventDefault(): void }) => void): void;
@@ -120,7 +132,7 @@ export interface MeasuredWindow {
   width: number;
   height: number;
   /** How the answer was obtained, so a wrong one can be traced. */
-  source: "win32" | "runtime" | "none";
+  source: "win32" | "gtk" | "runtime" | "none";
 }
 
 export interface ChromeState {
@@ -133,6 +145,10 @@ export interface ChromeState {
   canMaximize: boolean;
   /** The window's real geometry and frame state, or null when there is no window. */
   actual: MeasuredWindow | null;
+  /** True when the app must draw its own edge handles (the platform has no live borders). */
+  needsEdgeHandles: boolean;
+  /** The platform's resize-border thickness, when it has one. */
+  borderPx: number;
   /**
    * Why adoption failed, when it did.
    *
@@ -163,6 +179,8 @@ const state: ChromeState = {
   canMaximize: false,
   adoptError: null,
   actual: null,
+  needsEdgeHandles: false,
+  borderPx: 0,
 };
 
 export function chromeState(): ChromeState {
@@ -175,6 +193,10 @@ export function chromeState(): ChromeState {
     state.frameless = measured.frameless;
     state.nativeDecorations = !measured.frameless;
   }
+  // These depend only on the platform, not on the window, so they are cheap to report on every
+  // read and cannot go stale.
+  state.needsEdgeHandles = needsEdgeHandles();
+  state.borderPx = windowBorderPx();
   return { ...state };
 }
 
@@ -219,16 +241,52 @@ function applyFrameRemoval(wantFrameless: boolean): void {
     );
     return;
   }
-  // Not Windows: the frame state CANNOT be measured from JS, so it is reported as unknown and
-  // the UI draws chrome on the strength of the request, not of a measurement. Only the size is
-  // real here (the runtime's own getSize), and it is labelled "runtime".
+  // LINUX: GTK3 is already loaded in this process (the launcher links it — measured with ldd on
+  // laufey_webview), so the decorations and the window actions come from there. The app had no
+  // Linux window handling at all before this, which is why there was no chrome to speak of.
+  if (Deno.build.os === "linux") {
+    const res = gtkRemoveDecorations();
+    if (!res.ok && res.error) {
+      // Named, because the only symptom otherwise is a decorated window with no chrome drawn
+      // over it — and a compositor that refuses to undecorate is a real possibility on Wayland.
+      console.error(`window: could not remove GTK decorations — ${res.error}`);
+    }
+    const size = windowHandle?.getSize?.();
+    // GTK reports the decorated flag back, so this is MEASURED, not echoed. It can legitimately
+    // stay true when the compositor refuses, and saying so is the point.
+    //
+    // TRI-STATE, and the middle value matters: `decorated === null` means GTK could not be asked
+    // at all (no window in this process), so the frame state is UNKNOWN — reporting `false` there
+    // would be a claim about a window that does not exist. `frameless` below is then the
+    // REQUEST, which is what the UI draws chrome on, while `actual.frameless: null` records that
+    // it is unconfirmed.
+    const measured = res.decorated === null ? null : res.decorated === false;
+    const frameless = measured ?? true;
+    state.actual = {
+      frameless: measured,
+      width: size?.[0] ?? 0,
+      height: size?.[1] ?? 0,
+      source: res.decorated === null ? "runtime" : "gtk",
+    };
+    state.frameless = frameless;
+    state.nativeDecorations = !frameless;
+    // gtk_window_iconify / maximize are real, so the app owns these buttons only if the
+    // decorations really went away — otherwise the OS titlebar already has them.
+    state.canMinimize = frameless;
+    state.canMaximize = frameless;
+    console.log(
+      `window: gtk decorated=${res.decorated} frameless=${frameless} ` +
+        `size=${size?.[0] ?? "?"}x${size?.[1] ?? "?"}`,
+    );
+    return;
+  }
+
+  // Any other platform: the frame state cannot be measured, so it is reported as unknown rather
+  // than as a claim. Only the size is real (the runtime's own getSize).
   const size = windowHandle?.getSize?.();
   state.actual = size
     ? { frameless: null, width: size[0], height: size[1], source: "runtime" }
     : { frameless: null, width: 0, height: 0, source: "none" };
-  // Drawing chrome is still the right behaviour — a frameless window with nothing to close it is
-  // unusable — but the state records that this is a REQUEST, which is what `actual.frameless:
-  // null` means.
   state.frameless = true;
   state.nativeDecorations = false;
   state.canMinimize = false;
@@ -255,7 +313,73 @@ export function enforceMinimumSize(): void {
   }
 }
 
-export { winIsMaximized, winMinimizeWindow, winShowWindow, winToggleMaximize };
+/**
+ * Window actions, one implementation per platform behind one name.
+ *
+ * The UI never asks which OS it is on: it calls these, and each reports what the platform did
+ * rather than what was requested. The mechanisms differ (Win32 `ShowWindow`/`SendMessage` versus
+ * GTK's `iconify`/`begin_move_drag`) but the contract is the same.
+ */
+export function minimizeWindow(): boolean {
+  if (Deno.build.os === "windows") return winMinimizeWindow();
+  if (Deno.build.os === "linux") return gtkIconify();
+  return false;
+}
+
+export function toggleMaximizeWindow(): { maximized: boolean } | null {
+  if (Deno.build.os === "windows") return winToggleMaximize();
+  if (Deno.build.os === "linux") return toggleMaximizeGtk();
+  return null;
+}
+
+export function restoreWindow(): boolean {
+  if (Deno.build.os === "windows") return winShowWindow();
+  if (Deno.build.os === "linux") return gtkDeiconify();
+  return false;
+}
+
+/**
+ * Start dragging the window from a press in the app's chrome.
+ *
+ * THE mechanism for a frameless window, on both platforms, and NOT `-webkit-app-region: drag`:
+ * that CSS is an Electron extension, this app runs on the `webview` backend, and searching the
+ * installed runtime for `app-region` returns zero matches — which is exactly why the chrome could
+ * not be dragged. Both platforms hand the move to the OS/toolkit so snapping and drag thresholds
+ * behave natively.
+ *
+ * Returns whether the platform accepted the request; a refusal is reported rather than hidden.
+ */
+export function beginWindowDrag(x: number, y: number): boolean {
+  if (Deno.build.os === "windows") return winBeginDrag();
+  if (Deno.build.os === "linux") return gtkBeginMoveDrag(Math.round(x), Math.round(y));
+  return false;
+}
+
+/** Start resizing from one of the app's own edge handles. */
+export function beginWindowResize(edge: ResizeEdge, x: number, y: number): boolean {
+  if (Deno.build.os === "windows") {
+    // Windows does not need this: WS_THICKFRAME is kept (see win-frame.ts), so the OS's own
+    // resize borders are live and the app draws handles only to make them discoverable.
+    return false;
+  }
+  if (Deno.build.os === "linux") return gtkBeginResizeDrag(edge, Math.round(x), Math.round(y));
+  return false;
+}
+
+/** Whether the app must draw its own edge handles, or the platform's borders already work. */
+export function needsEdgeHandles(): boolean {
+  if (Deno.build.os === "windows") return false;
+  if (Deno.build.os === "linux") return true;
+  return true;
+}
+
+/** The platform's resize-border thickness in pixels, when it has one. */
+export function windowBorderPx(): number {
+  if (Deno.build.os === "windows") return winResizeBorderPx();
+  return 0;
+}
+
+export { winIsMaximized };
 
 /** Options for the adopted window. `frameless` is creation-only, so it is passed here. */
 export interface ChromeOptions {

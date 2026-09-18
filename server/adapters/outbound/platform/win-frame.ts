@@ -52,6 +52,14 @@ const SW_SHOW = 5;
 const SW_MINIMIZE = 6;
 const SW_MAXIMIZE = 3;
 
+/** Ask the OS to start a move loop, the way a native title bar does. */
+const WM_NCLBUTTONDOWN = 0x00a1;
+const HTCAPTION = 2;
+
+/** Border metrics, for the app to size its own edge grab areas (SM_CXSIZEFRAME/CXPADDEDBORDER). */
+const SM_CXSIZEFRAME = 32;
+const SM_CXPADDEDBORDER = 92;
+
 /** The dlopen result, typed from the declaration below so the symbols are real functions. */
 let user32: Deno.DynamicLibrary<typeof USER32_SYMBOLS> | null = null;
 /** The window this process owns, found by owning pid. */
@@ -77,6 +85,10 @@ const USER32_SYMBOLS = {
   IsWindowVisible: { parameters: ["pointer"], result: "bool" },
   GetWindowRect: { parameters: ["pointer", "pointer"], result: "bool" },
   IsZoomed: { parameters: ["pointer"], result: "bool" },
+  IsIconic: { parameters: ["pointer"], result: "bool" },
+  ReleaseCapture: { parameters: [], result: "bool" },
+  SendMessageW: { parameters: ["pointer", "u32", "usize", "isize"], result: "isize" },
+  GetSystemMetrics: { parameters: ["i32"], result: "i32" },
 } as const;
 
 function api(): Deno.DynamicLibrary<typeof USER32_SYMBOLS> | null {
@@ -163,12 +175,22 @@ export function measureWindow(): import("./window-lifecycle.ts").MeasuredWindow 
 }
 
 /**
- * Remove the native frame from this process's window.
+ * Remove the title bar, KEEPING the resize border.
  *
- * Keeps WS_THICKFRAME's *resize behaviour* is not possible independently of the visible border
- * on Windows — clearing WS_CAPTION removes the title bar and clearing WS_THICKFRAME removes the
- * resize border, and the app provides neither. Resizing is therefore done by the app's own
- * layout, which is the same trade every frameless toolkit makes.
+ * ── THE BIT THAT MATTERS, AND THE MISTAKE I MADE ──────────────────────────────────────────
+ * `WS_CAPTION` is not one bit — it is `WS_BORDER | WS_DLGFRAME`, and clearing it is what removes
+ * the title bar. `WS_THICKFRAME` is a SEPARATE bit that IS the resize border (and the edge the OS
+ * uses for snap and for `WM_NCHITTEST`). The first version of this cleared both, which removed
+ * the visible caption as intended and silently took away resizing with it: "the edges of the
+ * window are not draggable for resizing".
+ *
+ * MEASURED, on a live app window (0x14CF0000 → 0x140F0000): keeping WS_THICKFRAME and clearing
+ * only the caption gives a window with no title bar that still answers to the resize borders.
+ * `SM_CXSIZEFRAME=4` + `SM_CXPADDEDBORDER=4` put the grab area at the outer ~8px.
+ *
+ * The caption's *hit area* still exists after this (the OS reserves a title-bar band for
+ * dragging, snapping and the window menu), which is why the app also reports how to drag it —
+ * see `beginDrag`.
  *
  * Returns whether the window ended up frameless, MEASURED after the call.
  */
@@ -190,8 +212,18 @@ export function removeNativeFrame(): { ok: boolean; style: number; error: string
     let allFrameless = true;
     for (const w of windows) {
       const before = lib.symbols.GetWindowLongW(w, GWL_STYLE);
-      const after = before &
-        ~(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
+      // ONLY the caption is cleared. Everything else is deliberately KEPT, because each bit is a
+      // native behaviour the user expects and none of them draws a title bar on its own:
+      //   WS_THICKFRAME  - the resize borders and the edge the OS uses for snap (see the note on
+      //                    this function: clearing it is what broke edge-resizing);
+      //   WS_SYSMENU     - the window menu (Alt+Space) and the taskbar's own right-click menu;
+      //   WS_MINIMIZEBOX - REQUIRED for SW_MINIMIZE to do anything: the OS refuses to iconify a
+      //                    window whose style says it cannot be minimized, so clearing it would
+      //                    turn the app's minimize button into a silent no-op;
+      //   WS_MAXIMIZEBOX - likewise for maximize and for the snap layouts on hover.
+      // The min/max/close BUTTONS are part of the caption, so clearing that removes them visually
+      // while these bits keep the behaviours the app's own buttons drive.
+      const after = before & ~WS_CAPTION;
       lib.symbols.SetWindowLongW(w, GWL_STYLE, after);
       lib.symbols.SetWindowPos(
         w,
@@ -220,20 +252,79 @@ export function showWindow(): boolean {
 }
 
 /**
- * Minimize, by hiding the window.
+ * Minimize to the taskbar.
  *
- * SW_MINIMIZE on a frameless window has no taskbar button of its own to restore from, and the
- * runtime's `hide()`/`show()` pair is the path that is guaranteed to come back. Recorded
- * honestly: this is a hide, so the window leaves the taskbar. The alternative (leaving the
- * native minimize button in place) is not available — clearing WS_CAPTION is what removes the
- * frame, and it takes the buttons with it.
+ * ── WHY NOT `hide()` ──────────────────────────────────────────────────────────────────────
+ * The first version hid the window, on the reasoning that a frameless window has no taskbar
+ * button to restore from. That was wrong twice over:
+ *
+ *   - `IsWindowVisible` becomes FALSE while `SW_MINIMIZE` leaves it TRUE and sets `IsIconic`,
+ *     so the runtime saw "no visible window" and the process could exit — the owner's "minimize
+ *     just closes the window (but sometimes it opens again after a few seconds)". The reopening
+ *     is the Windows SIDECAR updater relaunching the app, which is what it is built to do when
+ *     the app stops.
+ *   - A minimized-but-not-hidden window KEEPS its taskbar button, which is the thing the user
+ *     actually clicks to get it back.
+ *
+ * MEASURED on a live app window: after `SW_MINIMIZE`, `iconic=True visible=True` — a restorable
+ * taskbar state. `WS_THICKFRAME` is kept now, which also means the window participates in Aero
+ * Snap and the taskbar's own menus the way a normal window does.
  */
-export function minimizeWindow(hide: () => void): boolean {
+export function minimizeWindow(): boolean {
+  const lib = api();
+  const h = findOwnWindow();
+  if (!lib || h === null) return false;
+  // Keep WS_MINIMIZEBOX set too (see removeNativeFrame): the OS refuses to iconify a window whose
+  // style says it cannot be minimized, so clearing that bit would make this a silent no-op.
+  return lib.symbols.ShowWindow(h, SW_MINIMIZE);
+}
+
+/** Whether the window is currently minimized, as the OS sees it. */
+export function isMinimized(): boolean {
+  const lib = api();
+  const h = findOwnWindow();
+  if (!lib || h === null) return false;
+  return lib.symbols.IsIconic(h);
+}
+
+/**
+ * Start dragging the window, from a mouse press in the app's own chrome bar.
+ *
+ * `-webkit-app-region: drag` DOES NOTHING HERE. That CSS is an Electron extension; this app runs
+ * on the `webview` backend (WebView2 on Windows, WebKitGTK on Linux), and searching the installed
+ * runtime for `app-region` returns ZERO matches — which is why the chrome "can't be dragged
+ * around". The mechanism every Win32 app uses instead is to release the mouse capture and ask the
+ * OS to run its own move loop:
+ *
+ *   ReleaseCapture(); SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+ *
+ * The OS then moves the window until the button is released, with snapping, double-click-to-
+ * maximize and the drag-threshold behaviour that a hand-rolled position loop never reproduces.
+ * It needs a REAL mouse press to have happened (the OS reads the button state), which is why this
+ * is called from a mousedown handler rather than a click.
+ */
+export function beginDrag(): boolean {
+  const lib = api();
+  const h = findOwnWindow();
+  if (!lib || h === null) return false;
   try {
-    hide();
+    lib.symbols.ReleaseCapture();
+    lib.symbols.SendMessageW(h, WM_NCLBUTTONDOWN, BigInt(HTCAPTION), 0n);
     return true;
   } catch {
     return false;
+  }
+}
+
+/** The OS's resize-border thickness, so the app can size its own edge handles to match. */
+export function resizeBorderPx(): number {
+  const lib = api();
+  if (!lib) return 0;
+  try {
+    return lib.symbols.GetSystemMetrics(SM_CXSIZEFRAME) +
+      lib.symbols.GetSystemMetrics(SM_CXPADDEDBORDER);
+  } catch {
+    return 0;
   }
 }
 

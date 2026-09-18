@@ -40,14 +40,17 @@ import { fragmentBoundaryAt, parseIndex } from "@/adapters/outbound/vod/fmp4.ts"
 import { run, spawnChild } from "@/adapters/outbound/process/spawn.ts"
 import type { ChildHandle } from "@/adapters/outbound/process/spawn.ts";;
 import {
+  beginWindowDrag,
+  beginWindowResize,
   chromeState,
   closeWindow,
+  minimizeWindow,
   restartApp,
+  restoreWindow,
+  toggleMaximizeWindow,
   windowHandleRef,
-  winMinimizeWindow as minimizeWindow,
-  winToggleMaximize,
-
 } from "@/adapters/outbound/platform/window-lifecycle.ts";
+import type { ResizeEdge } from "@/adapters/outbound/platform/gtk-frame.ts";
 import { logFilePath, readLogTail } from "@/adapters/outbound/platform/log-file.ts";
 import { updateStatus } from "@/adapters/outbound/platform/auto-update.ts";
 import { emitAppEvent, subscribeAppEvents, sseFrame } from "@/application/events.ts";
@@ -1078,16 +1081,57 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   // removed the app has to provide the buttons AND the actions. Both are implemented in
   // win-frame.ts against user32, and each reports what the OS did rather than what was asked.
   app.post("/api/window/minimize", (c) => {
-    const ok = minimizeWindow(() => {
-      windowHandleRef()?.hide?.();
-    });
+    // Minimize TO THE TASKBAR on both platforms (Win32 SW_MINIMIZE / GTK iconify), so the window
+    // keeps a taskbar entry the user can click to get it back. The earlier version hid it, which
+    // left no taskbar button and let the process exit — the owner saw exactly that.
+    const ok = minimizeWindow();
     return c.json({ minimizing: ok });
   });
 
   app.post("/api/window/maximize", (c) => {
-    const res = winToggleMaximize();
+    const res = toggleMaximizeWindow();
     return c.json(res ?? { maximized: false, unsupported: true });
   });
+
+  // Start an OS-run move, from a press in the app's own chrome bar.
+  //
+  // THE drag mechanism, on both platforms — `-webkit-app-region: drag` is not available here
+  // (Electron-only CSS; the installed runtime has no `app-region` handling at all, measured), so
+  // the press is handed to Win32's move loop or GTK's `begin_move_drag`. Both give native edge
+  // snapping, which a hand-rolled position loop cannot.
+  //
+  // The coordinates are the press position in window coordinates; `button` is 1 (left).
+  app.post("/api/window/drag", async (c) => {
+    const body = await c.req.json().catch(() => ({})) as { x?: number; y?: number; button?: number };
+    const started = beginWindowDrag(Number(body.x ?? 0), Number(body.y ?? 0));
+    return c.json({ dragging: started });
+  });
+
+  /**
+   * Start an OS-run resize from one of the app's own edge handles.
+   *
+   * On Windows this reports `false` on purpose: the resize borders are the OS's own (WS_THICKFRAME
+   * is kept), so there is nothing for the app to drive and no handles are drawn. On Linux the app
+   * draws handles and this calls `gtk_window_begin_resize_drag`.
+   */
+  app.post("/api/window/resize", async (c) => {
+    const body = await c.req.json().catch(() => ({})) as {
+      edge?: string;
+      x?: number;
+      y?: number;
+      button?: number;
+    };
+    const edge = body.edge as ResizeEdge | undefined;
+    const valid: ResizeEdge[] = ["nw", "n", "ne", "w", "e", "sw", "s", "se"];
+    if (!edge || !valid.includes(edge)) {
+      return c.json({ resizing: false, error: "edge must be one of nw,n,ne,w,e,sw,s,se" }, 400);
+    }
+    const started = beginWindowResize(edge, Number(body.x ?? 0), Number(body.y ?? 0));
+    return c.json({ resizing: started, edge });
+  });
+
+  /** Restore/raise the window (the counterpart to minimize). */
+  app.post("/api/window/restore", (c) => c.json({ restored: restoreWindow() }));
 
   app.post("/api/tools/ffmpeg", async (c) => {
     const status = deps.tools.status();

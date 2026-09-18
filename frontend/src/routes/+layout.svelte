@@ -166,6 +166,10 @@
     canMaximize: boolean;
     /** The MEASURED window, so a claim can be traced (null when unmeasurable). */
     actual?: { frameless: boolean | null; width: number; height: number; source: string } | null;
+    /** True when the app must draw its own edge handles (the platform has no live borders). */
+    needsEdgeHandles: boolean;
+    /** The platform's resize-border thickness, when it has one. */
+    borderPx: number;
   };
   /**
    * What the window can actually do, read from the server's MEASURED state.
@@ -180,6 +184,8 @@
     canMinimize: false,
     canMaximize: false,
     actual: null,
+    needsEdgeHandles: false,
+    borderPx: 0,
   });
 
   /**
@@ -204,6 +210,61 @@
       // Best-effort: a refused maximize leaves the size unchanged, which is visible.
     }
   }
+
+  /**
+   * Drag the window from the chrome bar.
+   *
+   * Calls the server, which runs the platform's own move loop: Win32's
+   * `ReleaseCapture` + `WM_NCLBUTTONDOWN/HTCAPTION` on Windows, `gtk_window_begin_move_drag` on
+   * Linux. Both are the mechanism a native title bar uses, so edge snapping and the drag
+   * threshold come for free.
+   *
+   * `-webkit-app-region: drag` is NOT used anywhere: it is an Electron extension, this app runs
+   * on the `webview` backend, and the installed runtime contains no `app-region` handling at all
+   * (measured) — which is exactly why the chrome could not be dragged before.
+   *
+   * Only the dedicated drag layer calls this, so a press on a link or button never reaches it:
+   * the exclusion is structural (paint order) rather than a selector list to keep in sync.
+   */
+  function startWindowDrag(e: MouseEvent) {
+    if (!chrome.frameless) return;
+    if (e.button !== 0) return;
+    void fetch('/api/window/drag', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ x: e.clientX, y: e.clientY }),
+    }).catch(() => {});
+  }
+
+  /**
+   * Start a resize from one of the app's own edge handles.
+   *
+   * Only drawn where the platform has no live borders of its own. On Windows they are skipped
+   * entirely: `WS_THICKFRAME` is deliberately kept when the caption is removed, so the OS's own
+   * resize borders are live and drawing handles would duplicate them — that bit is exactly what
+   * the first version cleared, which broke edge-resizing.
+   */
+  function startWindowResize(edge: string, e: MouseEvent) {
+    if (!chrome.needsEdgeHandles) return;
+    if (e.button !== 0) return;
+    e.preventDefault();
+    void fetch('/api/window/resize', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ edge, x: e.clientX, y: e.clientY }),
+    }).catch(() => {});
+  }
+
+  const EDGES = [
+    { id: 'n', cls: 'top-0 left-2 right-2 h-1 cursor-ns-resize' },
+    { id: 's', cls: 'bottom-0 left-2 right-2 h-1 cursor-ns-resize' },
+    { id: 'w', cls: 'left-0 top-2 bottom-2 w-1 cursor-ew-resize' },
+    { id: 'e', cls: 'right-0 top-2 bottom-2 w-1 cursor-ew-resize' },
+    { id: 'nw', cls: 'top-0 left-0 h-2 w-2 cursor-nwse-resize' },
+    { id: 'ne', cls: 'top-0 right-0 h-2 w-2 cursor-nesw-resize' },
+    { id: 'sw', cls: 'bottom-0 left-0 h-2 w-2 cursor-nesw-resize' },
+    { id: 'se', cls: 'bottom-0 right-0 h-2 w-2 cursor-nwse-resize' },
+  ] as const;
 
   async function closeApp() {
     try {
@@ -233,6 +294,22 @@
 
 <QueryClientProvider client={data.queryClient}>
 <div class="flex h-screen w-screen flex-col overflow-hidden bg-foundation text-ink">
+  <!--
+    Resize handles, drawn only where the platform has no live borders of its own
+    (`chrome.needsEdgeHandles`). On Windows WS_THICKFRAME is kept, so the OS's own borders
+    already work and these would only duplicate them — clearing that bit is what had broken
+    edge-resizing. On Linux the app drives `gtk_window_begin_resize_drag` from these.
+  -->
+  {#if chrome.needsEdgeHandles}
+    {#each EDGES as edge (edge.id)}
+      <div
+        class="fixed z-50 {edge.cls}"
+        role="presentation"
+        aria-hidden="true"
+        onmousedown={(e) => startWindowResize(edge.id, e)}
+      ></div>
+    {/each}
+  {/if}
     <!-- Application chrome bar (36px).
          Thinner than a web header, with the window controls as a right-aligned CLUSTER in the
          order a Windows titlebar uses (minimize, maximize, close) — the arrangement is what makes
@@ -244,12 +321,29 @@
          bar must not add a second set. -->
     <header
       class="relative flex h-9 shrink-0 items-center gap-3 border-b border-border bg-surface pl-4 pr-0"
-      style={chrome.frameless ? '-webkit-app-region: drag;' : ''}
     >
-      <a href="/" class="flex items-baseline gap-2" style="-webkit-app-region: no-drag;" aria-label="SemaClip home">
+      <!--
+        The drag surface.
+
+        An absolutely-positioned strip behind the bar's contents rather than a handler on
+        <header>: a landmark element is not interactive, and putting the handler on the parent
+        made every child press a drag candidate that each control then had to opt out of. This
+        layer is BEHIND the controls in paint order (z-0 against their default stacking), so a
+        press on a link or button never reaches it — the exclusion is structural instead of a
+        list of selectors to keep in sync.
+      -->
+      {#if chrome.frameless}
+        <div
+          class="absolute inset-0 z-0 cursor-default"
+          role="presentation"
+          aria-hidden="true"
+          onmousedown={startWindowDrag}
+        ></div>
+      {/if}
+      <a href="/" class="relative z-10 flex items-baseline gap-2" aria-label="SemaClip home">
         <span class="font-display text-base font-bold tracking-tight">Sema<span class="text-accent">Clip</span></span>
       </a>
-      <span class="flex items-center gap-1 rounded border border-border px-1.5 py-0.5 font-mono text-[10px] text-ash-dim" title="All processing happens on this machine">
+      <span class="relative z-10 flex items-center gap-1 rounded border border-border px-1.5 py-0.5 font-mono text-[10px] text-ash-dim" title="All processing happens on this machine">
         <Icon name="cpu" size={10} /> local
       </span>
       <div class="flex-1"></div>
@@ -257,7 +351,7 @@
            navigation. Uses the theme's blood-red accent (scarce by design). There is
            one continuous line of releases, so no channel chip accompanies it: the
            version alone identifies the build. -->
-      <span class="pointer-events-none absolute left-1/2 flex -translate-x-1/2 items-center gap-1.5">
+      <span class="pointer-events-none absolute left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5">
         <span
           class="rounded border border-accent/60 bg-accent/10 px-2 py-0.5 font-mono text-[10px] font-bold tracking-wide text-accent"
           title="This software is pre-alpha: features are missing and things will break."
@@ -266,14 +360,14 @@
         </span>
       </span>
       <span
-        class="flex items-center gap-1.5 font-mono text-[10px] {$wsStore.connected ? 'text-success' : 'text-warning'}"
+        class="relative z-10 flex items-center gap-1.5 font-mono text-[10px] {$wsStore.connected ? 'text-success' : 'text-warning'}"
         title={$wsStore.connected ? 'Engine events connected' : 'Reconnecting to engine events...'}
       >
         <span class="h-1.5 w-1.5 rounded-full {$wsStore.connected ? 'bg-success' : 'animate-pulse bg-warning'}"></span>
         {$wsStore.connected ? 'ready' : 'connecting'}
       </span>
       {#if chrome.canMinimize || chrome.canMaximize}
-        <div class="ml-1 flex h-full items-stretch self-stretch" style="-webkit-app-region: no-drag;">
+        <div class="relative z-10 ml-1 flex h-full items-stretch self-stretch">
           {#if chrome.canMinimize}
             <button
               type="button"

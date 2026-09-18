@@ -238,15 +238,21 @@ Deno.test("capabilities describe the CHROME, and never outrun the window", async
     module1: {
       mod.adoptWindowLifecycle({ title: "x" });
       const c = mod.chromeState();
-      // The window CLASS still has neither (re-verified against the installed runtime: the only
-      // minimize/maximize strings in it belong to Intl.Locale). With the native frame present
-      // the OS draws those buttons, so the app must not claim to provide them.
-      // Minimize/maximize are only OURS when the frame is gone AND that is known. On a platform
-      // where the frame state is unmeasurable, claiming to provide the buttons would risk a
-      // window with both the OS buttons and ours.
-      const ours = c.actual?.frameless === true;
-      assertEquals(c.canMinimize, ours);
-      assertEquals(c.canMaximize, ours);
+      // The invariant the UI depends on: the app provides these buttons EXACTLY WHEN it draws
+      // its own chrome. That is what keeps one window from showing two sets of controls — if the
+      // bar is drawn, the buttons must be in it (a frameless window with no minimize is
+      // unusable); if it is not, the OS titlebar has them.
+      //
+      // Stated against `c.frameless` rather than `c.actual.frameless` on purpose: the latter is
+      // null when the frame state cannot be measured, while `frameless` is the REQUEST the UI
+      // renders from. Both must agree with the buttons or the bar is wrong in one of the two
+      // directions. The window CLASS still has neither action (re-verified against the installed
+      // runtime: the only minimize/maximize strings in it belong to Intl.Locale) — the actions
+      // come from user32/GTK, which is why they are reported separately from the class.
+      assertEquals(c.canMinimize, c.frameless, "the buttons follow the chrome");
+      assertEquals(c.canMaximize, c.frameless, "the buttons follow the chrome");
+      // And the two frame fields must never contradict each other.
+      assertEquals(c.frameless, !c.nativeDecorations);
     }
   });
   await run();
@@ -287,4 +293,88 @@ Deno.test("the adopted window is asked for the app's default size", async () => 
     assertEquals(mod.MIN_WINDOW_HEIGHT, 800);
   }, true);
   await run();
+});
+
+/**
+ * The caption is removed; the RESIZE BORDER is not.
+ *
+ * `WS_CAPTION` is `WS_BORDER|WS_DLGFRAME`, and clearing it is what removes the title bar.
+ * `WS_THICKFRAME` is a separate bit that IS the resize border. The first version cleared both,
+ * which removed the caption as intended and silently took edge-resizing with it — the owner's
+ * "the edges of the window are not draggable for resizing".
+ *
+ * The bits are asserted from the module's own constants so the two can never be conflated again
+ * without this failing.
+ */
+Deno.test("the frame removal clears the caption but NOT the resize border", async () => {
+  const src = await Deno.readTextFile(
+    new URL("../adapters/outbound/platform/win-frame.ts", import.meta.url),
+  );
+  // The mask applied to the style, as source: it must not include WS_THICKFRAME.
+  const maskLine = src.split("\n").find((l) => l.includes("const after = before & ~"));
+  assert(maskLine, "the style mask must exist for this to be checkable");
+  assert(
+    !maskLine!.includes("WS_THICKFRAME"),
+    "WS_THICKFRAME is the RESIZE BORDER: clearing it removes edge-resizing (and the snap target)",
+  );
+  assert(
+    maskLine!.includes("WS_CAPTION"),
+    "the caption is what must be cleared for the title bar to go",
+  );
+  // And the capability bits the native actions depend on must survive too.
+  for (const bit of ["WS_MINIMIZEBOX", "WS_MAXIMIZEBOX", "WS_SYSMENU"]) {
+    assert(
+      !maskLine!.includes(bit),
+      `${bit} must be KEPT: the OS refuses to iconify/maximize a window whose style forbids it`,
+    );
+  }
+});
+
+/**
+ * The drag must not rely on `-webkit-app-region`.
+ *
+ * That CSS is an Electron extension; this app runs on the `webview` backend and the installed
+ * runtime contains no `app-region` handling at all — which is why the chrome could not be dragged.
+ * The mechanism is a native move loop on both platforms.
+ */
+Deno.test("the chrome drag uses a native move loop, never -webkit-app-region", async () => {
+  const layout = await Deno.readTextFile(
+    new URL("../../frontend/src/routes/+layout.svelte", import.meta.url),
+  );
+  // Only real USAGE counts: the string legitimately appears in a comment explaining why the CSS
+  // is not used, and a substring check would fail on the documentation.
+  const usesAppRegion = layout
+    .split("\n")
+    .some((line) => !line.trim().startsWith("*") && !line.trim().startsWith("//") &&
+      line.includes("-webkit-app-region"));
+  assert(
+    !usesAppRegion,
+    "that CSS does nothing on this runtime; the drag must call the platform",
+  );
+  assert(layout.includes("/api/window/drag"), "the chrome must drive the native move loop");
+  assert(layout.includes("/api/window/resize"), "edge handles must drive the native resize loop");
+});
+
+/**
+ * The Linux path must exist and be reachable, since the chrome is required there too.
+ */
+Deno.test("Linux gets the same window control surface as Windows", async () => {
+  const lifecycle = await Deno.readTextFile(
+    new URL("../adapters/outbound/platform/window-lifecycle.ts", import.meta.url),
+  );
+  for (const fn of ["beginWindowDrag", "beginWindowResize", "minimizeWindow", "toggleMaximizeWindow", "restoreWindow"]) {
+    assert(lifecycle.includes(`export function ${fn}`), `${fn} must be exported`);
+  }
+  assert(
+    lifecycle.includes('Deno.build.os === "linux"'),
+    "the Linux branch must be wired, not left as Windows-only",
+  );
+  const gtk = await Deno.readTextFile(
+    new URL("../adapters/outbound/platform/gtk-frame.ts", import.meta.url),
+  );
+  // GTK3, not GTK4: the launcher links libgtk-3 (measured with ldd on laufey_webview), so GTK4
+  // would be a second toolkit in one process and could not address this window at all.
+  assert(gtk.includes("libgtk-3.so.0"), "must use the GTK3 the launcher already loaded");
+  assert(gtk.includes("gtk_window_begin_move_drag"), "the move loop is what makes dragging native");
+  assert(gtk.includes("gtk_window_iconify"), "minimize must leave a taskbar entry");
 });
