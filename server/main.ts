@@ -49,6 +49,13 @@ const ENGINE_BINARY = Deno.env.get("SEMACLIP_ENGINE") ?? "semaclip-engine";
 // from a user's machine possible.
 installFileLogging(DATA_DIR);
 
+// Watch the event loop itself. Three of this app's freezes were diagnosed by inference
+// because "the log stops" is consistent with a blocked loop, an unbounded await, AND a
+// dead process - each needing a different fix. A late timer tells a blocked loop apart
+// from the other two, and reports the duration. Installed here so it is already watching
+// before the first request.
+installEventLoopMonitor();
+
 // Report what the window was actually created with, and whether adoption worked. The
 // owner reported "still decorated, no functional chrome" and there was no way to tell
 // WHY — an adoption failure must be visible, not a silent early return.
@@ -233,4 +240,5 @@ console.log(`  Engine:   ${ENGINE_BINARY}`);
 // path — the payload's virtual filesystem is readable only from this process, so if
 // that does not complete there is no way for a staged update to ever be applied.
 import { installFileLogging } from "@/adapters/outbound/platform/log-file.ts";
+import { installEventLoopMonitor } from "@/adapters/outbound/platform/event-loop-monitor.ts";
 await startAutoUpdate();

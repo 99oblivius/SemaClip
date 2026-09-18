@@ -37,7 +37,8 @@ import {
 import { clampToServable, parseRangeHeader } from "@/adapters/inbound/http/range.ts";
 import { projectDownloadView } from "@/application/view/project-download-view.ts";
 import { fragmentBoundaryAt, parseIndex } from "@/adapters/outbound/vod/fmp4.ts";
-import { run, spawnChild } from "@/adapters/outbound/process/spawn.ts";
+import { run, spawnChild } from "@/adapters/outbound/process/spawn.ts"
+import type { ChildHandle } from "@/adapters/outbound/process/spawn.ts";;
 import {
   chromeState,
   closeWindow,
@@ -590,12 +591,27 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   const BATCH_SIZE = 50; // ~50s per batch, fewer SSE events
 
   /** Run ffmpeg for a time range, compute peaks, yield batches. */
+  /**
+   * How many waveform decodes may run at once.
+   *
+   * The Review screen re-requests the waveform every ~30s of newly downloaded media, and
+   * each request decodes the media that exists. Each decode is a separate ffmpeg process
+   * and only ONE cache entry exists (a partial waveform is deliberately never cached), so
+   * without a cap a burst of refetches starts several full-file decodes on a machine the
+   * owner also uses for the download itself. Measured during diagnosis: successive
+   * requests produced a new ffmpeg every second.
+   */
+  const MAX_CONCURRENT_WAVEFORMS = 2;
+  let waveformsInFlight = 0;
+
   async function* streamPeaks(
     vodPath: string,
     startSec: number,
     durationSec: number | null, // null = to end of file
     firstIndex: number,
     totalSamples: number,
+    /** Aborted when the client goes away, so the decode does not run on unwatched. */
+    signal?: AbortSignal,
   ): AsyncGenerator<{ firstIndex: number; startTime: number; peaks: number[] }> {
     const args = [
       "-threads", "0",        // auto-detect CPU cores
@@ -605,9 +621,19 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     if (durationSec !== null) args.unshift("-t", String(durationSec));
     args.unshift("-i", vodPath);
 
-    const proc = spawnChild(deps.tools.ffmpeg, { args, stdout: "piped" });
-    const reader = proc.stdout?.getReader();
-    if (!reader) throw new Error("ffmpeg waveform output was not captured");
+    // Wait for a slot: a refetch burst must not stack full-file decodes on the machine
+    // that is concurrently doing the download.
+    while (waveformsInFlight >= MAX_CONCURRENT_WAVEFORMS) {
+      if (signal?.aborted) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    waveformsInFlight++;
+    console.log(`[waveform] decode start (${waveformsInFlight}/${MAX_CONCURRENT_WAVEFORMS} in flight)`);
+
+    // Declared before the try so `finally` can always release the slot, even if the
+    // spawn itself throws (a missing ffmpeg binary is exactly that case).
+    let proc: ChildHandle | undefined;
+    let reader: { read(): Promise<{ done: boolean; value: Uint8Array | undefined }>; releaseLock?(): void } | undefined;
 
     const peakBuf: number[] = [];
     // ── WHY A FIXED RING AND NOT A GROWING ARRAY ────────────────────────────────────
@@ -637,7 +663,14 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     };
 
     try {
+      proc = spawnChild(deps.tools.ffmpeg, { args, stdout: "piped" });
+      reader = proc.stdout?.getReader();
+      if (!reader) throw new Error("ffmpeg waveform output was not captured");
+
       while (true) {
+        // Stop the moment the client is gone: without this the generator kept decoding to
+        // EOF for a consumer that had stopped reading, and the child was never killed.
+        if (signal?.aborted) break;
         const { done, value } = await reader.read();
         if (value) {
           const incoming = new Float32Array(value.buffer, value.byteOffset, Math.floor(value.length / 4));
@@ -652,6 +685,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
         }
 
         while (peakBuf.length >= BATCH_SIZE) {
+          if (closed) break;
           const batch = peakBuf.splice(0, BATCH_SIZE);
           const startTime = peakIdx * peakTime;
           peakIdx += BATCH_SIZE;
@@ -669,11 +703,12 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
         yield { firstIndex: peakIdx - peakBuf.length, startTime, peaks: [...peakBuf] };
       }
     } finally {
-      try { reader.releaseLock?.(); } catch { /* ok */ }
+      waveformsInFlight--;
+      try { reader?.releaseLock?.(); } catch { /* ok */ }
       // Client disconnect must not leave a full-speed audio decode running to
       // EOF — kill the process, then reap it.
-      try { proc.kill(); } catch { /* already exited */ }
-      try { await proc.status; } catch { /* ok */ }
+      try { proc?.kill(); } catch { /* already exited */ }
+      try { await proc?.status; } catch { /* ok */ }
     }
   }
 
@@ -699,6 +734,28 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
           closed = true;
           try { controller.close(); } catch { /* already closed */ }
         };
+
+        // ── CANCEL THE DECODE WHEN THE CLIENT GOES AWAY ─────────────────────────────
+        // This stream had no cancellation. `streamPeaks` decodes the file TO EOF (`-t` is
+        // omitted), and its `finally` — the only thing that kills the ffmpeg child — runs
+        // only when the generator is exhausted or thrown into. A consumer that navigates
+        // away, or a request that times out, simply stops pulling: the decode ran on at
+        // full speed, the child was never killed, and each abandoned view stacked another.
+        // On the owner's machine the backend became unreachable while this was happening,
+        // so an unbounded set of full-file audio decodes is exactly the kind of load that
+        // produces it.
+        const abort = new AbortController();
+        const onClientGone = () => {
+          closed = true;
+          abort.abort();
+          console.log(`[waveform ${streamId}] client disconnected — cancelling the decode`);
+        };
+        try {
+          c.req.raw.signal.addEventListener("abort", onClientGone, { once: true });
+        } catch {
+          // Older runtimes may not expose the request signal; the SSE `close()` guard
+          // still stops the work at the next yield.
+        }
 
         try {
           const stream = await deps.getStream.execute(streamId);
@@ -802,6 +859,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
             downloading ? Math.max(0, extent - aroundIndex * peakTime) : null,
             aroundIndex,
             samplesPerPeak,
+            abort.signal,
           )) {
             if (closed) break;
             for (let i = 0; i < batch.peaks.length; i++) {
@@ -818,6 +876,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
               aroundIndex * peakTime,
               0,
               samplesPerPeak,
+              abort.signal,
             )) {
               if (closed) break;
               for (let i = 0; i < batch.peaks.length; i++) {
@@ -827,7 +886,15 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
             }
           }
 
-          if (!closed) send({ done: true });
+          // The client is gone: stop here rather than continuing to compute (and cache)
+          // a result nobody will receive. `streamPeaks` already broke out and killed its
+          // ffmpeg child; this prevents the FOLLOW-UP work as well.
+          if (closed || abort.signal.aborted) {
+            console.log(`[waveform ${streamId}] aborted mid-decode — not computing further`);
+            close();
+            return;
+          }
+          send({ done: true });
 
           // Cache only a COMPLETE waveform — a mid-download partial must not
           // be cached, or it would persist after the video finished (the
