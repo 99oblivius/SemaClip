@@ -213,7 +213,30 @@ export async function downloadFmp4(
     const writer = ffmpeg.stdin?.getWriter();
     if (!writer) return;
     try {
-      await writer.write(data);
+      // A WRITE TO A CHILD'S STDIN CAN BLOCK FOR EVER, and this used to be a bare await.
+      // When the pipe buffer fills and ffmpeg stops consuming — a wedged process, a
+      // stalled codec, a pipe that never drains — `writer.write` never resolves, so the
+      // download emits no further log line and no error. That is indistinguishable from
+      // the reported freeze: ffmpeg alive, nothing happening, nothing said.
+      //
+      // The timeout turns it into a named failure, and the message says WHICH side stalled
+      // (a full pipe means the consumer is not reading).
+      const WRITE_TIMEOUT_MS = 30_000;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(
+            `ffmpeg stopped consuming stdin: writing ${data.byteLength}B did not complete in ` +
+              `${WRITE_TIMEOUT_MS}ms (the pipe is full, so the muxer is wedged)`,
+          )),
+          WRITE_TIMEOUT_MS,
+        );
+      });
+      try {
+        await Promise.race([writer.write(data), timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
       if (!firstWriteLogged) {
         firstWriteLogged = true;
         console.log(`[fmp4] first chunk written to ffmpeg stdin (${data.byteLength}B)`);
@@ -227,8 +250,19 @@ export async function downloadFmp4(
   const pump = (async () => {
     if (!ffmpeg.stdout) throw new Error("ffmpeg stdout was not piped — cannot capture the muxed mp4");
     let sawFirst = false;
+    // ffmpeg must emit its init segment quickly once it has input. If it has produced
+    // NOTHING 30s in, it is not muxing, and waiting longer only hides the problem.
+    const firstByteDeadline = setTimeout(() => {
+      if (!sawFirst) {
+        console.error(
+          "[fmp4] ffmpeg produced NO output within 30s of starting — it is not muxing. " +
+            "Check the ffmpeg stderr lines above and that the managed binary runs (`ffmpeg -version`).",
+        );
+      }
+    }, 30_000);
     for await (const part of ffmpeg.stdout) {
       if (!sawFirst) {
+        clearTimeout(firstByteDeadline);
         // Proof the child actually started and produced output. If a freeze happens with
         // this line missing, ffmpeg never ran; if it is present, the stall is downstream.
         sawFirst = true;
