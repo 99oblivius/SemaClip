@@ -14,7 +14,12 @@ import type {
 } from "@/application/ports/outbound.ts";
 import type { Stream, StreamStatus } from "shared/types";
 import { withChat } from "@/domain/mod.ts";
-import { pickVideo, type ArtifactDirScan } from "@/application/use-cases/reconcile-stream.ts";
+import {
+  reconcileStreamRecord,
+  scanArtifactNames,
+  type ArtifactDirScan,
+} from "@/application/use-cases/reconcile-stream.ts";
+import { streamSlug } from "@/application/use-cases/artifact-naming.ts";
 
 /**
  * Repairs a stream record against its artifact directory. The user owns that
@@ -57,11 +62,7 @@ export class StreamReconciler {
     } catch {
       return null;
     }
-    const chosen = pickVideo(names);
-    return {
-      videos: chosen ? [`${dir}/${chosen}`] : [],
-      chat: names.includes("chat.json") ? `${dir}/chat.json` : null,
-    };
+    return scanArtifactNames(dir, names, streamSlug(stream));
   }
 
   /**
@@ -70,38 +71,21 @@ export class StreamReconciler {
    */
   async reconcile(stream: Stream): Promise<Stream> {
     const scan = await this.scan(stream);
-    const exists = async (p: string) => {
-      try {
-        return await this.fs.exists(p);
-      } catch {
-        return false;
-      }
-    };
-    let vodPath = stream.vodPath ?? "";
-    let chatPath = stream.chatPath ?? null;
-    let changed = false;
-
-    // Drop claims whose files are gone.
-    if (vodPath && !(await exists(vodPath))) {
-      vodPath = "";
-      changed = true;
+    // `exists` is async here and sync in the rule: pre-resolve the two paths the rule asks
+    // about so one pure implementation serves both this and the unit tests.
+    const cache = new Map<string, boolean>();
+    for (const p of [stream.vodPath, stream.chatPath]) {
+      if (!p) continue;
+      cache.set(p, await this.fs.exists(p).catch(() => false));
     }
-    if (chatPath && !(await exists(chatPath))) {
-      chatPath = null;
-      changed = true;
-    }
-    // Adopt files the user added to the folder.
-    if (!vodPath && scan?.videos[0]) {
-      vodPath = scan.videos[0];
-      changed = true;
-    }
-    if (!chatPath && scan?.chat) {
-      chatPath = scan.chat;
-      changed = true;
-    }
-    if (!changed) return stream;
-    const updated = await this.streams.update({ ...stream, vodPath, chatPath });
-    return updated ?? { ...stream, vodPath, chatPath };
+    const result = reconcileStreamRecord(stream, scan, (p) => cache.get(p) ?? false);
+    if (!result.stream) return stream;
+    // The rule is deliberately narrower than the row (it only ever repairs these two fields),
+    // so narrow the patch back to what it can actually contain.
+    const patch: Partial<Stream> = { vodPath: result.stream.vodPath };
+    if (result.stream.chatPath !== undefined) patch.chatPath = result.stream.chatPath;
+    const updated = await this.streams.update({ ...stream, ...patch });
+    return updated ?? { ...stream, ...patch };
   }
 
 }

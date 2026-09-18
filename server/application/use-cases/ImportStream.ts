@@ -204,9 +204,10 @@ export class ImportStreamByUrlUseCase {
     if (!existing) return;
     const patch: Partial<Stream> = {};
     if (kind === "chat" && state.chatPath) patch.chatPath = state.chatPath;
-    if (kind === "proxy" && state.proxyPath && !existing.vodPath.includes("/proxy.ts")) {
-      patch.vodPath = state.proxyPath;
-    }
+    // `vodPath` is the main video's path and nothing else. Recording the proxy here (the
+    // pre-rename branch checked only for a "/proxy.ts" suffix, which the current
+    // "- proxy.mp4" name never matches) made whichever artifact finished FIRST the render
+    // source — and in a two-file download that is always the proxy.
     if (kind === "hq" && state.hqPath) patch.vodPath = state.hqPath;
     if (Object.keys(patch).length === 0) return;
     await this.streams.update({ ...existing, ...patch });
@@ -299,6 +300,7 @@ export class ImportStreamByUrlUseCase {
       state.parts = [];
       state.overall = { percent: 0, etaSec: null };
       state.proxyFrontierSec = 0;
+      state.videoFrontierSec = 0;
       state.proxyPath = null;
       state.hqPath = null;
       state.proxyMp4 = null;

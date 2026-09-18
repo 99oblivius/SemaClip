@@ -5,12 +5,19 @@
  * - a running artifact is never `onDisk` (a growing file is not an artifact);
  * - `active` is true whenever ANY artifact runs;
  * - one video file is never presented as two artifacts;
+ * - a slot is named for what it holds, and its recorded file's name is what proves it;
  * - markers are metadata, not a download.
  *
- * The single-download case is explicit, not inferred: in that mode the
- * orchestrator's `proxy` PART carries the main video (one file serves the
- * project), so part kinds alone cannot identify artifacts. `state.includeProxy`
- * decides the shape.
+ * ARTIFACT IDENTITY COMES FROM THE FILENAME, never from the download mode or from which part a
+ * downloader happens to be running. `includeProxy` decides what an import DOWNLOADS; it says
+ * nothing about what a file on disk IS. Trusting it for identity produced two live bugs: a
+ * completed proxy reported as the video (at the proxy's size) while the proxy row claimed
+ * nothing was on disk, and a proxy that could never be reported on disk at all unless the mode
+ * happened to be set.
+ *
+ * A state slot is therefore resolved to an artifact by the path recorded in it, falling back to
+ * the slot that artifact's download would fill. That keeps every project ever written readable
+ * without a migration, including those whose single video was recorded under the proxy name.
  */
 import {
   ARTIFACT_LABELS,
@@ -23,58 +30,107 @@ import {
   type PartStatus,
 } from "@/application/view/download-view.ts";
 import type { DownloadPart, DownloadState } from "@/adapters/outbound/vod/download-orchestrator.ts";
+import { pathFillsRole } from "@/application/use-cases/artifact-naming.ts";
 
-/** The state part that carries a given artifact, per download mode. */
+/**
+ * The state part that carries a given artifact.
+ *
+ * `hq` IS the main video and `proxy` IS the proxy — a part is named for the artifact it
+ * writes, and nothing else. An earlier revision made the part a function of the download
+ * MODE (in single-file mode the video was recorded in the `proxy` part) and then had to
+ * guess which one was live: the video row read the proxy part, so a completed proxy
+ * download was reported as the video, at the proxy's size, while the proxy row claimed
+ * nothing was on disk.
+ */
 function partForArtifact(
   kind: ArtifactKind,
   parts: Map<DownloadPart["kind"], DownloadPart>,
-  includeProxy: boolean,
+  state: DownloadState,
 ): DownloadPart | undefined {
   if (kind === "chat") return parts.get("chat");
-  if (kind === "proxy") return includeProxy ? parts.get("proxy") : undefined;
-  // The main video. The orchestrator records a video download in the `hq`
-  // part — including a MANUAL video piece, which can run on a project whose
-  // mode has no separate proxy. Prefer whichever part is actually carrying
-  // the video so a running download is never reported as idle (that hid the
-  // Cancel button: the row read the idle `proxy` part while `hq` ran).
-  const primary = includeProxy ? parts.get("hq") : parts.get("proxy");
-  const secondary = includeProxy ? parts.get("proxy") : parts.get("hq");
-  if (primary?.status === "running") return primary;
-  if (secondary?.status === "running") return secondary;
-  if (primary?.status === "failed") return primary;
-  if (secondary?.status === "failed") return secondary;
-  return primary ?? secondary;
+  const role = kind === "proxy" ? "proxy" : "video";
+
+  // With no path recorded for either role there is nothing on disk to identify, so the run's
+  // PLAN is the only evidence: `includeProxy` says whether this project also downloads a preview,
+  // and a live part is producing whatever that plan says it produces. That is a statement about
+  // the download, not about a file, so it does not reintroduce mode-based identity — and it only
+  // applies in this window, before any artifact has been recorded.
+  const unrecorded = !state.hqMp4 && !state.hqPath && !state.proxyMp4 && !state.proxyPath;
+  if (unrecorded) {
+    const hq = parts.get("hq");
+    const proxy = parts.get("proxy");
+    const live = (p: DownloadPart | undefined) =>
+      p?.status === "running" || p?.status === "failed";
+    if (role === "proxy") {
+      return state.includeProxy && live(proxy) ? proxy : undefined;
+    }
+    if (live(hq)) return hq;
+    // No separate proxy in the plan: whichever part carries the live download IS the video.
+    if (!state.includeProxy && live(proxy)) return proxy;
+    return hq;
+  }
+  return parts.get(slotForRole(state, role));
 }
 
-/** Disk truth for an artifact, from the state's stat-based presence map. */
+/**
+ * Which state slot's recorded file fills a role.
+ *
+ * A slot is not trusted to mean what it is called: an earlier revision recorded the project's
+ * single video in the `proxy` slot (and its manual video piece in `hq`), so the same artifact
+ * can appear under either name. The recorded PATH decides, because the filename is the durable
+ * fact — `- video.mp4` is the video wherever it was written down.
+ *
+ * Falls back to the slot a download of that role would fill, so an absent artifact still
+ * resolves to the row whose Download button would produce it.
+ */
+function slotForRole(state: DownloadState, role: "video" | "proxy"): "hq" | "proxy" {
+  // Both the state's recorded path and the presence map's stat'd path are candidates: an older
+  // state recorded the video's path in the `proxy` fields, while the presence map is built from
+  // whatever each slot currently holds.
+  const recorded: Record<"hq" | "proxy", string | null> = {
+    hq: state.hqMp4 ?? state.hqPath ?? state.presence?.hq?.path ?? null,
+    proxy: state.proxyMp4 ?? state.proxyPath ?? state.presence?.proxy?.path ?? null,
+  };
+  const preferred: ("hq" | "proxy")[] = role === "video" ? ["hq", "proxy"] : ["proxy", "hq"];
+  for (const slot of preferred) {
+    const path = recorded[slot];
+    if (path && pathFillsRole(path, role)) return slot;
+  }
+  return role === "video" ? "hq" : "proxy";
+}
+
+/**
+ * Disk truth for an artifact, from the state's stat-based presence map.
+ *
+ * One artifact, one slot, and the slot is named for the artifact — but a slot alone is not
+ * trusted, because states written by earlier revisions put the project's single video in the
+ * `proxy` slot. Both slots can hold a file that is genuinely the video (a legacy single-file
+ * download), and both can hold the proxy. So a file's ROLE comes from its NAME, which is the
+ * durable fact: `- video.mp4` is the video wherever it was recorded, `- proxy.mp4` is the proxy.
+ *
+ * Consequence, and the point of doing it this way: a completed proxy is reported on disk in
+ * EVERY mode. The previous version hardcoded the proxy absent unless `includeProxy` was set, so
+ * downloading a proxy onto an existing project finished and then reported nothing.
+ */
 function presenceForArtifact(
   kind: ArtifactKind,
-  presence: NonNullable<DownloadState["presence"]>,
-  includeProxy: boolean,
+  state: DownloadState,
 ): { onDisk: boolean; bytes: number; path: string | null } {
+  const presence = state.presence ?? {};
   if (kind === "chat") return presence.chat ?? { onDisk: false, bytes: 0, path: null };
-  if (kind === "proxy") {
-    return includeProxy
-      ? (presence.proxy ?? { onDisk: false, bytes: 0, path: null })
-      : { onDisk: false, bytes: 0, path: null };
+  const role = kind === "proxy" ? "proxy" : "video";
+  const slot = slotForRole(state, role);
+  const art = presence[slot] ?? { onDisk: false, bytes: 0, path: null };
+  // A slot holding a file that belongs to ANOTHER role is not this artifact. Without this the
+  // proxy row claimed the video's bytes (single-file projects record the video in the proxy
+  // slot), which is the aliasing that let one artifact's size be reported as another's.
+  if (art.path && !pathFillsRole(art.path, role)) {
+    // Deliberately no path: naming another artifact's file here is what produced the phantom
+    // sharing ("the video is also the proxy"), which is the cross-deletion hazard the sharing
+    // rule exists to prevent.
+    return { onDisk: false, bytes: 0, path: null };
   }
-  if (includeProxy) return presence.hq ?? { onDisk: false, bytes: 0, path: null };
-
-  // Single-download mode: there is ONE video file, and WHICH SLOT HOLDS IT depends on
-  // how it arrived. The pipeline records it in the proxy slot (the one file carries the
-  // main video), while a manual video piece records it in the hq slot. Reading only the
-  // proxy slot therefore reported a freshly re-downloaded video as ABSENT: the file was
-  // on disk at 101MB while the row said `pending`, `bytes: 0`, and offered a Download
-  // button that "finished in seconds without downloading" — it was re-fetching a file
-  // that already existed, because the view never saw it.
-  //
-  // So prefer whichever slot actually holds a file, and keep the mode's primary when
-  // neither does so the absent state still names the path a download would fill.
-  const hq = presence.hq;
-  const proxy = presence.proxy;
-  if (hq?.onDisk) return hq;
-  if (proxy?.onDisk) return proxy;
-  return proxy ?? hq ?? { onDisk: false, bytes: 0, path: null };
+  return art;
 }
 
 export interface ProjectInput {
@@ -90,15 +146,13 @@ export interface ProjectInput {
 
 export function projectDownloadView(input: ProjectInput): DownloadView {
   const { state } = input;
-  const presence = state.presence ?? {};
-  const includeProxy = state.includeProxy ?? false;
   const parts = new Map<DownloadPart["kind"], DownloadPart>();
   for (const p of state.parts) parts.set(p.kind, p);
 
   const artifacts: ArtifactView[] = [];
   for (const kind of ["chat", "proxy", "video"] as const) {
-    const part = partForArtifact(kind, parts, includeProxy);
-    const art = presenceForArtifact(kind, presence, includeProxy);
+    const part = partForArtifact(kind, parts, state);
+    const art = presenceForArtifact(kind, state);
     // Which artifacts this PROJECT has at all. Chat and the main video are
     // always part of a project, so a MISSING one still gets a row — that row
     // is where its Download button lives, and hiding it removes the ability
@@ -109,9 +163,7 @@ export function projectDownloadView(input: ProjectInput): DownloadView {
     // whenever it has a source to download from. Hiding it in single-download
     // mode left no way to ADD a proxy later (the row is where the control
     // lives); the user asked for exactly that ability.
-    const expected = kind === "chat" || kind === "video"
-      ? true
-      : includeProxy || art.onDisk || input.hasSource;
+    const expected = kind === "chat" || kind === "video" || input.hasSource || art.onDisk;
     if (!expected) continue;
 
     const status: PartStatus = part?.status ?? (art.onDisk ? "done" : "pending");

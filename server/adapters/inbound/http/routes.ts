@@ -836,7 +836,7 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
           const dlState = await deps.downloadState(streamId);
           const downloading = dlState.phase === "running";
           const frontierSec = downloading
-            ? Math.max(0, dlState.proxyFrontierSec || 0)
+            ? Math.max(0, dlState.proxyFrontierSec || 0, dlState.videoFrontierSec || 0)
             : duration;
           const extent = downloading && frontierSec > 0
             ? Math.min(duration, frontierSec)

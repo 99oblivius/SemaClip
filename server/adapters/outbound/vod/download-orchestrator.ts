@@ -59,6 +59,10 @@ export interface DownloadState {
   overall: { percent: number; etaSec: number | null };
   /** Seconds of proxy media playable so far. */
   proxyFrontierSec: number;
+  /** Seconds of main-video media playable so far. Tracked separately from the proxy: a
+   *  single-file download records its growing video here, and the proxy slot stays empty, so
+   *  one field cannot describe both. */
+  videoFrontierSec?: number;
   proxyPath: string | null;
   hqPath: string | null;
   /** Playable mp4 twins of the .ts files (Chromium can't demux raw TS). */
@@ -292,6 +296,7 @@ export class DownloadOrchestrator {
         proxyPath: parsed.proxyPath ?? parsed.scrubPath ?? null,
         proxyMp4: parsed.proxyMp4 ?? parsed.scrubMp4 ?? null,
         proxyFrontierSec: parsed.proxyFrontierSec ?? parsed.scrubFrontierSec ?? 0,
+        videoFrontierSec: parsed.videoFrontierSec ?? 0,
       };
       delete (state as unknown as Record<string, unknown>).scrubPath;
       delete (state as unknown as Record<string, unknown>).scrubMp4;
@@ -513,8 +518,10 @@ export class DownloadOrchestrator {
     if (!stream) return;
     const patch: Partial<Stream> = {};
     if (kind === "chat" && state.chatPath) patch.chatPath = state.chatPath;
+    // `vodPath` is the RENDER SOURCE: the main video, and only the main video. A proxy piece
+    // must never claim it — that repointed the record at the 540p preview, so deleting the
+    // video "left" a file and Export would have rendered from the preview.
     if (kind === "hq" && state.hqPath) patch.vodPath = state.hqPath;
-    if (kind === "proxy" && state.proxyPath && !state.hqPath) patch.vodPath = state.proxyPath;
     if (Object.keys(patch).length === 0) return;
     await this.streams.update({ ...stream, ...patch });
   }
@@ -599,6 +606,10 @@ export class DownloadOrchestrator {
       }
       started.phase = "done";
       await this.persist(opts.streamId, started, rt);
+      // The index outlived its purpose the moment the piece finished: its only reader is the
+      // media route's live-download clamp. A piece never reaches finalize(), so removing the
+      // sidecar only there left every manual download with a `.fragments` file beside it.
+      this.removeFragmentIndexes(started);
       // The record must learn the file's new location, or the reader that consults
       // `stream.vodPath` (Export) keeps resolving the path it had before.
       await opts.onPartDone?.(kind, started);
@@ -681,6 +692,7 @@ export class DownloadOrchestrator {
       parts: [],
       overall: { percent: 0, etaSec: null },
       proxyFrontierSec: 0,
+      videoFrontierSec: 0,
       proxyPath: null,
       hqPath: null,
       proxyMp4: null,
@@ -746,6 +758,7 @@ export class DownloadOrchestrator {
       parts: [],
       overall: { percent: 0, etaSec: null },
       proxyFrontierSec: 0,
+      videoFrontierSec: 0,
       proxyPath: null,
       hqPath: null,
       proxyMp4: null,
@@ -871,7 +884,13 @@ export class DownloadOrchestrator {
         // Mark the part running BEFORE the first chunk: a part left
         // "pending" while bytes land makes the UI show a pending row next to
         // a growing percentage (user-reported: bars that do not change).
-        rt.get("proxy")!.status = "running";
+        //
+        // Recorded in the `hq` part because that part IS the video — the file written here is
+        // `- video.mp4` at the user's chosen video quality. Logging it as `proxy` (as an
+        // earlier revision did, to keep "which single part is running" uniform) meant every
+        // consumer had to infer the artifact from the download mode, and a completed PROXY
+        // piece then read as the video while the proxy row reported nothing on disk.
+        rt.get("hq")!.status = "running";
         await this.persist(opts.streamId, state, rt);
         try {
           await downloadFmp4(target.playlistUrl, videoPath, {
@@ -879,34 +898,34 @@ export class DownloadOrchestrator {
             resumeSec,
             indexPath,
             ffmpegPath: this.tools.ffmpeg,
-          onProgress: (p) => {
-              const part = rt.get("proxy")!;
+            onProgress: (p) => {
+              const part = rt.get("hq")!;
               this.noteVideoProgress(part, p, target);
-              state.proxyFrontierSec = p.downloadedSec;
-              state.proxyPath = videoPath;
-              state.proxyMp4 = videoPath;
+              state.hqPath = videoPath;
+              state.hqMp4 = videoPath;
+              state.videoFrontierSec = p.downloadedSec;
               void this.persist(opts.streamId, state, rt);
             },
           });
-          rt.get("proxy")!.status = "done";
-          rt.get("proxy")!.percent = 1;
-          rt.get("hq")!.status = "skipped"; // one file: no separate HQ pass
+          rt.get("hq")!.status = "done";
           rt.get("hq")!.percent = 1;
-          state.proxyPath = videoPath;
-          state.proxyMp4 = videoPath;
+          rt.get("proxy")!.status = "skipped"; // one file: no separate proxy pass
+          rt.get("proxy")!.percent = 0;
+          state.hqPath = videoPath;
+          state.hqMp4 = videoPath;
           void this.persist(opts.streamId, state, rt);
-          await opts.onPartDone?.("proxy", state);
+          await opts.onPartDone?.("hq", state);
         } catch (err) {
           if (opts.signal?.aborted) {
-            rt.get("proxy")!.status = "failed";
-            rt.get("proxy")!.error = "aborted";
-            rt.get("hq")!.status = "skipped";
+            rt.get("hq")!.status = "failed";
+            rt.get("hq")!.error = "aborted";
+            rt.get("proxy")!.status = "skipped";
             await this.persist(opts.streamId, state, rt);
             return this.finalize(opts.streamId, state, rt);
           }
-          this.fail(rt.get("proxy")!, err);
-          state.proxyPath = null;
-          state.proxyMp4 = null;
+          this.fail(rt.get("hq")!, err);
+          state.hqPath = null;
+          state.hqMp4 = null;
         }
       }
       return this.finalize(opts.streamId, state, rt);

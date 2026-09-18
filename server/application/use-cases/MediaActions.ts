@@ -13,6 +13,7 @@ import { STREAM_CHANGED_TOPIC } from "@/application/ports/outbound.ts";
 import { DownloadOrchestrator, type DownloadState } from "@/adapters/outbound/vod/download-orchestrator.ts";
 import { resolveQualities, pickProxyQuality, pickBestQuality, extractVodId, type HlsQuality } from "@/adapters/outbound/vod/hls.ts";
 import { artifactName, indexPathFor, LEGACY_NAMES, streamSlug } from "@/application/use-cases/artifact-naming.ts";
+import { scanArtifactNames, type ArtifactDirScan } from "@/application/use-cases/reconcile-stream.ts";
 import { runStatus } from "@/adapters/outbound/process/spawn.ts";
 
 export class MediaActionsUseCase {
@@ -66,6 +67,24 @@ export class MediaActionsUseCase {
    * state (present from the moment the proxy download starts), falling back
    * to the transcript_srt metadata path (post-processing streams).
    */
+  /**
+   * What the artifact folder actually holds, by role.
+   *
+   * Uses the same shared rule every other read uses, so this use-case cannot drift from the
+   * reconciler that repairs the record.
+   */
+  private async scanArtifacts(streamId: string): Promise<ArtifactDirScan | null> {
+    const dir = await this.artifactDir(streamId);
+    if (!dir) return null;
+    try {
+      const names = await this.fs.listFiles(dir);
+      const stream = await this.streams.findById(streamId);
+      return scanArtifactNames(dir, names, stream ? streamSlug(stream) : null);
+    } catch {
+      return null;
+    }
+  }
+
   private async artifactDir(streamId: string): Promise<string | null> {
     const dl = await this.orchestrator.getState(streamId);
     // Every candidate is stat-checked: a path recorded in state can be stale
@@ -157,12 +176,13 @@ export class MediaActionsUseCase {
     if (!removed) return { deleted: false };
     this.announce(streamId, "video");
 
-    // Point the stream record at whatever video still exists (the proxy may
-    // be the only playable file now) — or clear it so the UI stops claiming
-    // a video that is gone.
+    // `vodPath` is the RENDER SOURCE. If the deleted file owned it, re-derive it from what is
+    // still on disk — the VIDEO artifact only, via the same reconciler every other read uses.
+    // Deliberately NOT `state.proxyMp4`: pointing the render source at the 540p preview meant
+    // deleting the video looked like a no-op and Export would have rendered from the proxy.
     if (stream && stream.vodPath && videoPaths.has(stream.vodPath)) {
-      const fallback = state.proxyMp4 ?? state.proxyPath ?? "";
-      await this.streams.update({ ...stream, vodPath: fallback });
+      const scan = await this.scanArtifacts(streamId);
+      await this.streams.update({ ...stream, vodPath: scan?.video ?? "" });
     }
     if (state.hqPath || state.hqMp4) {
       state.hqPath = null;
@@ -211,13 +231,26 @@ export class MediaActionsUseCase {
     }
     if (!removed) return { deleted: false };
     const state = await this.orchestrator.getState(streamId);
-    // Unconditional: the files are gone (checked above), so the references must go too, and
-    // the PART's counters with them. A stale `downloadedBytes` reports the deleted proxy as
-    // still on disk — and, once a re-download starts, as already complete, which is what the
-    // player reads to decide whether to reload.
-    state.proxyPath = null;
-    state.proxyMp4 = null;
-    state.proxyFrontierSec = 0;
+    // Clear the references that pointed at what was just deleted, and the PART's counters with
+    // them. A stale `downloadedBytes` reports the deleted proxy as still on disk — and, once a
+    // re-download starts, as already complete, which is what the player reads to decide
+    // whether to reload.
+    //
+    // Guarded by path: in single-file mode an older state recorded the project's ONLY video in
+    // the proxy slot, so clearing that slot unconditionally forgot a file that is still on
+    // disk (the 1.1GB video the user had just kept). Only forget a path that was actually
+    // among the files removed above.
+    const removedPaths = new Set(candidates.map((name) => `${dir}/${name}`));
+    if (state.proxyPath && removedPaths.has(state.proxyPath)) {
+      state.proxyPath = null;
+      state.proxyMp4 = null;
+      state.proxyFrontierSec = 0;
+    }
+    if (state.hqPath && removedPaths.has(state.hqPath)) {
+      state.hqPath = null;
+      state.hqMp4 = null;
+      state.videoFrontierSec = 0;
+    }
     {
       const part = state.parts.find((x) => x.kind === "proxy");
       if (part) {
