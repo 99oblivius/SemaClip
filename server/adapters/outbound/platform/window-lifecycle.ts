@@ -52,10 +52,24 @@
  * so development keeps working: under `deno run` there is no window to manage.
  */
 
+import {
+  isMaximized as winIsMaximized,
+  measureWindow as measureWin32Window,
+  minimizeWindow as winMinimizeWindow,
+  removeNativeFrame,
+  showWindow as winShowWindow,
+  toggleMaximize as winToggleMaximize,
+} from "./win-frame.ts";
+
 type Win = {
   addEventListener(type: string, fn: (e: { preventDefault(): void }) => void): void;
   setTitle?(title: string): void;
   close?(): void;
+  hide?(): void;
+  show?(): void;
+  focus?(): void;
+  getSize?(): [number, number];
+  setSize?(width: number, height: number): void;
 };
 
 /** The ONE window this process owns. Null until adopted, and never replaced. */
@@ -78,6 +92,37 @@ export function windowConstructCount(): number {
 }
 
 /** What this build asked for, so the UI can render chrome that matches the window. */
+/**
+ * What the WINDOW is, measured — never what the caller asked for.
+ *
+ * The distinction is not pedantic: `frameless` was reported from the option this module PASSED,
+ * so the API said `frameless: true, nativeDecorations: false` while the actual Win32 window
+ * carried WS_CAPTION|WS_THICKFRAME|WS_SYSMENU — the full native frame — because the runtime
+ * silently ignores `frameless` on the construction that adopts its implicit startup window
+ * (denoland/deno#35969, #35635, both open). The app drew no chrome over a decorated window, and
+ * the log agreed with the wrong side.
+ *
+ * `actual` is therefore read back from the window: Win32 style bits on Windows, the runtime's
+ * own `getSize` elsewhere. When no window exists (a dev run) it stays null and the UI falls back
+ * to asking the runtime, which is the honest answer there.
+ */
+export interface MeasuredWindow {
+  /**
+   * True when the window genuinely has no caption/frame, false when it has one, and **null when
+   * it cannot be determined**.
+   *
+   * Only Windows can answer this from JS: the frame state is a Win32 style bit, read back via
+   * user32. Elsewhere the runtime exposes no `isFrameless` (verified absent from its own
+   * prototype), so the honest answer is null rather than a claim echoing the request we made —
+   * which is exactly how a decorated window reported itself as frameless for three rounds.
+   */
+  frameless: boolean | null;
+  width: number;
+  height: number;
+  /** How the answer was obtained, so a wrong one can be traced. */
+  source: "win32" | "runtime" | "none";
+}
+
 export interface ChromeState {
   /** True when the window has no OS decoration, so the app must draw its own. */
   frameless: boolean;
@@ -86,6 +131,8 @@ export interface ChromeState {
   /** Window buttons the app can actually provide. Close always works; the rest cannot. */
   canMinimize: boolean;
   canMaximize: boolean;
+  /** The window's real geometry and frame state, or null when there is no window. */
+  actual: MeasuredWindow | null;
   /**
    * Why adoption failed, when it did.
    *
@@ -96,6 +143,17 @@ export interface ChromeState {
   adoptError: string | null;
 }
 
+/**
+ * The window's default and minimum size.
+ *
+ * 1260x890 is the size the app's layout is designed for; 1040x800 is the point below which the
+ * three-pane review screen stops fitting (the timeline plus both side panels).
+ */
+export const DEFAULT_WINDOW_WIDTH = 1260;
+export const DEFAULT_WINDOW_HEIGHT = 890;
+export const MIN_WINDOW_WIDTH = 1040;
+export const MIN_WINDOW_HEIGHT = 800;
+
 const state: ChromeState = {
   frameless: false,
   nativeDecorations: true,
@@ -104,17 +162,118 @@ const state: ChromeState = {
   canMinimize: false,
   canMaximize: false,
   adoptError: null,
+  actual: null,
 };
 
 export function chromeState(): ChromeState {
+  // Re-measure on every read for the fields that can change behind us (size, maximized) — the
+  // chrome controls are drawn from this, and a stale answer is what makes a maximize button
+  // toggle the wrong way. The frame state cannot change after adoption, so it is cached.
+  const measured = Deno.build.os === "windows" ? measureWin32Window() : null;
+  if (measured && measured.frameless !== null) {
+    state.actual = measured;
+    state.frameless = measured.frameless;
+    state.nativeDecorations = !measured.frameless;
+  }
   return { ...state };
 }
+
+/**
+ * Remove the OS frame when one is actually present, and record what the window IS.
+ *
+ * A request for frameless is not evidence a frameless window exists, so this applies the removal
+ * first and then measures. On non-Windows nothing is done: the runtimes there honour `frameless`
+ * at adoption (the upstream reports concern the webview backend, and the AppImage smoke test is
+ * what would confirm it per platform) — so the measured answer degrades to the runtime's.
+ */
+function applyFrameRemoval(wantFrameless: boolean): void {
+  if (!wantFrameless) {
+    // Decorated on purpose: the OS titlebar carries the buttons, so the app must NOT draw its
+    // own. Claiming them here would put two sets of controls on one window.
+    state.frameless = false;
+    state.nativeDecorations = true;
+    state.canMinimize = false;
+    state.canMaximize = false;
+    return;
+  }
+  if (Deno.build.os === "windows") {
+    const res = removeNativeFrame();
+    if (!res.ok && res.error) {
+      // Loud, because the only symptom otherwise is a decorated window with no chrome drawn
+      // over it — the exact state that went unexplained for three rounds.
+      console.error(`window: could not remove the native frame — ${res.error}`);
+    }
+    const measured = measureWin32Window();
+    const frameless = measured?.frameless ?? false;
+    state.actual = measured;
+    state.frameless = frameless;
+    state.nativeDecorations = !frameless;
+    // The app draws its own buttons when there is no frame, so it can always provide all three.
+    // Reported as a capability of the CHROME, not of the window class (which has none).
+    state.canMinimize = frameless;
+    state.canMaximize = frameless;
+    console.log(
+      `window: measured style=0x${(res.style >>> 0).toString(16).toUpperCase()} ` +
+        `frameless=${frameless} ` +
+        (measured ? `size=${measured.width}x${measured.height}` : "size=unknown"),
+    );
+    return;
+  }
+  // Not Windows: the frame state CANNOT be measured from JS, so it is reported as unknown and
+  // the UI draws chrome on the strength of the request, not of a measurement. Only the size is
+  // real here (the runtime's own getSize), and it is labelled "runtime".
+  const size = windowHandle?.getSize?.();
+  state.actual = size
+    ? { frameless: null, width: size[0], height: size[1], source: "runtime" }
+    : { frameless: null, width: 0, height: 0, source: "none" };
+  // Drawing chrome is still the right behaviour — a frameless window with nothing to close it is
+  // unusable — but the state records that this is a REQUEST, which is what `actual.frameless:
+  // null` means.
+  state.frameless = true;
+  state.nativeDecorations = false;
+  state.canMinimize = false;
+  state.canMaximize = false;
+}
+
+/**
+ * Keep the window at or above the minimum size.
+ *
+ * The runtime has no min-size option, so the floor is enforced by correcting a too-small resize.
+ * Called from the window's own resize handler.
+ */
+export function enforceMinimumSize(): void {
+  const size = windowHandle?.getSize?.();
+  if (!size) return;
+  const [w, h] = size;
+  const targetW = Math.max(w, MIN_WINDOW_WIDTH);
+  const targetH = Math.max(h, MIN_WINDOW_HEIGHT);
+  if (targetW === w && targetH === h) return;
+  try {
+    windowHandle?.setSize?.(targetW, targetH);
+  } catch {
+    // A refused resize is cosmetic; never let it break the window.
+  }
+}
+
+export { winIsMaximized, winMinimizeWindow, winShowWindow, winToggleMaximize };
 
 /** Options for the adopted window. `frameless` is creation-only, so it is passed here. */
 export interface ChromeOptions {
   /** Draw our own chrome and remove the OS decoration. */
   frameless?: boolean;
   title?: string;
+  /** Initial size in logical pixels. */
+  width?: number;
+  height?: number;
+  /**
+   * Smallest size the user may resize to.
+   *
+   * The runtime exposes no minimum-size option (verified against its own option set: title,
+   * width, height, x, y, resizable, alwaysOnTop, frameless, noActivate, transparentTitlebar),
+   * so the floor is enforced on the resize event instead — see `enforceMinimumSize`.
+   */
+  minWidth?: number;
+  minHeight?: number;
 }
 
 type WindowCtor = new (opts?: Record<string, unknown>) => Win;
@@ -161,19 +320,27 @@ export function adoptWindowLifecycle(options: ChromeOptions = {}): void {
   if (!Ctor) return;
 
   let win: Win;
+  const wantFrameless = options.frameless !== false;
+  const width = options.width ?? DEFAULT_WINDOW_WIDTH;
+  const height = options.height ?? DEFAULT_WINDOW_HEIGHT;
   try {
     // THE one construction. It adopts the window the runtime already opened.
     win = new Ctor({
-      // Frameless is a CREATION option, so it must be passed at adoption time. The
-      // default is frameless (the app draws its own chrome); an explicit opt-out is
-      // how the OS titlebar comes back.
-      frameless: options.frameless !== false,
+      // Passed for the record, but MEASURED NOT TO APPLY on this construction — the runtime
+      // creates the startup window before JS runs and silently drops `frameless` there
+      // (denoland/deno#35969, #35635). `removeNativeFrame` below is what actually removes it on
+      // Windows; this line is the correct request for any runtime that fixes it.
+      frameless: wantFrameless,
+      // Size DOES apply (measured: the default was 800x600, the runtime's own default, i.e.
+      // nothing was passed before).
+      width,
+      height,
       ...(options.title ? { title: options.title } : {}),
     });
     constructed += 1;
     console.log(
-      `window: adopted (construction #${constructed}) frameless=${options.frameless !== false} ` +
-        `title=${options.title ?? "none"}`,
+      `window: adopted (construction #${constructed}) requested: frameless=${wantFrameless} ` +
+        `size=${width}x${height} title=${options.title ?? "none"}`,
     );
   } catch (err) {
     // NOT silent. A failed adoption leaves the window exactly as the OS made it —
@@ -185,11 +352,16 @@ export function adoptWindowLifecycle(options: ChromeOptions = {}): void {
   }
 
   windowHandle = win;
-  // Report what the WINDOW got, not what the caller passed: frameless defaults to true
-  // here, so `Boolean(options.frameless)` would report decorations the window does not
-  // have and the UI would draw no chrome over an undecorated window.
-  state.frameless = options.frameless !== false;
-  state.nativeDecorations = !state.frameless;
+  // Report what the WINDOW got, not what the caller passed.
+  //
+  // This module used to set these from `options.frameless`, so it reported `frameless: true`
+  // for a window carrying WS_CAPTION|WS_THICKFRAME|WS_SYSMENU on Windows — a full native frame.
+  // The UI then drew no chrome (it believed the frame was gone) over a window that had one, and
+  // the log backed the wrong answer. The state is now MEASURED.
+  applyFrameRemoval(wantFrameless);
+
+  // The runtime exposes no minimum size, so the floor is held here.
+  win.addEventListener("resize", () => enforceMinimumSize());
 
   win.addEventListener("close", () => {
     // The server is the only thing keeping the process alive; exiting here is what makes
@@ -274,6 +446,15 @@ export async function restartApp(): Promise<{ restarting: boolean; error: string
   } catch (err) {
     return { restarting: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/** The adopted window handle, for the operations this module implements on its behalf. */
+export function windowHandleRef(): {
+  hide?: () => void;
+  show?: () => void;
+  focus?: () => void;
+} | null {
+  return windowHandle;
 }
 
 export function closeWindow(): boolean {

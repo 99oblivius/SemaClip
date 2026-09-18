@@ -361,13 +361,17 @@
 
     if (waveform.some((v) => v >= 0)) {
       const totalPeaks = waveformTotalPeaks || waveform.length;
-      // While a download is running, the waveform only covers the downloaded
-      // extent — drawing past it would stretch partial data across the whole
-      // timeline (the reported bug).
+      // While a download is running, the waveform only covers the downloaded extent —
+      // drawing past it would stretch partial data across the whole timeline (the
+      // reported bug).
       const coveredSec = waveformExtent > 0 ? Math.min(waveformExtent, duration) : duration;
-      // Peak i holds max amplitude of second [i, i+1). Drawn at bucket END
-      // (time i+1) so the bar appears after the audio it represents.
-      const peakDur = duration / totalPeaks;
+      // Seconds PER PEAK, derived from the extent the peaks actually cover — NOT from the
+      // project's total duration. Peaks are emitted at one per second of decoded media, so
+      // dividing the FULL duration by the peak count made each peak stand for more time than it
+      // holds, and every bar landed further right than the audio it represents: the waveform
+      // stretched as the download grew. Measured on a live download, the two differ while the
+      // file is partial (extent 1418s of a 3300s project), and match once it completes.
+      const peakDur = totalPeaks > 0 ? coveredSec / totalPeaks : 1;
       const barWidth = 2;
       const numBars = Math.max(1, Math.floor(w / barWidth));
       const secPerBar = viewSpan / numBars;

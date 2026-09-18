@@ -17,6 +17,9 @@ type FakeWin = {
   addEventListener(type: string, fn: () => void): void;
   setTitle(t: string): void;
   close(): void;
+  getSize(): [number, number];
+  setSize(w: number, h: number): void;
+  hide(): void;
 };
 
 /** Install a counting fake and a desktop-runtime marker; returns a restore function. */
@@ -43,6 +46,10 @@ function withFakeWindow(
     if (recordOpts && options) counts.opts = options;
     this.addEventListener = () => {};
     this.setTitle = (t: string) => counts.titles.push(t);
+    // The minimum-size guard reads and corrects the size, so the fake must carry both.
+    this.getSize = () => [800, 600];
+    this.setSize = () => {};
+    this.hide = () => {};
     this.close = () => {
       counts.closes += 1;
     };
@@ -160,7 +167,7 @@ Deno.test("under `deno run` there is no window, so nothing is constructed", asyn
  * omitted — plus that the reported state agrees with it (otherwise the UI draws no
  * chrome over an undecorated window).
  */
-Deno.test("the window is created FRAMELESS by default, and the state says so", async () => {
+Deno.test("the window is REQUESTED frameless by default", async () => {
   const run = withFakeWindow(async (counts) => {
     const mod = await import(
       `@/adapters/outbound/platform/window-lifecycle.ts?t=${Date.now()}frameless`
@@ -171,9 +178,42 @@ Deno.test("the window is created FRAMELESS by default, and the state says so", a
       true,
       "with no explicit choice the window must be created without OS decoration",
     );
-    assertEquals(mod.chromeState().frameless, true);
-    assertEquals(mod.chromeState().nativeDecorations, false);
   }, true);
+  await run();
+});
+
+/**
+ * The state must never assert a frame state it has not measured.
+ *
+ * This is the defect that hid the Windows decoration for three rounds: the module reported
+ * `frameless: true, nativeDecorations: false` because it echoed the OPTION it passed, while the
+ * real Win32 window carried WS_CAPTION|WS_THICKFRAME|WS_SYSMENU — style 0x14CF0000, the same
+ * bits Explorer's window has. The UI trusted it and drew no chrome over a decorated window.
+ */
+Deno.test("the window state is MEASURED, never inferred from the request", async () => {
+  const run = withFakeWindow(async () => {
+    const mod = await import(
+      `@/adapters/outbound/platform/window-lifecycle.ts?t=${Date.now()}measured`
+    );
+    mod.adoptWindowLifecycle({ frameless: true, title: "x" });
+    const c = mod.chromeState();
+    // There is no Win32 window in this process, so the only honest answer is "not measured".
+    // A test host is `deno test`, so `actual` must be null here rather than a fabricated
+    // frameless claim: on Windows the real measurement happens against the real window.
+    if (Deno.build.os !== "windows") {
+      // Not Windows: the frame state cannot be measured from JS, so it must be reported as
+      // UNKNOWN rather than as a claim. `frameless` may still be true (the UI must draw chrome
+      // to be usable), but `actual.frameless === null` is what records that it is a request.
+      assertEquals(
+        c.actual?.frameless,
+        null,
+        "an unmeasurable frame state must be reported as unknown, never asserted",
+      );
+      assertEquals(c.actual?.source, "runtime", "the size still comes from the runtime");
+    }
+    // The fields must never contradict each other, whatever the measurement returned.
+    assertEquals(c.frameless, !c.nativeDecorations);
+  });
   await run();
 });
 
@@ -190,20 +230,61 @@ Deno.test("an explicit opt-out restores the OS titlebar, in the window and the s
   await run();
 });
 
-Deno.test("chromeState never claims minimize/maximize the window class does not have", async () => {
+Deno.test("capabilities describe the CHROME, and never outrun the window", async () => {
   const run = withFakeWindow(async () => {
     const mod = await import(
       `@/adapters/outbound/platform/window-lifecycle.ts?t=${Date.now()}caps`
     );
-    mod.adoptWindowLifecycle({ title: "x" });
-    const c = mod.chromeState();
-    // Verified against the runtime's own string table, not assumed: the window class
-    // exposes getSize/setSize/getPosition/setPosition/isResizable/setResizable/
-    // isAlwaysOnTop/setAlwaysOnTop/getOpacity/setOpacity/isVisible/focus/openDevtools/
-    // reload/executeJs/getNativeWindow/bind/unbind, and the only minimize/maximize
-    // strings in the binary belong to Intl.Locale.
-    assertEquals(c.canMinimize, false);
-    assertEquals(c.canMaximize, false);
+    module1: {
+      mod.adoptWindowLifecycle({ title: "x" });
+      const c = mod.chromeState();
+      // The window CLASS still has neither (re-verified against the installed runtime: the only
+      // minimize/maximize strings in it belong to Intl.Locale). With the native frame present
+      // the OS draws those buttons, so the app must not claim to provide them.
+      // Minimize/maximize are only OURS when the frame is gone AND that is known. On a platform
+      // where the frame state is unmeasurable, claiming to provide the buttons would risk a
+      // window with both the OS buttons and ours.
+      const ours = c.actual?.frameless === true;
+      assertEquals(c.canMinimize, ours);
+      assertEquals(c.canMaximize, ours);
+    }
   });
+  await run();
+});
+
+/**
+ * An explicit opt-out must reach the window AND the state: that is the escape hatch for a
+ * platform where removing the frame misbehaves.
+ */
+Deno.test("opting out of frameless reports native decorations", async () => {
+  const run = withFakeWindow(async (counts) => {
+    const mod = await import(
+      `@/adapters/outbound/platform/window-lifecycle.ts?t=${Date.now()}optout`
+    );
+    mod.adoptWindowLifecycle({ frameless: false, title: "x" });
+    assertEquals(counts.opts.frameless, false);
+    const c = mod.chromeState();
+    assertEquals(c.frameless, false);
+    assertEquals(c.nativeDecorations, true);
+    assertEquals(c.canMinimize, false, "the OS buttons are the window's, not the app's");
+  }, true);
+  await run();
+});
+
+/**
+ * The size defaults are the app's layout contract, so a regression to the runtime's own default
+ * (800x600, measured on the installed build before this change) is a real regression.
+ */
+Deno.test("the adopted window is asked for the app's default size", async () => {
+  const run = withFakeWindow(async (counts) => {
+    const mod = await import(
+      `@/adapters/outbound/platform/window-lifecycle.ts?t=${Date.now()}size`
+    );
+    mod.adoptWindowLifecycle({ title: "x" });
+    assertEquals(counts.opts.width, 1260, "default width");
+    assertEquals(counts.opts.height, 890, "default height");
+    assertEquals(mod.MIN_WINDOW_WIDTH, 1040);
+    assertEquals(mod.MIN_WINDOW_HEIGHT, 800);
+  }, true);
   await run();
 });

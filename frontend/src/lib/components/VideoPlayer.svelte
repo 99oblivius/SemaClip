@@ -8,7 +8,7 @@
   import type { Clip } from '$shared/types';
   import { onDestroy } from 'svelte';
   import { browser } from '$app/environment';
-  import { shouldReloadMedia } from './player-reload';
+  import { shouldReloadMedia, shouldSwitchSource } from './player-reload';
   
   interface Props {
     streamId: string;
@@ -125,6 +125,45 @@
   const srcUnavailable = $derived(
     downloads.isSuccess ? !dlView?.media.playablePath : false,
   );
+
+  /**
+   * Change the file being played when the VIEW says a different one should be.
+   *
+   * The view is the decider (it prefers the proxy for review and the video for render, and it
+   * knows what is actually on disk), so this only follows it. Every path change is handled the
+   * same way, which is what makes the reported cases behave:
+   *
+   *   - the proxy is deleted and the video takes over;
+   *   - the video finishes downloading while review was playing the proxy;
+   *   - a first download lands on a project that had nothing;
+   *   - a re-download replaces a file entirely.
+   *
+   * The flush is the other half and is not optional: after a switch the element still holds the
+   * previous file's duration, buffered ranges and position, and the stall detector's high-water
+   * mark belonged to a file that may no longer exist. Carrying any of that over is what made a
+   * replaced video "take an extremely long time to display" — the comparison ran against the
+   * dead file's numbers.
+   */
+  let loadedPath = $state<string | null>(null);
+  $effect(() => {
+    const wanted = dlView?.media.playablePath ?? null;
+    if (!shouldSwitchSource({ wantedPath: wanted, loadedPath })) return;
+    loadedPath = wanted;
+    // Flush everything tied to the old source.
+    frontierBytes = 0;
+    frontierAtLastReload = 0;
+    reloadCount = 0;
+    lastProgressTime = performance.now();
+    currentTime = videoEl?.currentTime ?? 0;
+    videoDuration = 0;
+    // A fresh element load: the browser re-reads the new file and re-fires loadedmetadata,
+    // which restores the volume/mute settings and the store's duration.
+    try {
+      videoEl?.load();
+    } catch {
+      // A rejected load is not fatal; the src change alone reloads in most engines.
+    }
+  });
   $effect(() => {
     const v = dlView;
     if (!v) return;

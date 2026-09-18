@@ -9,7 +9,11 @@ import { startAutoUpdate } from "@/adapters/outbound/platform/auto-update.ts";
 import {
   adoptWindowLifecycle,
   chromeState,
+  DEFAULT_WINDOW_HEIGHT,
+  DEFAULT_WINDOW_WIDTH,
   logWindowDiagnostics,
+  MIN_WINDOW_HEIGHT,
+  MIN_WINDOW_WIDTH,
 } from "@/adapters/outbound/platform/window-lifecycle.ts";
 import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
 
@@ -195,12 +199,20 @@ const APP_TITLE = `SemaClip ${appVersion()}`;
 // separate title setter here would construct a SECOND window: the runtime adopts the
 // implicit one on the first construction and opens a new window on every one after
 // that, which is what produced a blank extra window on both platforms.
-adoptWindowLifecycle({ frameless, title: APP_TITLE });
+adoptWindowLifecycle({
+  frameless,
+  title: APP_TITLE,
+  width: DEFAULT_WINDOW_WIDTH,
+  height: DEFAULT_WINDOW_HEIGHT,
+  minWidth: MIN_WINDOW_WIDTH,
+  minHeight: MIN_WINDOW_HEIGHT,
+});
 {
   const c = chromeState();
   console.log(
     `window: decorations=${c.nativeDecorations ? "native" : "none (custom chrome)"} ` +
-      `minimize=${c.canMinimize} maximize=${c.canMaximize}`,
+      `minimize=${c.canMinimize} maximize=${c.canMaximize} ` +
+      `measured=${c.actual ? `${c.actual.width}x${c.actual.height} via ${c.actual.source}` : "none"}`,
   );
 }
 

@@ -43,6 +43,10 @@ import {
   chromeState,
   closeWindow,
   restartApp,
+  windowHandleRef,
+  winMinimizeWindow as minimizeWindow,
+  winToggleMaximize,
+
 } from "@/adapters/outbound/platform/window-lifecycle.ts";
 import { logFilePath, readLogTail } from "@/adapters/outbound/platform/log-file.ts";
 import { updateStatus } from "@/adapters/outbound/platform/auto-update.ts";
@@ -587,6 +591,26 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   // One peak per second of audio — full resolution, no quantization at any zoom.
   // A 10h stream = 36000 peaks ≈ 352KB JSON, negligible. ~141KB as Float32 binary.
   const TARGET_PEAKS_PER_SEC = 1;
+
+  /**
+   * Seconds of media actually present in a file, by ffprobe.
+   *
+   * For a growing fragmented MP4 this is the muxed extent: the fragments written so far. It is
+   * the only honest measure of what a decode of that file can return, which is why the waveform
+   * is sized from it rather than from the downloader's in-flight counter.
+   */
+  const probeMediaSeconds = async (path: string): Promise<number> => {
+    try {
+      const out = await run(deps.tools.ffprobe, {
+        args: ["-v", "quiet", "-print_format", "json", "-show_format", path],
+      });
+      const info = JSON.parse(new TextDecoder().decode(out.stdout));
+      const sec = parseFloat(info.format?.duration ?? "0");
+      return Number.isFinite(sec) && sec > 0 ? sec : 0;
+    } catch {
+      return 0;
+    }
+  };
   const SAMPLE_RATE = 8000;
   const BATCH_SIZE = 50; // ~50s per batch, fewer SSE events
 
@@ -828,20 +852,31 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
 
           // ── Cache miss: compute from ffmpeg. ──
           const duration = mediaDuration;
-          // While a download is running, the file is still growing: only the
-          // bytes already written can be decoded. Report the media extent as
-          // the downloaded frontier so the waveform covers exactly what
-          // exists instead of stretching across the whole timeline (the
-          // reported "displays itself across the entire timeline").
+          // While a download is running, the file is still growing: only the bytes already
+          // written can be decoded, so the waveform must cover exactly what EXISTS.
+          //
+          // The extent comes from probing the FILE, never from the downloader's
+          // `*FrontierSec`. That counter is incremented as chunks are written to ffmpeg's STDIN
+          // and ffmpeg buffers, so it runs AHEAD of the media actually muxed — measured on a
+          // live 360p download: frontier 1250s / 2260s / 3070s while the file's own duration
+          // read 1418s / 2460s / 3244s, i.e. the counter was behind in the middle and overshot
+          // at the end. The decoded peak array is produced from the file, so a count of peaks
+          // derived from a different number than the file's length is what made the drawn
+          // waveform reach further than the audio it holds (the owner's "not fully correctly
+          // scaled as the video was built fragment by fragment").
+          //
+          // ffprobe on a growing fragmented MP4 reports the duration of the fragments present,
+          // which is exactly "where the mux reaches" (measured: truncating a 60s file to 50%
+          // reported 32.07s, to 80% reported 50.07s — linear in the bytes present).
           const dlState = await deps.downloadState(streamId);
           const downloading = dlState.phase === "running";
-          const frontierSec = downloading
-            ? Math.max(0, dlState.proxyFrontierSec || 0, dlState.videoFrontierSec || 0)
+          const muxedSec = downloading ? await probeMediaSeconds(mediaPath) : 0;
+          const extent = downloading && muxedSec > 0
+            ? Math.min(duration, muxedSec)
             : duration;
-          const extent = downloading && frontierSec > 0
-            ? Math.min(duration, frontierSec)
-            : duration;
-          const totalPeaks = Math.max(1, Math.ceil(extent * TARGET_PEAKS_PER_SEC));
+          // Peaks are per SECOND (TARGET_PEAKS_PER_SEC = 1), so the peak count IS the extent in
+          // seconds. Stated as a product only because the rate is a named constant.
+          const totalPeaks = Math.max(1, Math.round(extent * TARGET_PEAKS_PER_SEC));
           send({ duration, totalPeaks, extentSec: extent, downloading });
 
           // 2. Compute peaks per bucket and priority region.
@@ -1034,6 +1069,24 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     // Fire the close and report whether it was accepted; the process exits from the
     // window's own close handler, which is also what the OS button triggers.
     return c.json({ closing: closeWindow() });
+  });
+
+  // Minimize and maximize, for the app's own chrome.
+  //
+  // The window class does not expose either (re-verified against the installed runtime: the only
+  // `minimize`/`maximize` strings in it belong to `Intl.Locale`), so with the native frame
+  // removed the app has to provide the buttons AND the actions. Both are implemented in
+  // win-frame.ts against user32, and each reports what the OS did rather than what was asked.
+  app.post("/api/window/minimize", (c) => {
+    const ok = minimizeWindow(() => {
+      windowHandleRef()?.hide?.();
+    });
+    return c.json({ minimizing: ok });
+  });
+
+  app.post("/api/window/maximize", (c) => {
+    const res = winToggleMaximize();
+    return c.json(res ?? { maximized: false, unsupported: true });
   });
 
   app.post("/api/tools/ffmpeg", async (c) => {

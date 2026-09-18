@@ -164,13 +164,46 @@
     nativeDecorations: boolean;
     canMinimize: boolean;
     canMaximize: boolean;
+    /** The MEASURED window, so a claim can be traced (null when unmeasurable). */
+    actual?: { frameless: boolean | null; width: number; height: number; source: string } | null;
   };
+  /**
+   * What the window can actually do, read from the server's MEASURED state.
+   *
+   * Defaults are the decorated case: drawing no custom chrome is the safe failure, because a
+   * window that already has OS buttons must not get a second set. The server reports whether the
+   * frame is really gone (`actual.frameless`), and the bar is drawn on that.
+   */
   let chrome = $state<Chrome>({
     frameless: false,
     nativeDecorations: true,
     canMinimize: false,
     canMaximize: false,
+    actual: null,
   });
+
+  /**
+   * Minimize and maximize via the server, which reaches user32.
+   *
+   * The window class exposes neither (re-verified: the only minimize/maximize strings in the
+   * installed runtime belong to Intl.Locale), so with the native frame removed the app has to
+   * provide the actions as well as the buttons. Each call reports what the OS did.
+   */
+  async function minimizeApp() {
+    try {
+      await fetch('/api/window/minimize', { method: 'POST' });
+    } catch {
+      // A hidden window has no way to report a failure; the button is best-effort.
+    }
+  }
+
+  async function maximizeApp() {
+    try {
+      await fetch('/api/window/maximize', { method: 'POST' });
+    } catch {
+      // Best-effort: a refused maximize leaves the size unchanged, which is visible.
+    }
+  }
 
   async function closeApp() {
     try {
@@ -200,31 +233,19 @@
 
 <QueryClientProvider client={data.queryClient}>
 <div class="flex h-screen w-screen flex-col overflow-hidden bg-foundation text-ink">
-    <!-- Top bar (44px): wordmark + local-first badge + connection state. It doubles
-         as the window's drag region when there is no OS titlebar; interactive
-         children opt back out so links and buttons still work. -->
+    <!-- Application chrome bar (36px).
+         Thinner than a web header, with the window controls as a right-aligned CLUSTER in the
+         order a Windows titlebar uses (minimize, maximize, close) — the arrangement is what makes
+         a bar read as application chrome rather than a page header. It doubles as the drag region
+         when there is no OS titlebar; interactive children opt back out.
+
+         The buttons are drawn only when the app OWNS them (`chrome.canMinimize` etc.), which is
+         derived from a MEASURED frame state — a decorated window keeps the OS buttons and this
+         bar must not add a second set. -->
     <header
-      class="relative flex h-11 shrink-0 items-center gap-3 border-b border-border bg-surface px-4"
+      class="relative flex h-9 shrink-0 items-center gap-3 border-b border-border bg-surface pl-4 pr-0"
       style={chrome.frameless ? '-webkit-app-region: drag;' : ''}
     >
-      <!-- Close button, only when the window has no decoration: without it there is
-           no way to close the app at all. Minimize and maximize are deliberately
-           absent because the window class does not expose them (verified against the
-           runtime's own prototype, not assumed from the docs). -->
-      {#if chrome.frameless}
-        <button
-          type="button"
-          class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ash transition-colors hover:bg-accent/20 hover:text-accent"
-          style="-webkit-app-region: no-drag;"
-          title="Close SemaClip"
-          aria-label="Close SemaClip"
-          onclick={closeApp}
-        >
-          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
-            <path d="M1 1 L11 11 M11 1 L1 11" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" />
-          </svg>
-        </button>
-      {/if}
       <a href="/" class="flex items-baseline gap-2" style="-webkit-app-region: no-drag;" aria-label="SemaClip home">
         <span class="font-display text-base font-bold tracking-tight">Sema<span class="text-accent">Clip</span></span>
       </a>
@@ -251,6 +272,49 @@
         <span class="h-1.5 w-1.5 rounded-full {$wsStore.connected ? 'bg-success' : 'animate-pulse bg-warning'}"></span>
         {$wsStore.connected ? 'ready' : 'connecting'}
       </span>
+      {#if chrome.canMinimize || chrome.canMaximize}
+        <div class="ml-1 flex h-full items-stretch self-stretch" style="-webkit-app-region: no-drag;">
+          {#if chrome.canMinimize}
+            <button
+              type="button"
+              class="flex w-11 items-center justify-center text-ash-dim transition-colors hover:bg-surface-2 hover:text-ink"
+              title="Minimize"
+              aria-label="Minimize window"
+              onclick={minimizeApp}
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                <path d="M0 5 H10" stroke="currentColor" stroke-width="1" />
+              </svg>
+            </button>
+          {/if}
+          {#if chrome.canMaximize}
+            <button
+              type="button"
+              class="flex w-11 items-center justify-center text-ash-dim transition-colors hover:bg-surface-2 hover:text-ink"
+              title="Maximize"
+              aria-label="Maximize window"
+              onclick={maximizeApp}
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                <rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1" />
+              </svg>
+            </button>
+          {/if}
+          <!-- Close sits last and alone on the accent tint: the one destructive control should
+               not look like its neighbours. -->
+          <button
+            type="button"
+            class="flex w-12 items-center justify-center text-ash-dim transition-colors hover:bg-accent hover:text-white"
+            title="Close SemaClip"
+            aria-label="Close SemaClip"
+            onclick={closeApp}
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <path d="M0 0 L10 10 M10 0 L0 10" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" />
+            </svg>
+          </button>
+        </div>
+      {/if}
     </header>
 
     <!-- Staged-update prompt: below the header, above every page, so it cannot be missed

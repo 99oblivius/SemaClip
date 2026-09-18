@@ -8,6 +8,19 @@
   import type { ArtifactView, DownloadView, QualityInfo } from '$lib/api/download';
   import { fmtBytes as fmtBytesShared } from '$lib/api/download';
   import { DOWNLOADS_KEY, downloadsQuery, viewFor, markDownloadsChanged } from '$lib/api/downloads';
+  import { untrack } from 'svelte';
+  import {
+    adoptServerValues,
+    canRedo,
+    canUndo,
+    commit,
+    createHistory,
+    rebase,
+    redo,
+    revertTarget,
+    undo,
+    type FieldSnapshot,
+  } from './field-history';
 
   interface Props {
     stream: Stream;
@@ -29,6 +42,66 @@
   let loaded = $state(false);
   let prevId = $state('');
 
+  /**
+   * The six editable fields as one unit, so undo/redo and revert-on-close have something to
+   * record. The panel binds the fields individually (bind:value), so the history is maintained
+   * alongside them rather than derived from them — by the time an edit is visible in state, the
+   * information that it HAPPENED is already gone.
+   */
+  const snapshot = $derived<FieldSnapshot>({ title, streamer, game, streamLink, vodPath, chatPath });
+  /**
+   * The history starts from the INITIAL values on purpose — reading `snapshot` here without
+   * untracking would re-create the history every time a field changed and erase the undo steps
+   * as they were made. The record-sync effect below is what moves the baseline to the server's
+   * values once they arrive.
+   */
+  let history = $state(untrack(() => createHistory(snapshot)));
+
+  /** Push the current values as an undo step. Called at points a human calls a change. */
+  function commitHistory() {
+    history = commit(history, snapshot);
+  }
+
+  /** Write a snapshot back into the bound fields (undo, redo, revert). */
+  function applySnapshot(snap: FieldSnapshot) {
+    title = snap.title;
+    streamer = snap.streamer;
+    game = snap.game;
+    streamLink = snap.streamLink;
+    vodPath = snap.vodPath;
+    chatPath = snap.chatPath;
+  }
+
+  function undoEdit() {
+    const next = undo(history);
+    if (next === history) return;
+    history = next;
+    applySnapshot(next.present);
+  }
+
+  function redoEdit() {
+    const next = redo(history);
+    if (next === history) return;
+    history = next;
+    applySnapshot(next.present);
+  }
+
+  /**
+   * Closing without saving discards the pending edits.
+   *
+   * The same rule the UI-scale preview follows: an unsaved change must not outlive the surface
+   * that made it. Reverting here (not on every keystroke) is what keeps the panel usable — the
+   * fields stay editable while it is open, and the server's values are what survive a close.
+   */
+  function closePanel() {
+    if (!open) return;
+    open = false;
+    if (dirty) {
+      applySnapshot(revertTarget(history));
+      history = createHistory(revertTarget(history));
+    }
+  }
+
   // Re-sync the editable copies when the stream RECORD changes — not only
   // when the id changes. Gating on the id alone meant a delete (which clears
   // vodPath/chatPath server-side) never updated the fields or the dirty
@@ -41,15 +114,24 @@
       stream.sourceUrl ?? '', stream.vodPath ?? '', stream.chatPath ?? '',
     ].join('\u0000');
     if (sig === lastRecordSig) return;
-    // Never clobber unsaved edits: only adopt server values when the user
-    // has nothing pending for that field.
-    if (!dirty) {
-      title = stream.title ?? '';
-      streamer = stream.streamer ?? '';
-      game = stream.game ?? '';
-      streamLink = stream.sourceUrl ?? '';
-      vodPath = stream.vodPath ?? '';
-      chatPath = stream.chatPath ?? '';
+    // Never clobber unsaved edits: `adoptServerValues` refuses while something is pending, which
+    // is the same rule the UI-scale store follows. The server's values become the new revert
+    // target and the undo history is dropped, because it describes fields that no longer relate
+    // to anything.
+    const server: FieldSnapshot = {
+      title: stream.title ?? '',
+      streamer: stream.streamer ?? '',
+      game: stream.game ?? '',
+      streamLink: stream.sourceUrl ?? '',
+      vodPath: stream.vodPath ?? '',
+      chatPath: stream.chatPath ?? '',
+    };
+    const next = adoptServerValues(history, server, dirty);
+    if (next !== history) {
+      history = next;
+      applySnapshot(next.present);
+    } else if (!dirty) {
+      applySnapshot(server);
     }
     lastRecordSig = sig;
     loaded = true;
@@ -61,6 +143,10 @@
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
       queryClient.invalidateQueries({ queryKey: ['streams'] });
+      // The saved values become the revert target, so closing the panel no longer throws them
+      // away — and the undo history survives, so the user can still step back through what they
+      // typed before saving.
+      history = rebase(history, history.present);
       saved = true;
       setTimeout(() => (saved = false), 2000);
     },
@@ -312,18 +398,47 @@
   }
 
   function toggle() {
-    open = !open;
+    if (open) closePanel();
+    else open = true;
   }
 
   function handleClickOutside(e: MouseEvent) {
     const target = e.target as HTMLElement;
     if (open && target && !target.closest('[data-project-settings]')) {
-      open = false;
+      closePanel();
+    }
+  }
+
+  /**
+   * Undo/redo shortcuts, scoped to the open panel.
+   *
+   * Ctrl+Z / Ctrl+Shift+Z (and Ctrl+Y, which is what Windows users reach for). The no-gating rule
+   * requires a visible surface AND a keybinding, so the panel also carries buttons.
+   */
+  function onHistoryKey(e: KeyboardEvent) {
+    if (!open) return;
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const key = e.key.toLowerCase();
+    if (key === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      undoEdit();
+      return;
+    }
+    if ((key === 'z' && e.shiftKey) || key === 'y') {
+      e.preventDefault();
+      redoEdit();
+      return;
+    }
+    // Enter commits the current values as an undo step; leaving a field does too, so a typed
+    // value is never lost between steps.
+    if (key === 'enter') {
+      e.preventDefault();
+      commitHistory();
     }
   }
 </script>
 
-<svelte:window onclick={handleClickOutside} />
+<svelte:window onclick={handleClickOutside} onkeydown={onHistoryKey} />
 
 <div class="relative" data-project-settings>
   <button
@@ -344,9 +459,31 @@
       <div class="flex flex-col gap-4 p-4">
         <div class="flex items-center justify-between">
           <h3 class="font-display text-sm font-medium">Project Settings</h3>
-          {#if saved}
-            <span class="font-mono text-xs text-success">✓ Saved</span>
-          {/if}
+          <div class="flex items-center gap-1">
+            {#if saved}
+              <span class="font-mono text-xs text-success">✓ Saved</span>
+            {/if}
+            <!-- Undo/redo over the edited fields. Disabled rather than hidden, so the
+                 affordance is always visible (no-gating rule) and its state is readable. -->
+            <button
+              type="button"
+              class="rounded px-1.5 py-0.5 font-mono text-xs transition-colors
+                {canUndo(history) ? 'text-ash hover:bg-surface-2 hover:text-ink' : 'cursor-not-allowed text-ash-dim/40'}"
+              disabled={!canUndo(history)}
+              title="Undo (Ctrl+Z)"
+              aria-label="Undo edit"
+              onclick={undoEdit}
+            >↶</button>
+            <button
+              type="button"
+              class="rounded px-1.5 py-0.5 font-mono text-xs transition-colors
+                {canRedo(history) ? 'text-ash hover:bg-surface-2 hover:text-ink' : 'cursor-not-allowed text-ash-dim/40'}"
+              disabled={!canRedo(history)}
+              title="Redo (Ctrl+Shift+Z)"
+              aria-label="Redo edit"
+              onclick={redoEdit}
+            >↷</button>
+          </div>
         </div>
 
         <!-- Metadata -->

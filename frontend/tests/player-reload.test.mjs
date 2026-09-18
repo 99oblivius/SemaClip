@@ -10,7 +10,7 @@
 // The ORIGINAL predicate is kept here as an oracle and asserted to get the replacement case
 // WRONG, so this cannot quietly become a test that passes against the broken logic. (Run with
 // vite-node: plain `node` cannot resolve the TS import.)
-import { shouldReloadMedia } from '../src/lib/components/player-reload.ts';
+import { shouldReloadMedia, shouldSwitchSource } from '../src/lib/components/player-reload.ts';
 
 const STALL_MS = 1500;
 const MIN_GROWTH = 128 * 1024;
@@ -97,6 +97,29 @@ const later = decision({
   frontierAtLastReload: RE_DOWNLOAD_FIRST_TICK,
 });
 check('subsequent growth of the new file still reloads normally', shouldReloadMedia(later) === true);
+
+// ── SWITCHING THE FILE, which the stall detector above cannot do ─────────────────
+// The stall detector only ever re-fetched THE SAME URL. Every way the media can change to a
+// DIFFERENT file left the player on the old one, so the decision is a separate rule.
+const SLUG = '18-weskie-wednesday-scuffed-stream-77-0';
+const PROXY = `/cache/vods/s1/${SLUG} - proxy.mp4`;
+const VIDEO = `/cache/vods/s1/${SLUG} - video.mp4`;
+
+check('a first download (nothing loaded yet) switches to the new file',
+  shouldSwitchSource({ wantedPath: VIDEO, loadedPath: null }) === true);
+check('the proxy being deleted switches review playback to the video',
+  shouldSwitchSource({ wantedPath: VIDEO, loadedPath: PROXY }) === true);
+check('the video arriving while the proxy plays switches to the proxy decision... ' +
+  'the VIEW decides, so a wanted proxy wins over a loaded video',
+  shouldSwitchSource({ wantedPath: PROXY, loadedPath: VIDEO }) === true);
+check('the same file does NOT switch (no reload thrash)',
+  shouldSwitchSource({ wantedPath: VIDEO, loadedPath: VIDEO }) === false);
+check('nothing playable leaves the element alone, so its empty state renders',
+  shouldSwitchSource({ wantedPath: null, loadedPath: VIDEO }) === false);
+check('nothing playable and nothing loaded is not a switch',
+  shouldSwitchSource({ wantedPath: null, loadedPath: null }) === false);
+check('an undefined path is treated as nothing loaded',
+  shouldSwitchSource({ wantedPath: VIDEO, loadedPath: undefined }) === true);
 
 console.log(failures === 0 ? '  all player-reload checks passed' : `  ${failures} FAILED`);
 process.exit(failures === 0 ? 0 : 1);

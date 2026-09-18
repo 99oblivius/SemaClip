@@ -41,3 +41,40 @@ export function shouldReloadMedia(a: ReloadDecision): boolean {
   // Ordinary growth: only worth reloading once there is meaningfully more to fetch.
   return a.frontierBytes > a.frontierAtLastReload + a.minGrowth;
 }
+
+/** What decides whether the player should change the FILE it is playing. */
+export interface SourceSwitch {
+  /** The media path the view says should be playing (`media.playablePath`). */
+  wantedPath: string | null | undefined;
+  /** The path the player currently has loaded. */
+  loadedPath: string | null | undefined;
+}
+
+/**
+ * Should the player switch to a different file?
+ *
+ * ── WHY THIS IS SEPARATE FROM THE STALL DETECTOR ───────────────────────────────────────────
+ * The stall detector only ever RE-FETCHED THE SAME URL once it stopped advancing. Every other way
+ * the media can change left the player on the old file:
+ *
+ *   - the proxy is deleted and the finished video should take over — the old URL 404s, and the
+ *     player sat on a dead source;
+ *   - the video arrives and the proxy was what review was playing — the better file was never
+ *     picked up until something else forced a load;
+ *   - the FIRST download lands on a project that had nothing — `srcUnavailable` clears, but a
+ *     `<video src>` that was `undefined` and then set is a fresh element load the browser may
+ *     not perform without a nudge.
+ *
+ * Comparing the view's intended path against the loaded one covers all of them with one rule,
+ * and it is the SERVER that decides which artifact should play (the view already prefers the
+ * proxy for review and the video for render), so the player never re-derives that.
+ */
+export function shouldSwitchSource(s: SourceSwitch): boolean {
+  const wanted = s.wantedPath ?? null;
+  const loaded = s.loadedPath ?? null;
+  if (wanted === loaded) return false;
+  // Nothing to play at all: leave the element alone so its "nothing downloaded yet" state
+  // renders rather than an element pointing at a URL that does not exist.
+  if (wanted === null) return false;
+  return true;
+}
