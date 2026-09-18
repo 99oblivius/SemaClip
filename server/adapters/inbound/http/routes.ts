@@ -115,7 +115,7 @@ export interface HttpDeps {
   deleteProxy: (streamId: string) => Promise<{ deleted: boolean }>;
   deleteChat: (streamId: string) => Promise<{ deleted: boolean }>;
   downloadChatPiece: (opts: { streamId: string }) => Promise<{ started: boolean; quality: string | null }>;
-  openFolder: (streamId: string) => Promise<{ opened: boolean; dir: string | null }>;
+  openFolder: (streamId: string) => Promise<{ opened: boolean; dir: string | null; error?: string }>;
   deleteDownload: (streamId: string) => Promise<boolean>;
   resumeDownload: (streamId: string) => Promise<void>;
   downloadPiece: (opts: { streamId: string; kind: "proxy" | "hq"; proxyHeightCap?: number; maxHeight?: number | null; signal?: AbortSignal | undefined }) => Promise<{ started: boolean; quality: string | null }>

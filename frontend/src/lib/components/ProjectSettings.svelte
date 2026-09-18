@@ -204,6 +204,26 @@
     chat: 'the chat file',
   };
 
+  /**
+   * Open the project's folder in the OS file manager.
+   *
+   * The server opens it (the browser cannot), and it now REPORTS the outcome, so a refusal is
+   * shown rather than swallowed: this button used to `void` the fetch, which made "nothing
+   * happened" indistinguishable from "the folder opened behind this window".
+   */
+  let folderError = $state('');
+  async function openFolder() {
+    folderError = '';
+    try {
+      const res = await fetch(`/api/streams/${stream.id}/folder`);
+      const body = await res.json() as { opened?: boolean; error?: string };
+      if (!res.ok) { folderError = body?.error ?? `Could not open the folder (HTTP ${res.status}).`; return; }
+      if (!body?.opened) { folderError = body?.error ?? 'Could not open the folder.'; }
+    } catch (err) {
+      folderError = err instanceof Error ? err.message : 'Could not open the folder.';
+    }
+  }
+
   const deleteProxyMutation = createMutation(() => ({
     mutationFn: () => apiClient.deleteProxy(stream.id),
     onSuccess: () => {
@@ -377,11 +397,14 @@
             <span class="font-mono text-xs uppercase tracking-wider text-ash">Files</span>
             <button
               class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent"
-              onclick={() => { void fetch(`/api/streams/${stream.id}/folder`); }}
-              title="Open the artifact folder"
+              onclick={openFolder}
+              title="Open the artifact folder on disk"
             >
               <Icon name="folder" size={12} /> Open folder
             </button>
+            {#if folderError}
+              <span class="text-xs text-danger" role="alert">{folderError}</span>
+            {/if}
           </div>
 
           <!-- One row per artifact, rendered from the server's view. A

@@ -61,6 +61,23 @@ export interface RunOptions {
   stdout?: "piped" | "null" | "inherit";
   stderr?: "piped" | "null" | "inherit";
   signal?: AbortSignal | undefined;
+  /**
+   * Allow the child to SHOW A WINDOW. Windows-only in effect; ignored elsewhere.
+   *
+   * Every child is spawned with `windowsHide: true` (CREATE_NO_WINDOW), which is right for
+   * ffmpeg/whisper/tar and WRONG for a command whose whole purpose is to open something: a
+   * hidden `explorer.exe` starts, stays alive, and creates NO window at all. Measured in the
+   * owner's own session, counting windows there rather than through the blind session-0 agent:
+   *
+   *   spawn("explorer", { windowsHide: false })  4 -> 5 windows   OPENED
+   *   spawn("explorer", { windowsHide: true  })  5 -> 5 windows   nothing
+   *   new Deno.Command("explorer")               5 -> 6 windows   OPENED
+   *
+   * That is why "Open folder" did nothing on Windows: the flag suppressed the very window it
+   * was meant to raise. Opt IN explicitly — hiding stays the default, because a stray console
+   * on every spawn is what the flag exists to prevent.
+   */
+  showWindow?: boolean;
 }
 
 export interface RunOutput {
@@ -86,7 +103,17 @@ function stdio(mode: "piped" | "null" | "inherit" | undefined): "pipe" | "ignore
 function launchOptions(cmd: string, opts: RunOptions) {
   return {
     // The WHOLE POINT: without this, Windows opens a console for every child.
-    windowsHide: true,
+    //
+    // `showWindow` is the deliberate exception: a child whose job is to raise a window
+    // (explorer.exe) creates NONE at all when this is set. Measured in the owner's session:
+    //
+    //   spawn("explorer", { windowsHide: false })  4 -> 5 windows   OPENED
+    //   spawn("explorer", { windowsHide: true  })  5 -> 5 windows   nothing
+    //   new Deno.Command("explorer")               5 -> 6 windows   OPENED
+    //
+    // That is why "Open folder" did nothing on Windows. Hiding stays the default so a future
+    // call site cannot reintroduce a console flash by forgetting something.
+    windowsHide: opts.showWindow !== true,
 
     cwd: opts.cwd === undefined ? undefined : String(opts.cwd),
     env: opts.env,

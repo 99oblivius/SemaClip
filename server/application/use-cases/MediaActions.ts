@@ -234,9 +234,13 @@ export class MediaActionsUseCase {
   }
 
   /** Open the artifact folder in the OS file manager (xdg-open / explorer). */
-  async openFolder(streamId: string): Promise<{ opened: boolean; dir: string | null }> {
+  async openFolder(streamId: string): Promise<{ opened: boolean; dir: string | null; error?: string }> {
     const dir = await this.artifactDir(streamId);
-    if (!dir || !(await this.fs.exists(dir))) return { opened: false, dir: null };
+    // Nothing to show yet. Report WHY (the UI can say "this project has no files yet"), rather
+    // than a bare refusal the button turns into silence.
+    if (!dir || !(await this.fs.exists(dir))) {
+      return { opened: false, dir: null, error: "This project has no files on disk yet." };
+    }
     const cmd = Deno.build.os === "windows" ? "explorer" : "xdg-open";
     try {
       // `explorer.exe` does not accept a forward-slashed path, and every path this
@@ -244,12 +248,23 @@ export class MediaActionsUseCase {
       // no-op on Windows (it resolves a relative path, or nothing at all). Every path
       // that leaves the process must be host-native.
       const native = this.fs.nativePath(dir);
-      // Fire-and-forget: opening the folder in the OS file manager. No output is
-      // wanted, and a console flash on Windows is avoided by the helper.
-      void runStatus(cmd, { args: [native] });
+      // Fire-and-forget: opening the folder in the OS file manager. No output is wanted.
+      //
+      // `showWindow: true` is REQUIRED, not cosmetic: every child is spawned hidden by default
+      // (CREATE_NO_WINDOW), and a hidden explorer.exe starts, stays alive and creates NO window —
+      // which is exactly why this button did nothing on Windows.
+      //
+      // The result is now REPORTED rather than assumed. This used to `void` the spawn and return
+      // `opened: true` unconditionally, so a spawn that failed (or a window suppressed by the
+      // flag above) was indistinguishable from one that worked. `explorer` also exits 1 as a
+      // matter of course, so only an outright spawn failure counts as failure here.
+      const status = await runStatus(cmd, { args: [native], showWindow: true });
+      if (!status.success && status.code !== 1) {
+        return { opened: false, dir: native };
+      }
       return { opened: true, dir: native };
-    } catch {
-      return { opened: false, dir };
+    } catch (err) {
+      return { opened: false, dir, error: err instanceof Error ? err.message : String(err) };
     }
   }
 
