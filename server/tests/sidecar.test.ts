@@ -12,8 +12,10 @@
  */
 import { assert, assertEquals } from "@std/assert";
 import {
+  bundleLauncherContent,
   ensureSidecar,
   LAUNCHER_NAME,
+  launcherContent,
   launcherPath,
   needsExtraction,
   SIDECAR_NAME,
@@ -74,4 +76,38 @@ Deno.test("a NULL path on Windows carries a REASON; off Windows it is simply not
     assertEquals(st.path, null);
     assertEquals(st.error, null, "not applicable is not a failure");
   }
+});
+
+Deno.test("BOTH launchers pass -app, because the updater defaults to its OWN directory", () => {
+  // THE BUG THIS PINS: the updater targets its own directory when not told otherwise, so
+  // a launcher that omits -app makes it look for version.txt beside the UPDATER — which
+  // for an MSI install is a per-user directory holding no bundle, so it refuses to run
+  // with "is this a SemaClip bundle?". The first launcher written here omitted it.
+  for (const [name, body] of [
+    ["bundle", bundleLauncherContent()],
+    ["runtime", launcherContent("C:\\Program Files\\SemaClip")],
+  ] as const) {
+    assert(body.includes("-app"), `${name} launcher must pass -app`);
+    assert(body.includes(SIDECAR_NAME), `${name} launcher must run the updater`);
+    assert(body.includes("%*"), `${name} launcher must forward arguments`);
+  }
+});
+
+Deno.test("the portable launcher aims at its own directory; the install launcher names the app dir", () => {
+  const bundle = bundleLauncherContent();
+  assert(
+    bundle.includes('set "APPDIR=%~dp0"'),
+    "a portable bundle unpacks the updater beside the app, so %~dp0 is the app dir",
+  );
+  const installed = launcherContent("C:\\Program Files\\SemaClip");
+  assert(
+    installed.includes("C:\\Program Files\\SemaClip"),
+    "an MSI install extracted the updater elsewhere, so the app dir must be named",
+  );
+  // And the install launcher must NOT use %~dp0 for the app dir: that is where the
+  // UPDATER was extracted, not where the app lives.
+  assert(
+    !installed.includes('set "APPDIR=%~dp0"'),
+    "an install must name the app directory, not the updater's own",
+  );
 });

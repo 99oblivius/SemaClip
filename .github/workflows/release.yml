@@ -271,17 +271,26 @@ jobs:
           V="${{ needs.version.outputs.version }}"
           mv dist/SemaClip.msi "dist/SemaClip-$V-win-x64.msi"
           cd dist
-          # The portable zip IS the update payload: the sidecar downloads it and
-          # swaps its contents into the install directory. It must not carry the
-          # updater (a running image cannot be overwritten on Windows — the
-          # updater ships with the installer only), but it MUST carry
-          # version.txt, or a client that applies this payload has no record of
-          # what it just installed.
-          zip -qr "SemaClip-$V-win-x64-portable.zip" SemaClip -x "SemaClip/SemaClipUpdater.exe"
+          # The portable zip IS the update payload: unzipped over an install it replaces
+          # the app files, and unzipped anywhere it is a working SemaClip.
+          #
+          # It now CARRIES the updater and a launcher, which is what makes the portable
+          # self-updating rather than merely downloadable. It used to exclude the updater
+          # so a swap could not overwrite a running image — but the swap runs while the
+          # app is CLOSED (that is the updater's whole design), and swapBundleSkipping
+          # already refuses to replace the RUNNING executable by name. Excluding it cost
+          # the portable the one program that can install an update on Windows.
+          # version.txt must still be present: the payload has to identify itself or a
+          # client applying it records nothing.
+          zip -qr "SemaClip-$V-win-x64-portable.zip" SemaClip
           # Fail loudly if the payload cannot stand on its own. A silent omission
           # here is invisible until a Windows client tries to update.
           unzip -l "SemaClip-$V-win-x64-portable.zip" | grep -q "SemaClip/version.txt" \
             || { echo "::error::portable zip has no version.txt — the payload cannot identify itself"; exit 1; }
+          unzip -l "SemaClip-$V-win-x64-portable.zip" | grep -q "SemaClip/SemaClipUpdater.exe" \
+            || { echo "::error::portable zip has no sidecar updater — a portable Windows user could never update"; exit 1; }
+          unzip -l "SemaClip-$V-win-x64-portable.zip" | grep -q "SemaClip/Update and launch SemaClip.cmd" \
+            || { echo "::error::portable zip has no update launcher"; exit 1; }
 
           # The MSI's cabinet cannot carry a file beside the payload, so the sidecar
           # updater rides INSIDE the payload DLL's virtual filesystem and the app writes

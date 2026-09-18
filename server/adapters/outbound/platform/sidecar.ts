@@ -43,17 +43,55 @@ const EMBEDDED_DIR = new URL("../../../appfiles/", import.meta.url);
  * `%*` forwards arguments (the updater takes `-check`, `-force`, `-no-launch`). `%~dp0`
  * is the launcher's own directory, which is where the updater was extracted.
  */
-export const LAUNCHER_CONTENT = `@echo off
+/**
+ * The launcher's body.
+ *
+ * `appDirExpr` is how the updater is told where the app lives. Two callers, one reason:
+ * the updater targets its OWN directory unless told otherwise, so a portable bundle (app
+ * and updater side by side) can use `%~dp0`, while an MSI install must name the real app
+ * directory because the updater was extracted to a per-user one.
+ */
+export function launcherBody(appDirExpr: string): string {
+  return `@echo off
 REM Apply any staged SemaClip update, then relaunch the app.
 REM
 REM Windows cannot replace a loaded DLL while the app runs, so Deno.autoUpdate only
-REM STAGES an update here. SemaClipUpdater.exe performs the swap while the app is
-REM closed. Run with no arguments it applies any pending update, relaunches the app and
-REM waits, so starting SemaClip through this file makes updates land on their own.
+REM STAGES an update here. ${SIDECAR_NAME} performs the swap while the app is closed.
+REM Run with arguments, it applies any pending update, relaunches the app and waits, so
+REM starting SemaClip through this file makes updates land on their own.
+REM
+REM -app IS LOAD-BEARING. Left to itself the updater targets its OWN directory; it would
+REM look for version.txt beside itself, find none, and refuse to run. The app directory is
+REM the one carrying version.txt and the payload.
 setlocal
 set "DIR=%~dp0"
-"%DIR%${SIDECAR_NAME}" %*
+set "APPDIR=${appDirExpr}"
+"%DIR%${SIDECAR_NAME}" -app "%APPDIR%" %*
 `;
+}
+
+/** The portable bundle's launcher: the updater is unpacked beside the app. */
+export function bundleLauncherContent(): string {
+  return launcherBody("%~dp0");
+}
+
+/** The launcher written at runtime for an install whose updater was extracted. */
+export function launcherContent(appDir: string): string {
+  return launcherBody(appDir);
+}
+
+/**
+ * The app's own directory — where `version.txt` and the payload live.
+ *
+ * `Deno.execPath()` is the real path of the running binary in a compiled build
+ * (verified), so the launcher can hand the updater an unambiguous target instead of
+ * letting it infer one from wherever the sidecar happens to sit.
+ */
+export function appDirPath(): string {
+  const exe = Deno.execPath();
+  const cut = exe.lastIndexOf("\\");
+  return cut > 0 ? exe.slice(0, cut) : exe;
+}
 
 export interface SidecarState {
   /** Absolute path of the extracted updater, or null when it could not be placed. */
@@ -135,7 +173,9 @@ export async function ensureSidecar(opts: { force?: boolean } = {}): Promise<Sid
     await Deno.writeFile(tmp, bundled);
     await Deno.rename(tmp, dest);
     // Written every time the updater is: the two must match, and the launcher is tiny.
-    await Deno.writeTextFile(launcher, LAUNCHER_CONTENT);
+    // It carries THIS process's app directory, so it is written here rather than being
+    // a constant — the updater must be aimed at the payload, not at its own location.
+    await Deno.writeTextFile(launcher, launcherContent(appDirPath()));
     return { path: dest, launcherPath: launcher, extracted: true, error: null };
   } catch (err) {
     return { ...none, error: err instanceof Error ? err.message : String(err) };
