@@ -99,6 +99,7 @@ export async function downloadFmp4(
   if (!playlistRes.ok) throw new Error(`playlist fetch ${playlistRes.status}: ${playlistUrl}`);
   const chunks = parseMediaPlaylist(await playlistRes.text(), playlistUrl);
   if (chunks.length === 0) throw new Error("Media playlist has no chunks");
+  console.log(`[fmp4] playlist ok: ${chunks.length} chunks, first=${chunks[0]!.url.slice(0, 90)}`);
 
   const totalSec = chunks.reduce((s, c) => s + c.durationSec, 0);
   const resumeSec = Math.max(0, opts.resumeSec ?? 0);
@@ -178,10 +179,19 @@ export async function downloadFmp4(
     const dec = new TextDecoder();
     if (!ffmpeg.stderr) return;
     for await (const part of ffmpeg.stderr) {
-      stderrTail = (stderrTail + dec.decode(part, { stream: true })).slice(-2000);
+      const text = dec.decode(part, { stream: true });
+      stderrTail = (stderrTail + text).slice(-2000);
+      // `-loglevel error` is quiet while a stall is happening, so anything ffmpeg says
+      // is signal — previously it was buffered and only shown if the run FAILED, which
+      // meant a hang reported nothing at all.
+      const line = text.trim();
+      if (line) console.log(`[fmp4] ffmpeg stderr: ${line.slice(0, 300)}`);
     }
   })();
 
+  // The freeze was isolated to the gap between "spawning ffmpeg" and "first muxed
+  // bytes", which is exactly where chunk fetching happens — so name every step of it.
+  let firstWriteLogged = false;
   const writeChunk = async (data: Uint8Array): Promise<void> => {
     // stdin is piped by construction above; the guard makes that explicit rather
     // than an unchecked assertion.
@@ -189,6 +199,10 @@ export async function downloadFmp4(
     if (!writer) return;
     try {
       await writer.write(data);
+      if (!firstWriteLogged) {
+        firstWriteLogged = true;
+        console.log(`[fmp4] first chunk written to ffmpeg stdin (${data.byteLength}B)`);
+      }
     } finally {
       writer.releaseLock();
     }
@@ -249,6 +263,12 @@ export async function downloadFmp4(
         const ready = reorder.get(nextWrite)!;
         reorder.delete(nextWrite);
         await writeChunk(ready.data);
+        if (nextWrite % 10 === 0) {
+          console.log(
+            `[fmp4] progress: ${nextWrite}/${chunks.length} chunks written, ` +
+              `${(bytes / 1048576).toFixed(1)}MB muxed`,
+          );
+        }
         downloadedSec += chunks[ready.index]!.durationSec;
         opts.onProgress({
           downloadedSec,
