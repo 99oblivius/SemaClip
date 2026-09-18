@@ -33,7 +33,7 @@ if ($port) {
         Write-Host "  => THE BACKEND IS ALIVE. It is a stuck download, not a dead server."
         Write-Host "  body:     $($r.Content.Substring(0, [Math]::Min(300, $r.Content.Length)))"
     } catch {
-        Write-Host "  HTTP:     FAILED after $($sw.ElapsedMilliseconds)ms — $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  HTTP:     FAILED after $($sw.ElapsedMilliseconds)ms  --  $($_.Exception.Message)" -ForegroundColor Red
         Write-Host "  => THE BACKEND IS NOT ANSWERING. The event loop is blocked, or the process is gone."
         Write-Host "     Check Task Manager for a SemaClip process that is still running."
     }
@@ -62,7 +62,7 @@ if (Test-Path $ffmpeg) {
         Get-ChildItem $libDir -Filter *.dll -ErrorAction SilentlyContinue |
             Select-Object -First 6 | ForEach-Object { Write-Host "    $($_.Name)" }
     } else {
-        Write-Host "  !! no lib/ dir at $libDir — a -shared build without its DLLs" -ForegroundColor Red
+        Write-Host "  !! no lib/ dir at $libDir  --  a -shared build without its DLLs" -ForegroundColor Red
     }
     Write-Host "  running 'ffmpeg -version':"
     & $ffmpeg -version 2>&1 | Select-Object -First 3 | ForEach-Object { Write-Host "    $_" }
@@ -73,7 +73,7 @@ if (Test-Path $ffmpeg) {
 
 Write-Host ""
 Write-Host "=== 4. CAN THIS MACHINE REACH THE CHUNK CDN? (the fetch that never returns)" -ForegroundColor Cyan
-# The chunk URL from the log. If this hangs or 403s, the download stalls on fetch — which
+# The chunk URL from the log. If this hangs or 403s, the download stalls on fetch  --  which
 # is what the log shows: ffmpeg spawned, then nothing, because no chunk ever arrived.
 $urls = @()
 if (Test-Path $logPath) {
@@ -94,21 +94,21 @@ if ($urls.Count -gt 0) {
             $sw.Stop()
             Write-Host "    HEAD $($r.StatusCode) in $($sw.ElapsedMilliseconds)ms" -ForegroundColor Green
         } catch {
-            Write-Host "    FAILED after $($sw.ElapsedMilliseconds)ms — $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "    FAILED after $($sw.ElapsedMilliseconds)ms  --  $($_.Exception.Message)" -ForegroundColor Red
             Write-Host "    => this is why no chunk arrives: the fetch never completes."
         }
     }
 } else {
     Write-Host "  no chunk URL found in the log (the run that froze did not log one)."
 }
-Write-Host "  control — a known-good HTTPS host:"
+Write-Host "  control  --  a known-good HTTPS host:"
 try {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $r = Invoke-WebRequest -Uri 'https://github.com' -TimeoutSec 15 -UseBasicParsing -Method Head
     $sw.Stop()
     Write-Host "    github.com HEAD $($r.StatusCode) in $($sw.ElapsedMilliseconds)ms" -ForegroundColor Green
 } catch {
-    Write-Host "    github.com FAILED — network/proxy problem" -ForegroundColor Red
+    Write-Host "    github.com FAILED  --  network/proxy problem" -ForegroundColor Red
 }
 
 Write-Host ""
@@ -116,7 +116,7 @@ Write-Host "=== 5. OPEN FOLDER (the button that stopped working)" -ForegroundCol
 try {
     Start-Process explorer.exe -ArgumentList $dataDir -PassThru | Out-Null
     Write-Host "  asked explorer to open: $dataDir"
-    Write-Host "  (if the window did not appear, say so — that is itself a data point)"
+    Write-Host "  (if the window did not appear, say so  --  that is itself a data point)"
 } catch {
     Write-Host "  explorer failed: $($_.Exception.Message)" -ForegroundColor Red
 }
@@ -132,4 +132,4 @@ if (Test-Path $vods) {
     Write-Host "  no $vods"
 }
 Write-Host ""
-Write-Host "=== DONE — paste everything above" -ForegroundColor Cyan
+Write-Host "=== DONE  --  paste everything above" -ForegroundColor Cyan
