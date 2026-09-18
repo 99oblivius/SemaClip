@@ -1,0 +1,54 @@
+# PASTE-IN DIAGNOSTIC - no file, no encoding risk.
+#
+# Copy everything below the line into a PowerShell window on the Windows machine WHILE the
+# download is frozen, press Enter, then paste the output back.
+#
+# ASCII-only on purpose: Windows PowerShell 5.1 reads a .ps1 as ANSI, so an em-dash in a
+# script file becomes garbage bytes and breaks the parser. Pasting avoids the file entirely.
+# ---------------------------------------------------------------------------------------
+
+$d = Join-Path $env:APPDATA 'SemaClip'; $log = Join-Path $d 'SemaClip.log'
+Write-Host ''; Write-Host '== 1. IS THE BACKEND ANSWERING? (the key question)'
+$port = $null
+if (Test-Path $log) { $m = Select-String $log -Pattern 'running on http://127\.0\.0\.1:(\d+)' | Select-Object -Last 1; if ($m) { $port = $m.Matches[0].Groups[1].Value } }
+Write-Host "   port: $port"
+if ($port) {
+  $s = [Diagnostics.Stopwatch]::StartNew()
+  try { $r = Invoke-WebRequest "http://127.0.0.1:$port/api/diagnostics" -TimeoutSec 10 -UseBasicParsing; $s.Stop()
+        Write-Host "   HTTP $($r.StatusCode) in $($s.ElapsedMilliseconds)ms  => BACKEND ALIVE (stuck download, not a dead server)" -ForegroundColor Green
+        Write-Host "   $($r.Content.Substring(0,[Math]::Min(400,$r.Content.Length)))" }
+  catch { $s.Stop(); Write-Host "   FAILED in $($s.ElapsedMilliseconds)ms => BACKEND NOT ANSWERING: $($_.Exception.Message)" -ForegroundColor Red }
+}
+Write-Host ''; Write-Host '== 2. LOG TAIL'
+if (Test-Path $log) { Get-Content $log -Tail 25 | ForEach-Object { Write-Host "   $_" } } else { Write-Host "   none at $log" }
+Write-Host ''; Write-Host '== 3. DOES THE MANAGED FFMPEG RUN?'
+$ff = Join-Path $d 'tools\ffmpeg\win-x64\bin\ffmpeg.exe'
+if (Test-Path $ff) {
+  & $ff -version 2>&1 | Select-Object -First 2 | ForEach-Object { Write-Host "   $_" }
+  Write-Host "   exit=$LASTEXITCODE"
+  $lib = Join-Path (Split-Path (Split-Path $ff)) 'lib'
+  Write-Host "   lib dir exists: $(Test-Path $lib)  ($lib)"
+} else { Write-Host "   NOT FOUND: $ff" -ForegroundColor Red }
+Write-Host ''; Write-Host '== 4. CAN THIS MACHINE FETCH A CHUNK? (the fetch that never returns)'
+$cu = $null
+if (Test-Path $log) { $u = Select-String $log -Pattern 'first=(\S+)' | Select-Object -Last 1; if ($u) { $cu = $u.Matches[0].Groups[1].Value } }
+if ($cu) {
+  Write-Host "   url: $($cu.Substring(0,[Math]::Min(110,$cu.Length)))"
+  $s = [Diagnostics.Stopwatch]::StartNew()
+  try { $r = Invoke-WebRequest $cu -Method Head -TimeoutSec 25 -UseBasicParsing; $s.Stop(); Write-Host "   HEAD $($r.StatusCode) in $($s.ElapsedMilliseconds)ms" -ForegroundColor Green }
+  catch { $s.Stop(); Write-Host "   FAILED in $($s.ElapsedMilliseconds)ms => the chunk cannot be fetched: $($_.Exception.Message)" -ForegroundColor Red }
+} else { Write-Host '   no chunk url in the log' }
+$s = [Diagnostics.Stopwatch]::StartNew()
+try { $r = Invoke-WebRequest 'https://github.com' -Method Head -TimeoutSec 15 -UseBasicParsing; $s.Stop(); Write-Host "   control github.com: HEAD $($r.StatusCode) in $($s.ElapsedMilliseconds)ms" -ForegroundColor Green }
+catch { $s.Stop(); Write-Host "   control github.com FAILED: $($_.Exception.Message)" -ForegroundColor Red }
+Write-Host ''; Write-Host '== 5. OPEN FOLDER - which path form works?'
+$fwd = ($d + '/cache/vods').Replace('\','/')
+Write-Host "   forward-slash (what the app used to pass): $fwd"
+try { Start-Process explorer.exe -ArgumentList $fwd; Write-Host '   asked explorer (forward). Did a window open?' -ForegroundColor Yellow } catch { Write-Host "   failed: $($_.Exception.Message)" }
+$bck = Join-Path $d 'cache\vods'
+Write-Host "   backslash (what the fix passes): $bck"
+try { Start-Process explorer.exe -ArgumentList $bck; Write-Host '   asked explorer (backslash). Did a window open?' -ForegroundColor Yellow } catch { Write-Host "   failed: $($_.Exception.Message)" }
+Write-Host ''; Write-Host '== 6. MEDIA ON DISK'
+$v = Join-Path $d 'cache\vods'
+if (Test-Path $v) { Get-ChildItem $v -Recurse -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 8 | ForEach-Object { Write-Host ("   {0,12:N0}  {1}  {2}" -f $_.Length, $_.LastWriteTime.ToString('HH:mm:ss'), $_.Name) } }
+Write-Host ''; Write-Host '== DONE - paste everything above' -ForegroundColor Cyan
