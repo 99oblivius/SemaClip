@@ -1043,6 +1043,21 @@ jobs:
             # catches the patch-format/reproducibility class without a display.
             # Booting the patched GUI app is a manual step: CI has no webkit2gtk
             # and no display, so it is NOT claimed here. See docs/RELEASING.md.
+            # THE PATCH TARGET IS THE PATCH'S OWN VERSION, NOT HEAD.
+            # `patches` is keyed by the version the client is ON, so an entry that is not
+            # the newest one legitimately targets an older build: patch-26.197-to-26.200
+            # produces 26.200 while head is 26.201, and a client chains 26.197 -> 26.200 ->
+            # 26.201. Comparing every patch against HEAD's dylib failed the first release
+            # that carried a chain (26.197 -> 26.200 -> 26.201). Derive the target from the
+            # patch name, which encodes it, and fall back to HEAD only when the name is not
+            # in the expected shape.
+            to="$(printf '%s' "$name" | sed -n 's/^patch-.*-to-\(.*\)\.bin$/\1/p')"
+            if [ -z "$to" ]; then
+              echo "::error::$name is not named patch-<from>-to-<to>.bin — cannot tell which build it must reproduce"
+              exit 1
+            fi
+            echo "== patch $frm -> $to"
+
             olddir="back/old-$frm"
             mkdir -p "$olddir"
             gh release download "v$frm" --repo "$GITHUB_REPOSITORY" \
@@ -1050,14 +1065,29 @@ jobs:
               || { echo "::error::cannot fetch the $frm runtime dylib to check the patch against"; exit 1; }
             old="$(find "$olddir" -name '*-linux-x64-runtime.so' -print -quit)"
             [ -n "$old" ] || { echo "::error::no runtime dylib in the $frm release"; exit 1; }
-            target="back/SemaClip-$V-linux-x64-runtime.so"
-            [ -f "$target" ] || { echo "::error::missing $target"; exit 1; }
+
+            if [ "$to" = "$V" ]; then
+              # This run's own artifact, already downloaded back.
+              target="back/SemaClip-$V-linux-x64-runtime.so"
+              [ -f "$target" ] || { echo "::error::missing $target"; exit 1; }
+            else
+              # An older link in the chain: fetch THAT release's dylib. Its absence is the
+              # finding — a manifest naming a patch for a version whose dylib is gone means
+              # the chain is unreproducible for anyone on that version.
+              todir="back/to-$to"
+              mkdir -p "$todir"
+              gh release download "v$to" --repo "$GITHUB_REPOSITORY" \
+                --pattern '*-linux-x64-runtime.so' --dir "$todir" \
+                || { echo "::error::cannot fetch the $to runtime dylib that $name must reproduce"; exit 1; }
+              target="$(find "$todir" -name '*-linux-x64-runtime.so' -print -quit)"
+              [ -n "$target" ] || { echo "::error::no runtime dylib in the $to release"; exit 1; }
+            fi
 
             qbspatch "$old" back/patched.so "back/$name"
             a="$(sha256sum back/patched.so | awk '{print $1}')"
             b="$(sha256sum "$target" | awk '{print $1}')"
-            [ "$a" = "$b" ] || { echo "::error::patch $name does not reproduce $V ($a != $b)"; exit 1; }
-            echo "ok  $name applies and reproduces $V exactly"
+            [ "$a" = "$b" ] || { echo "::error::patch $name does not reproduce $to ($a != $b)"; exit 1; }
+            echo "ok  $name applies and reproduces $to exactly"
             rm -rf "$olddir" back/patched.so
           done < /tmp/patches.txt
 
