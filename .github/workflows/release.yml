@@ -297,7 +297,12 @@ jobs:
           # it out at first launch. Assert it is really in there: without it a Windows
           # install can never apply an update, and nothing else in this pipeline would
           # notice — the whole mechanism would be absent while every check passed.
-          if ! grep -qa "SemaClipUpdater.exe" dist/SemaClip/SemaClip.dll; then
+          #
+          # Paths are relative to HERE, which is `dist/` (the `cd dist` above). Writing
+          # `dist/SemaClip/...` from inside dist failed the job with "No such file or
+          # directory" and blocked the whole release — the assertion was wrong, not the
+          # build.
+          if ! grep -qa "SemaClipUpdater.exe" SemaClip/SemaClip.dll; then
             echo "::error::the payload does not contain the bundled sidecar updater — Windows could never apply an update"
             exit 1
           fi
