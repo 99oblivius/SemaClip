@@ -1,20 +1,11 @@
 {
-  "version": "26.201",
-  "patches": {
-    "26.197": {
-      "name": "patch-26.197-to-26.200.bin",
-      "sha256": "baad63ce8f2be9421a7b550675cb03a79cf8dcb5984fc631a272f88cc19e83c0"
-    },
-    "26.200": {
-      "name": "patch-26.200-to-26.201.bin",
-      "sha256": "f08b74805b4184e0c4c853d74415178cea50a5d06de41ffa5d44a5dc25deea62"
-    }
-  },
+  "version": "26.202",
+  "patches": {},
   "artifacts": {
     "win-x64": {
-      "name": "SemaClip-26.200-win-x64-portable.zip",
-      "sha256": "8eb515646d3e222bbdc487448f2ad46377f5fd6cead2b098d970b3b07fb6b660",
-      "url": "https://github.com/99oblivius/SemaClip/releases/download/v26.200/SemaClip-26.200-win-x64-portable.zip"
+      "name": "SemaClip-26.202-win-x64-portable.zip",
+      "sha256": "e6d8591e1e3663694c31dbc0b47aeb52b3ba1618fa57dd78054d74656341b392",
+      "url": "https://github.com/99oblivius/SemaClip/releases/download/v26.202/SemaClip-26.202-win-x64-portable.zip"
     }
   }
 }
