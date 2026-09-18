@@ -10,7 +10,9 @@
   const jobsQuery = createQuery(() => ({
     queryKey: ['jobs'],
     queryFn: () => apiClient.listJobs(),
-    refetchInterval: 3000, // poll for updates
+    // Driven by `job_status` events (see the root layout); this is only a safety net for a
+    // dropped socket.
+    refetchInterval: 30000,
   }));
 
   const queueMutation = createMutation(() => ({

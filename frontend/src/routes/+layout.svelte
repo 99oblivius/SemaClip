@@ -36,18 +36,30 @@
    */
   $effect(() => {
     const qc = data.queryClient;
-    return wsStore.onEvent<Extract<WsEvent, { type: 'stream_changed' }>>((event) => {
-      if (event.type !== 'stream_changed') return;
-      // Narrow on the event's own stream so an event for another stream does not disturb
-      // this page's cache.
-      const id = event.streamId;
-      if (id) {
-        void qc.invalidateQueries({ queryKey: ['stream', id] });
-      } else {
-        void qc.invalidateQueries({ queryKey: ['stream'] });
+    return wsStore.onEvent<WsEvent>((event) => {
+      if (event.type === 'stream_changed') {
+        // Narrow on the event's own stream so an event for another stream does not disturb
+        // this page's cache.
+        const id = event.streamId;
+        if (id) {
+          void qc.invalidateQueries({ queryKey: ['stream', id] });
+        } else {
+          void qc.invalidateQueries({ queryKey: ['stream'] });
+        }
+        void qc.invalidateQueries({ queryKey: ['streams'] });
+        void qc.invalidateQueries({ queryKey: ['downloads'] });
+        return;
       }
-      void qc.invalidateQueries({ queryKey: ['streams'] });
-      void qc.invalidateQueries({ queryKey: ['downloads'] });
+      if (event.type === 'job_status' || event.type === 'stream_status') {
+        // The server already announces every job transition, so polling the job list every
+        // three seconds is redundant work: this makes the transition itself the trigger.
+        void qc.invalidateQueries({ queryKey: ['jobs'] });
+        if (event.type === 'stream_status') {
+          void qc.invalidateQueries({ queryKey: ['streams'] });
+          void qc.invalidateQueries({ queryKey: ['stream', event.streamId] });
+        }
+        return;
+      }
     });
   });
 

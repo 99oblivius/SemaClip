@@ -63,7 +63,11 @@
   const jobsQuery = createQuery(() => ({
     queryKey: ['jobs'],
     queryFn: () => apiClient.listJobs(),
-    refetchInterval: 3000,
+    // The layout invalidates this on every `job_status` event, so the transition itself is the
+    // trigger. This interval is a SAFETY NET for a dropped socket, not the mechanism: polling
+    // every 3s while the socket already announced the same changes was redundant work, and the
+    // owner has asked for this app not to lean on polling.
+    refetchInterval: 30000,
   }));
 
   const importUrlMutation = createMutation(() => ({
