@@ -45,6 +45,7 @@
  *   - an ENOENT is reported as a normal failed result, not a rejected promise
  */
 import { spawn } from "node:child_process";
+import { hideConsoleRelay } from "./hide-console.ts";
 
 export interface RunOptions {
   args?: string[];
@@ -474,7 +475,20 @@ export function spawnChild(cmd: string, opts: RunOptions = {}): ChildHandle {
   // On Windows a PIPED STDIN must not go through node:child_process: writing more than
   // ~1MB deadlocks it and blocks the event loop (measured — see the file header). Feed the
   // child with the runtime's own API instead; every other spawn keeps windowsHide.
+  //
+  // But Deno.Command cannot hide the child's console, which on Windows shows as a blank cmd
+  // window for the whole download. So when the relay exists, the child is spawned THROUGH it:
+  // the relay sets CREATE_NO_WINDOW on the real command and proxies stdio on goroutines, which
+  // gives both properties at once. Without the relay this degrades to the console being
+  // visible, never to a broken download.
   if (Deno.build.os === "windows" && opts.stdin === "piped") {
+    const relay = hideConsoleRelay();
+    if (relay) {
+      return spawnWithDenoCommand(relay, {
+        ...opts,
+        args: ["--", cmd, ...(opts.args ?? [])],
+      });
+    }
     return spawnWithDenoCommand(cmd, opts);
   }
 

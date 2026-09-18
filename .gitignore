@@ -64,3 +64,6 @@ server/node_modules/
 # Native binaries + models — fetched by scripts/fetch-native.sh (CI + dev)
 native/
 dist/
+
+# Build output staged beside the payload (contains the compiled relay + version.txt).
+server/appfiles/

@@ -92,6 +92,7 @@ if (platform === "win-x64") {
   );
   console.log(`version.txt: ${await readVersion()}`);
   await buildSidecar(stage);
+  await buildHideConsoleRelay(stage);
 }
 
 // The launch workaround must exist in the environment BEFORE the runtime starts,
@@ -190,6 +191,7 @@ if (platform === "win-x64") {
     `version=${await readVersion()}\nmanifest=${manifestUrl()}\n`,
   );
   await buildSidecar(appDir);
+  await buildHideConsoleRelay(appDir);
 
   // The PORTABLE bundle is meant to be a self-contained SemaClip directory the user can
   // update by hand, so it gets a launcher of its own. The MSI cannot (below), but this
@@ -269,6 +271,38 @@ async function buildSidecar(appDir: string): Promise<void> {
   }).spawn().status;
   if (r.code !== 0) throw new Error(`sidecar build failed (exit ${r.code})`);
   console.log(`sidecar: ${out}`);
+}
+
+/**
+ * Cross-compile the console-hiding relay that Windows spawns run through.
+ *
+ * Deno cannot spawn a Windows child with BOTH no console window and a writable stdin:
+ * `node:child_process` hides the console but deadlocks past ~1MB of stdin (the download
+ * freeze), while `Deno.Command` writes reliably but has no console-hiding option (the blank
+ * cmd window the owner sees during every download). `conhost.exe --headless` hides it but
+ * breaks stdio, so the relay is the only route that satisfies both: it sets
+ * CREATE_NO_WINDOW on the real child and proxies stdio on goroutines.
+ *
+ * `-H=windowsgui` is REQUIRED, not cosmetic: a console-subsystem relay is itself spawned
+ * with a console by Deno, which reopens the very window this exists to prevent. Measured:
+ * the console-subsystem build added a conhost, the GUI-subsystem build did not, and both
+ * proxied stdio identically.
+ */
+async function buildHideConsoleRelay(appDir: string): Promise<void> {
+  const src = join(REPO, "tools", "hidewin");
+  const out = join(appDir, "hidewin.exe");
+  const go = await new Deno.Command("go", { args: ["version"] }).output();
+  if (go.code !== 0) throw new Error("go toolchain not found — needed to build the console-hiding relay");
+  const r = await new Deno.Command("go", {
+    args: ["build", "-trimpath", "-ldflags", "-s -w -H=windowsgui", "-o", out, "."],
+    cwd: src,
+    env: { ...Deno.env.toObject(), GOOS: "windows", GOARCH: "amd64", CGO_ENABLED: "0" },
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  }).spawn().status;
+  if (r.code !== 0) throw new Error(`hidewin build failed (exit ${r.code})`);
+  console.log(`hidewin: ${out}`);
 }
 
 await Deno.remove(stage, { recursive: true }).catch(() => {});
