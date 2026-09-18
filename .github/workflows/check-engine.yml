@@ -9,10 +9,18 @@ on:
   pull_request:
 
 jobs:
+# Runner image: PINNED, not `ubuntu-latest`.
+#
+# `ubuntu-latest` resolves to 24.04 today (measured in this workflow's own run logs) and 26.04 is
+# only a PUBLIC PREVIEW, so `-latest` will move the OS under a release with no commit to review —
+# and this pipeline's version is commit-derived, so an unreviewed OS change lands in a release.
+# Pinning makes the migration a deliberate, testable step: bump this line, run the workflow, read
+# the log. `check.yml` floats its Deno version on purpose (see that file); the runner is pinned
+# for the opposite reason.
   detection:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.9.x
@@ -21,9 +29,9 @@ jobs:
         working-directory: detection
 
   engine-e2e:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.9.x

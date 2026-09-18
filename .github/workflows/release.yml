@@ -66,14 +66,22 @@ env:
   MANIFEST_BASE_URL: https://99oblivius.github.io/SemaClip
 
 jobs:
+# Runner image: PINNED, not `ubuntu-latest`.
+#
+# `ubuntu-latest` resolves to 24.04 today (measured in this workflow's own run logs) and 26.04 is
+# only a PUBLIC PREVIEW, so `-latest` will move the OS under a release with no commit to review —
+# and this pipeline's version is commit-derived, so an unreviewed OS change lands in a release.
+# Pinning makes the migration a deliberate, testable step: bump this line, run the workflow, read
+# the log. `check.yml` floats its Deno version on purpose (see that file); the runner is pinned
+# for the opposite reason.
   # ── version ────────────────────────────────────────────────────────────────
   version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.compute.outputs.version }}
       tag: ${{ steps.compute.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # version.sh counts commits this year; a shallow clone counts from the
           # clone point and silently produces a wrong (smaller) version.
@@ -119,7 +127,7 @@ jobs:
             "tag=${{ steps.compute.outputs.tag }}" \
             > dist/VERSION.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: version
           path: dist/VERSION.txt
@@ -128,7 +136,7 @@ jobs:
   # ── build ──────────────────────────────────────────────────────────────────
   build:
     needs: version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -144,7 +152,7 @@ jobs:
           - platform: linux-x64
           - platform: win-x64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -152,14 +160,14 @@ jobs:
         with:
           deno-version: ${{ env.DENO_VERSION }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
       - name: Cache the Deno toolchain (denort + webview backend)
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           # Every `deno desktop` run otherwise re-downloads libdenort-<target>.zip
           # from dl.deno.land and the laufey-webview backend — tens of MB per job
@@ -361,7 +369,7 @@ jobs:
             "platform=$P" \
             > "dist/build-meta-$P.txt"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: semaclip-${{ matrix.platform }}
           # Carries the runtime dylib as well as the installer: the patch job
@@ -392,12 +400,12 @@ jobs:
     # A fork's push must not create releases here (its token cannot anyway, but
     # failing the guard beats a confusing permissions error mid-job).
     if: github.repository_owner == '99oblivius' && github.event.inputs.skip_publish != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download the build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: semaclip-*
           path: dist
@@ -607,9 +615,9 @@ jobs:
     # 3.84GB for two wholly unrelated 560MB files — inside ubuntu-latest's ~7GB.
     # Still overridable with SEMACLIP_PATCH_RUNNER if a bigger runner is wanted.
     if: github.repository_owner == '99oblivius' && vars.SEMACLIP_ENABLE_PATCHES != 'false'
-    runs-on: ${{ vars.SEMACLIP_PATCH_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ vars.SEMACLIP_PATCH_RUNNER || 'ubuntu-24.04' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -834,9 +842,9 @@ jobs:
       needs.version.result == 'success' &&
       needs.publish.result == 'success' &&
       (needs.patch.result == 'success' || needs.patch.result == 'skipped' || needs.patch.result == 'cancelled')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download the published artifacts back from the release
         env:
