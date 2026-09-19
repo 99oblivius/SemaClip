@@ -54,7 +54,7 @@ import {
 } from "@/adapters/outbound/platform/window-lifecycle.ts";
 import type { ResizeEdge } from "@/adapters/outbound/platform/gtk-frame.ts";
 import { logFilePath, readLogTail } from "@/adapters/outbound/platform/log-file.ts";
-import { updateStatus } from "@/adapters/outbound/platform/auto-update.ts";
+import { retryUpdateCheck, updateStatus } from "@/adapters/outbound/platform/auto-update.ts";
 import { emitAppEvent, subscribeAppEvents, sseFrame } from "@/application/events.ts";
 import { fetchWithTimeout, MEDIA_TIMEOUT_MS } from "@/adapters/outbound/net/fetch-timeout.ts";
 
@@ -1006,6 +1006,15 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   // mechanism. A packaged build answers with its baked version; a dev run answers with
   // nulls and the UI shows the dev case rather than inventing a version.
   app.get("/api/update", (c) => c.json(updateStatus()));
+
+  // Re-run the update check on request. The automatic check is once-per-launch (the owner's policy),
+  // so without this a transient failure at open — or a download interrupted by closing the app —
+  // means no update until the next launch. A no-op while a check is already running, so pressing the
+  // button twice cannot start two 100MB downloads.
+  app.post("/api/update/check", (c) => {
+    const result = retryUpdateCheck();
+    return c.json(result, result.started ? 200 : 409);
+  });
 
   // ── Dev hook: release a staged-update event without a compiled release ────────
   //

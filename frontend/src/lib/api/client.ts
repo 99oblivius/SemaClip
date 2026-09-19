@@ -246,6 +246,14 @@ export interface UpdateStatus {
   phase: 'idle' | 'downloading' | 'ready';
   downloading: boolean;
   download: { version: string; received: number; total: number; fraction: number | null } | null;
+  /**
+   * The last thing that went wrong CHECKING FOR OR FETCHING an update, or null.
+   *
+   * Separate from `sidecarError`, which means "this install cannot update itself". A transient HTTP
+   * failure or a dropped download says nothing about that, and conflating them made the app report a
+   * permanent limitation for a passing network problem.
+   */
+  updateError: string | null;
   sidecarPath: string | null;
   sidecarError: string | null;
 }
@@ -265,6 +273,18 @@ export async function getUpdateStatus(): Promise<UpdateStatus> {
  */
 export async function restartApp(): Promise<{ restarting: boolean; error: string | null }> {
   const r = await fetch('/api/window/restart', { method: 'POST' });
+  return await r.json();
+}
+
+/**
+ * Ask the server to check for an update again.
+ *
+ * The automatic check runs once per launch, so this is the only way to recover from a failure — or
+ * from a download interrupted by closing the app — without restarting. A 409 means a check is
+ * already running, which is not an error worth showing.
+ */
+export async function retryUpdateCheck(): Promise<{ started: boolean; error: string | null }> {
+  const r = await fetch('/api/update/check', { method: 'POST' });
   return await r.json();
 }
 

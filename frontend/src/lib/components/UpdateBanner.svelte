@@ -23,7 +23,7 @@
    * miss a stage that already happened.
    */
   import Icon from '$lib/components/Icon.svelte';
-  import { apiClient, getUpdateStatus, restartApp } from '$lib/api/client';
+  import { apiClient, getUpdateStatus, restartApp, retryUpdateCheck } from '$lib/api/client';
   import { onMount } from 'svelte';
   import { browser } from '$app/environment';
 
@@ -55,6 +55,16 @@
   let activeJobs = $state(0);
   /** Set when a restart was deferred, so the copy can explain the wait rather than look stuck. */
   let waitingForJobs = $state(false);
+  /**
+   * Why the last check or download failed, when it did.
+   *
+   * A FAILURE NEEDS ITS OWN SURFACE. It used to be invisible: the server wrote it to a field meaning
+   * "this install cannot update itself" and nothing rendered that, so a transient HTTP 500 or a
+   * dropped download produced no banner, no message, and no update until the next launch. It is
+   * shown WITH a retry, because a failure here is usually temporary and the automatic check runs
+   * only once per launch.
+   */
+  let updateError = $state<string | null>(null);
 
   async function refreshActiveJobs() {
     try {
@@ -138,6 +148,10 @@
           // offering a restart that would install nothing.
           progress = s.download;
           canRestart = s.canApply;
+        } else if (s.updateError) {
+          // The check already failed before this webview connected. Without this the failure would
+          // only ever be visible in the server log.
+          updateError = s.updateError;
         }
       })
       .catch(() => {
@@ -165,6 +179,9 @@
           total: data.total ?? 0,
           fraction: data.fraction ?? null,
         };
+        // Bytes are arriving, so whatever failed before is over. Leaving the message up would tell
+        // the user their update is broken while they watch it downloading.
+        updateError = null;
         // A download in progress means the update is NOT ready: clear any earlier readiness so a
         // restart is never offered for a payload that is still arriving.
         readyToInstall = false;
@@ -181,6 +198,7 @@
         canRestart = data.canApplyByRestart;
         readyToInstall = true;
         progress = null;
+        updateError = null;
         // Native OS notification as well: the banner is inside the window, and the user
         // may be looking at something else. requireInteraction keeps it up rather than
         // letting it auto-expire unread.
@@ -222,7 +240,52 @@
       void Notification.requestPermission();
     }
   }
+
+  /** Ask the server to try again. A transient failure usually just works the second time. */
+  let retrying = $state(false);
+  async function retryNow() {
+    if (retrying) return;
+    retrying = true;
+    try {
+      const res = await retryUpdateCheck();
+      // A refusal means a check is already running, which is not an error: keep the message until
+      // the in-flight check reports its own outcome over the event stream.
+      if (res.started) updateError = null;
+    } catch (err) {
+      updateError = err instanceof Error ? err.message : 'Could not reach the update service';
+    } finally {
+      retrying = false;
+    }
+  }
 </script>
+
+{#if updateError && !progress && !staged}
+  <!-- A FAILED CHECK IS VISIBLE AND RETRYABLE. The automatic check runs once per launch, so a
+       transient failure would otherwise mean no update for the whole session with nothing on screen
+       explaining why. The retry is the point: most of these are temporary. -->
+  <div
+    class="flex items-center gap-3 border-b border-warning/40 bg-warning/10 px-3 py-2"
+    role="alert"
+  >
+    <Icon name="alert" size={14} class="shrink-0 text-warning" />
+    <div class="flex min-w-0 flex-1 flex-col">
+      <span class="font-mono text-xs text-ink">
+        Could not check for updates
+      </span>
+      <span class="font-mono text-[10px] text-ash-dim">
+        {updateError} SemaClip only checks when it opens, so try again here or restart later.
+      </span>
+    </div>
+    <button
+      class="shrink-0 rounded border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
+      onclick={retryNow}
+      disabled={retrying}
+      title="Check for updates again"
+    >
+      {retrying ? 'Trying…' : 'Try again'}
+    </button>
+  </div>
+{/if}
 
 {#if progress && dismissed !== `downloading-${progress.version}`}
   <!-- THE DOWNLOAD IS HAPPENING WHILE THE APP IS OPEN, which is the whole point: the user can keep

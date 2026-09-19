@@ -85,10 +85,20 @@ export interface UpdateStatus {
    * wrong, and this one has to say something different in each.
    */
   phase: "idle" | "downloading" | "ready";
-  /** Linux: the AppImage being updated, when running from one. */
-  appImagePath: string | null;
-  /** Why the AppImage update could not be done, when it could not. */
-  appImageError: string | null;
+  /**
+   * The LAST thing that went wrong while checking for or fetching an update, or null.
+   *
+   * ── WHY THIS MUST NOT REUSE sidecarError ────────────────────────────────────────────────────
+   * It used to. `checkWindowsUpdate` writes its errors into `sidecarError`, which means "this
+   * install cannot update itself" — so a transient HTTP 500, a dropped connection mid-download or a
+   * sha256 mismatch made the app report a PERMANENT limitation. Those are unrelated facts: the
+   * updater can be perfectly placed and the check still fail, and only one of them is worth telling
+   * the user about and worth retrying.
+   *
+   * Cleared when a check succeeds, so the banner cannot keep showing a stale failure after a retry
+   * worked.
+   */
+  updateError: string | null;
   /**
    * Windows: the updater that applies the downloaded payload. Null elsewhere, and null here when
    * extraction failed (then `sidecarError` says why).
@@ -120,8 +130,7 @@ const status: UpdateStatus = {
   downloading: false,
   download: null,
   phase: "idle",
-  appImagePath: appImagePath(),
-  appImageError: null,
+  updateError: null,
   sidecarPath: null,
   sidecarError: null,
   stagedPath: null,
@@ -130,6 +139,143 @@ const status: UpdateStatus = {
 
 export function updateStatus(): UpdateStatus {
   return { ...status };
+}
+
+/** What a check or download reports back. Both platform paths already return this shape. */
+interface CheckOutcome {
+  error?: string | undefined;
+  reason?: string | undefined;
+  available?: boolean;
+  staged?: boolean;
+}
+
+/** In-flight guard, so a retry cannot stack a second download on top of the first. */
+let checking = false;
+
+/**
+ * How many times a TRANSIENT failure is retried before giving up, and the base backoff.
+ *
+ * Small and bounded on purpose: the payload is ~100MB, so a download retry is expensive, and the
+ * check runs at open where a long silent stall is worse than a clear failure. 2 retries at 2s then
+ * 4s costs at most ~6s of background work and is invisible while the app is usable.
+ */
+const CHECK_RETRIES = 2;
+const DEFAULT_RETRY_BASE_MS = 2000;
+
+/**
+ * The backoff base, overridable ONLY so a test can run the retry policy instantly.
+ *
+ * Without this the retry tests spend their time waiting (2s + 4s per case, ~20s for this file), and a
+ * slow suite gets skipped. Same seam the rest of this module already uses for tests
+ * (`SEMACLIP_UPDATE_URL`, `SEMACLIP_DEV_HOOKS`, `SEMACLIP_DATA`); it cannot change a real install,
+ * because nothing sets it outside a test process.
+ */
+function retryBaseMs(): number {
+  const raw = Deno.env.get("SEMACLIP_UPDATE_RETRY_MS");
+  if (raw === undefined) return DEFAULT_RETRY_BASE_MS;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_RETRY_BASE_MS;
+}
+
+/**
+ * Run one update check, recording what happened and retrying a transient failure.
+ *
+ * ── WHY ONE PLACE DOES THIS ──────────────────────────────────────────────────────────────────
+ * Three callers need identical behaviour: the Windows check, the Linux check, and the user's retry.
+ * Doing it in each is how the retry ends up with different semantics from the automatic path — the
+ * same trap the banner's restart logic avoids by having one decision function.
+ *
+ * ── WHY RETRY AT ALL ────────────────────────────────────────────────────────────────────────
+ * The check runs ONCE at open (the owner's policy), so a single transient failure — an HTTP 500 from
+ * the release host, a connection dropped partway through a 100MB fetch — would otherwise mean no
+ * update for the whole session. The retries are the ONLY chance the automatic path gets, which is
+ * exactly why they are bounded and quiet: a permanent failure (no artifact for this platform) is not
+ * retried at all.
+ *
+ * EXPORTED so the policy can be asserted against BEHAVIOUR — how many attempts a given failure gets,
+ * and that a success clears the error — rather than against the source text, which cannot distinguish
+ * a working predicate from one that is present but disabled.
+ */
+export async function runUpdateCheck(run: () => Promise<CheckOutcome>): Promise<void> {
+  if (checking) return;
+  checking = true;
+  const attempts = 1 + CHECK_RETRIES;
+  try {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      let res: CheckOutcome;
+      try {
+        res = await run();
+      } catch (err) {
+        res = { error: err instanceof Error ? err.message : String(err) };
+      }
+
+      if (!res.error) {
+        // SUCCESS CLEARS THE ERROR. Without this the banner would keep showing a failure that a
+        // retry already fixed — a stale error is worse than none, because it is wrong.
+        status.updateError = null;
+        if (res.reason) console.log(`Updates: ${res.reason}`);
+        return;
+      }
+
+      // A permanent condition is not worth retrying: this build has nothing to install from, and
+      // retrying it would be noise. The message still reaches the user.
+      if (isPermanent(res.error)) {
+        status.updateError = res.error;
+        console.warn(`Updates: ${res.error}`);
+        return;
+      }
+
+      if (attempt < attempts) {
+        const wait = retryBaseMs() * attempt;
+        console.warn(`Updates: ${res.error} — retrying in ${wait}ms (attempt ${attempt}/${attempts})`);
+        status.updateError = res.error;
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
+      // Out of attempts: report what actually failed, not that the install cannot update.
+      status.updateError = res.error;
+      console.warn(`Updates: ${res.error}`);
+    }
+  } finally {
+    checking = false;
+  }
+}
+
+/**
+ * Whether an error will not be fixed by trying again.
+ *
+ * Only the two cases that are properties of THIS BUILD rather than of the network: no version baked
+ * in (a dev run) and no artifact published for this platform. Everything else — a 5xx, a dropped
+ * connection, a hash mismatch from a truncated transfer — can differ on the next attempt.
+ *
+ * Exported so it can be called with real strings instead of searched for in the source.
+ */
+export function isPermanent(error: string): boolean {
+  return error.includes("no win-x64 artifact") ||
+    error.includes("no linux-x64 artifact") ||
+    error.includes("manifest has no version") ||
+    error.includes("no version baked in");
+}
+
+/**
+ * Re-run the update check on request.
+ *
+ * Exposed because the automatic check is once-per-launch: without this, a failure at open (or a
+ * download the user cancelled by closing the app too early) means no update until the next launch.
+ * Shares `runUpdateCheck`, so a retry behaves exactly like the automatic path.
+ */
+export function retryUpdateCheck(): { started: boolean; error: string | null } {
+  if (checking) return { started: false, error: "a check is already running" };
+  if (!status.current) return { started: false, error: "no version baked in (dev run)" };
+  const manifestUrl = Deno.env.get("SEMACLIP_UPDATE_URL") ?? DEFAULT_MANIFEST_URL;
+  if (Deno.build.os === "windows") {
+    void runUpdateCheck(() => checkWindowsUpdate(manifestUrl));
+  } else if (Deno.build.os === "linux") {
+    void runUpdateCheck(() => checkAndStageAppImage(manifestUrl));
+  } else {
+    return { started: false, error: "this platform updates through the runtime's own updater" };
+  }
+  return { started: true, error: null };
 }
 
 
@@ -464,17 +610,12 @@ export async function startAutoUpdate(baseUrl?: string): Promise<void> {
     // as long as the download takes, so the window would not appear until it finished — the exact
     // opposite of downloading while the app is usable. The download reports progress over the event
     // stream, and a failure arrives as a status error rather than as a stalled boot.
+    // NOT AWAITED and not routed through the generic path below, so a failure here is a FAILED
+    // CHECK — it lands in `updateError`, never in `sidecarError`. A reachable manifest that answers
+    // 500, or a connection that drops mid-download, says nothing about whether this install can
+    // apply an update, and reporting it as a limitation would be a lie about the install.
     const manifestUrl = baseUrl ?? Deno.env.get("SEMACLIP_UPDATE_URL") ?? DEFAULT_MANIFEST_URL;
-    checkWindowsUpdate(manifestUrl).then((res) => {
-      if (res.error) {
-        status.sidecarError = res.error;
-        console.warn(`Updates: ${res.error}`);
-      } else if (!res.available && res.reason) {
-        console.log(`Updates: ${res.reason}`);
-      }
-    }).catch((err) => {
-      console.warn(`Updates: check failed: ${err instanceof Error ? err.message : err}`);
-    });
+    void runUpdateCheck(() => checkWindowsUpdate(manifestUrl));
     return;
   }
   // LINUX: the runtime's own updater CANNOT work from an AppImage, so this does the check and the
@@ -483,13 +624,15 @@ export async function startAutoUpdate(baseUrl?: string): Promise<void> {
     // Same override the runtime's own call honours, resolved here because the Linux path does not
     // go through that call at all.
     const manifestUrl = baseUrl ?? Deno.env.get("SEMACLIP_UPDATE_URL") ?? DEFAULT_MANIFEST_URL;
-    const res = await checkAndStageAppImage(manifestUrl);
-    if (res.error) {
-      status.appImageError = res.error;
-      console.warn(`Updates: ${res.error}`);
-    } else if (!res.staged && res.reason) {
-      console.log(`Updates: ${res.reason}`);
-    }
+    // NOT AWAITED. This call DOWNLOADS the whole AppImage (~100MB), and awaiting it here blocks the
+    // rest of main.ts — which is where the window is created. Measured: `await startAutoUpdate()`
+    // is the LAST line of main.ts, so the previous code did not "download while the app is open" at
+    // all on Linux; it downloaded BEFORE the app existed and the window only appeared afterwards.
+    // That is the opposite of the requested behaviour, and on a slow connection it looks like a
+    // hang. Fire-and-forget, exactly as the Windows path does.
+    void runUpdateCheck(async () => {
+      return await checkAndStageAppImage(manifestUrl);
+    });
     // The runtime's own updater is deliberately NOT started here: it stages beside the dylib, which
     // is a read-only mount inside an AppImage, so every launch would log a failure and change
     // nothing. Doing the check ourselves is what makes "check at open" true on Linux.
