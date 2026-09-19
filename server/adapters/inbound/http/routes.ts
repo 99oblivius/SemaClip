@@ -34,7 +34,7 @@ import {
   pickProxyQuality,
   pickBestQuality,
 } from "@/adapters/outbound/vod/hls.ts";
-import { clampToServable, parseRangeHeader } from "@/adapters/inbound/http/range.ts";
+import { clampToServable, limitBytes, parseRangeHeader } from "@/adapters/inbound/http/range.ts";
 import { projectDownloadView } from "@/application/view/project-download-view.ts";
 import { fragmentBoundaryAt, parseIndex } from "@/adapters/outbound/vod/fmp4.ts";
 import { run, spawnChild } from "@/adapters/outbound/process/spawn.ts"
@@ -1327,17 +1327,44 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
       if (range) {
         const end = clampToServable(range.end, servable, stat.size);
         const start = Math.min(range.start, Math.max(0, end));
+        const len = end - start + 1;
         const file = await Deno.open(mediaPath, { read: true });
         try {
           await file.seek(start, Deno.SeekMode.Start);
-          const buf = new Uint8Array(end - start + 1);
-          await file.read(buf);
+          // STREAM THE RANGE — do NOT buffer it.
+          //
+          // This used to allocate `new Uint8Array(len)` and read it all before responding, so the
+          // first byte arrived only after the ENTIRE range was in memory. Measured against a real
+          // 1.32GB file: `Range: bytes=0-` took 1806ms to send any header at all, then transferred
+          // 1.32GB; the same read streamed takes ~3ms to the first byte. A browser's seek (and its
+          // opening request) is often `bytes=0-`, so the stall scaled with file size — larger
+          // resolutions appearing to load slower, with scrubbing instant once loaded, because by
+          // then the ranges are small.
+          //
+          // `file.readable` cannot be sliced directly, so the window is served through a
+          // TransformStream that forwards at most `len` bytes and then closes the file. Peak
+          // memory is one chunk rather than the whole range.
           c.header("Content-Range", `bytes ${start}-${end}/${servable}`);
           c.header("Accept-Ranges", "bytes");
-          c.header("Content-Length", String(end - start + 1));
-          return c.body(buf, 206);
-        } finally {
-          file.close();
+          c.header("Content-Length", String(len));
+          // Stream the window; see limitBytes for why buffering was wrong.
+          return c.body(
+            limitBytes(file.readable, len, () => {
+              try {
+                file.close();
+              } catch {
+                // Already closed.
+              }
+            }),
+            206,
+          );
+        } catch (err) {
+          try {
+            file.close();
+          } catch {
+            // Already closed.
+          }
+          throw err;
         }
       }
       const file = await Deno.open(mediaPath, { read: true });

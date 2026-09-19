@@ -34,3 +34,22 @@
 - **The minimum size is enforced on resize, not requested.** The runtime exposes no min-size option, so the floor is applied by correcting an undersized resize. The default size (1260x890) IS passed at adoption, because size does apply there — measured: the window was 800x600, the runtime's own default.
 - **The chrome bar is the app's own, and only when the app owns it.** Minimize/maximize/close are drawn as a right-aligned cluster in Windows order, gated on `canMinimize`/`canMaximize` derived from the measured frame. A decorated window keeps the OS buttons and the bar adds none, so one window never shows two sets. The actions go through user32 because the window class exposes neither.
 - **A growing media extent is read from the file, not from the downloader.** `*FrontierSec` counts chunks written to ffmpeg's stdin and does not match what was muxed; ffprobe on the growing fragmented MP4 does, and is what "where the mux reaches" means.
+
+- **Updates are checked once, at app open, and never elsewhere** (owner policy, 2026-09-19). No
+  `interval` is passed to `Deno.autoUpdate`, so there is exactly one check ~1s after boot
+  ("A single check runs ~1s after the call; pass `interval` to keep polling" — the runtime's own type
+  declaration). The Settings → Updates section was REMOVED; the version now sits in the header where
+  the "local" badge was, because the badge said nothing actionable and the version is what is needed
+  when reporting a problem. Pinned by a test that fails if an interval is reintroduced.
+- **The `/api/video` range path streams the window; it does not buffer it.** Measured against a real
+  1.32GB VOD: buffering the whole requested range delayed the first byte by 1806ms and held the entire
+  range in memory; streaming it reached the first byte in 3ms. This was the owner-reported "preview
+  takes many seconds, worse at larger resolutions" — a browser's opening request and each seek is
+  typically `bytes=0-`, so the cost scaled with file size. Six ranges, including both chunk boundaries
+  and EOF, were verified byte-exact after the change.
+- **The `.AppImage` cannot self-update, and our code cannot fix it.** The runtime resolves the dylib
+  with `dladdr` (the loaded `.so`'s own path) and stages updates as `<dylib>.update` beside it, which
+  inside an AppImage is the read-only squashfs mount — `EROFS` (os error 30), measured on a real
+  read-only mount, and documented by Deno: auto-update "does not work for read-only or system-owned
+  installs — an AppImage mounted read-only". There is no env var or relocation hook. Windows is
+  unaffected. The `.AppImage` is a fresh-download artifact until upstream ships a relocatable dylib.

@@ -399,8 +399,17 @@
       <a href="/" class="relative z-10 flex items-baseline gap-2" aria-label="SemaClip home">
         <span class="font-display text-base font-bold tracking-tight">Sema<span class="text-accent">Clip</span></span>
       </a>
-      <span class="relative z-10 flex items-center gap-1 rounded border border-border px-1.5 py-0.5 font-mono text-[10px] text-ash-dim" title="All processing happens on this machine">
-        <Icon name="cpu" size={10} /> local
+      <!-- The version, where the "local" badge used to be. The badge said nothing a user could
+           act on; the version identifies the build, which is what is actually needed when
+           reporting a problem. `__APP_VERSION__` is compiled in from frontend/package.json by
+           vite, and CI writes that file from version.sh BEFORE the frontend build — if this ever
+           shows an old number again, that ordering has regressed (it did once: every shipped
+           binary carried 26.148 in the UI while its payload carried the real version). -->
+      <span
+        class="relative z-10 flex items-center gap-1 rounded border border-border px-1.5 py-0.5 font-mono text-[10px] text-ash-dim"
+        title="Build {__APP_VERSION__}. All processing happens on this machine."
+      >
+        v{__APP_VERSION__}
       </span>
       <div class="flex-1"></div>
       <!-- Pre-alpha notice: dead-centre of the bar so it is unmissable on every

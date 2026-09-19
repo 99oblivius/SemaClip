@@ -69,7 +69,14 @@ Deno.test("a packaged build with NO explicit url still starts the updater", asyn
         false,
         "no url should be passed when the build already carries one",
       );
-      assertEquals(first.interval, 6 * 60 * 60 * 1000);
+      // NO interval. `interval` is what makes the runtime keep polling; leaving it out is what
+      // limits updates to the single startup check the owner asked for. Pinned here because adding
+      // it back looks harmless and would silently reintroduce background polling.
+      assertEquals(
+        "interval" in first,
+        false,
+        "passing an interval starts polling; updates must be checked only when the app opens",
+      );
     } finally {
       if (prev !== undefined) Deno.env.set("SEMACLIP_UPDATE_URL", prev);
     }

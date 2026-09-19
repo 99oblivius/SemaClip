@@ -177,6 +177,30 @@ jobs:
           restore-keys: |
             deno-${{ env.DENO_VERSION }}-${{ matrix.platform }}-
 
+      - name: Re-derive the version and cross-check it
+        id: ver
+        run: |
+          set -euo pipefail
+          # Same GITHUB_RUN_NUMBER as the version job, so this must agree. If it
+          # does not, the version baked into the binary differs from the one about
+          # to be tagged and published — the failure the updater cannot recover
+          # from, because it compares the two.
+          #
+          # THIS RUNS BEFORE THE FRONTEND BUILD. It used to run after, and the cost
+          # was a stale version in every shipped binary: `__APP_VERSION__` is
+          # compiled in by vite from frontend/package.json, which version.sh is what
+          # writes — so building first baked the COMMITTED `26.148` into the UI while
+          # server/deno.json got the real number afterwards. Measured in the released
+          # 26.227 payload: the embedded frontend carried `SemaClip 26.148` while the
+          # payload carried `26.227`. That is the "really old version" in Settings.
+          out="$(./scripts/version.sh)"
+          version="$(printf '%s\n' "$out" | sed -n 's/^version=//p')"
+          if [ "$version" != "${{ needs.version.outputs.version }}" ]; then
+            echo "::error::build computed '$version', version job computed '${{ needs.version.outputs.version }}'"
+            exit 1
+          fi
+          echo "baked version: $version"
+
       - name: Frontend build
         run: |
           set -euo pipefail
@@ -192,21 +216,6 @@ jobs:
           # succeeds and ships broken.
           SEMACLIP_NATIVE_PLATFORM: ${{ matrix.platform }}
         run: ./scripts/fetch-native.sh
-
-      - name: Re-derive the version and cross-check it
-        run: |
-          set -euo pipefail
-          # Same GITHUB_RUN_NUMBER as the version job, so this must agree. If it
-          # does not, the version baked into the binary differs from the one about
-          # to be tagged and published — the failure the updater cannot recover
-          # from, because it compares the two.
-          out="$(./scripts/version.sh)"
-          version="$(printf '%s\n' "$out" | sed -n 's/^version=//p')"
-          if [ "$version" != "${{ needs.version.outputs.version }}" ]; then
-            echo "::error::build computed '$version', version job computed '${{ needs.version.outputs.version }}'"
-            exit 1
-          fi
-          echo "baked version: $version"
 
       - name: Install rcedit + wine (Windows icon on the launcher)
         if: matrix.platform == 'win-x64'

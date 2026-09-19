@@ -6,11 +6,13 @@
  * without throwing. That is deliberate and useful: the same entrypoint serves
  * dev and release, and nothing here needs guarding for development.
  *
- * WHAT IT DOES: polls <baseUrl>/latest.json, downloads a bsdiff patch for the
- * currently-installed version, verifies it against the manifest's mandatory
- * sha256, applies it to the runtime dylib and stages the result. The RUNNING
- * process is untouched; the launcher swaps the update in on the next start, and
- * rolls back automatically if the new version fails to launch.
+ * WHAT IT DOES: ONCE, at startup — about a second after this call — fetches
+ * <baseUrl>/latest.json, downloads a bsdiff patch for the currently-installed version,
+ * verifies it against the manifest's mandatory sha256, applies it to the runtime dylib
+ * and stages the result. It does NOT poll: no `interval` is passed, so there is exactly
+ * one check per launch, which is the requested policy. The RUNNING process is untouched;
+ * the launcher swaps the update in on the next start, and rolls back automatically if
+ * the new version fails to launch.
  *
  * WHAT IT DOES NOT DO BY ITSELF: apply on Windows. Deno's launcher cannot swap a
  * loaded DLL, so there the runtime only stages the patch and the BUNDLED SIDECAR
@@ -22,8 +24,17 @@
 import { ensureSidecar } from "@/adapters/outbound/platform/sidecar.ts";
 import { emitAppEvent } from "@/application/events.ts";
 
-/** One update check per 6h: often enough to keep up with continuous development. */
-const INTERVAL_MS = 6 * 60 * 60 * 1000;
+/**
+ * NO POLLING INTERVAL, deliberately. `interval` is what keeps the runtime checking; omitting it
+ * leaves exactly one check, run about a second after this call. The owner asked for updates to be
+ * checked when the app opens and never elsewhere, and that is precisely this behaviour — the
+ * runtime's own type declaration says "A single check runs ~1s after the call; pass `interval` to
+ * keep polling."
+ *
+ * This used to poll every 6 hours, which also meant a long-running session could stage an update
+ * while the user was in the middle of something. One check per launch is both the requested policy
+ * and the less surprising one.
+ */
 
 /**
  * Base64 Ed25519 public key for signed manifests. Empty = unsigned manifests
@@ -152,7 +163,8 @@ export async function startAutoUpdate(baseUrl?: string): Promise<void> {
     // `url` is REQUIRED in the type but optional to the runtime when the build
     // carries a baseUrl, so only pass it when we are genuinely overriding.
     ...(override ? { url: override } : {}),
-    interval: INTERVAL_MS,
+    // NO `interval`. Omitting it is what limits this to the single startup check; adding it back
+    // starts polling and violates the "check on open only" policy.
     ...(publicKey ? { publicKey } : {}),
     onUpdateReady(version) {
       status.pendingVersion = version;
