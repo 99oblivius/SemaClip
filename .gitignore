@@ -67,3 +67,8 @@ dist/
 
 # Build output staged beside the payload (contains the compiled relay + version.txt).
 server/appfiles/
+
+# Host build artifact of the updater. The Windows one that ships is embedded from
+# server/appfiles/ into the payload, not committed from here: a 10MB unstripped ELF in the
+# repo is neither shipped nor referenced by anything.
+tools/updater/updater

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -55,9 +56,20 @@ func (u *Updater) LaunchAndWait() error {
 	return nil
 }
 
-// isRunning reports whether a launcher in dir is still alive. Windows refuses to
-// replace a DLL that a process has loaded, so a swap while the app runs would
-// fail partway — this is a guard, not a nicety.
+// pidAlive reports whether a pid is still running.
+//
+// `tasklist` rather than a syscall: the goal for this tool is to cross-compile from any host with
+// ZERO module downloads and no cgo, and the standard library exposes no wait-by-pid. A missing or
+// refused tasklist answers "not alive", which errs toward attempting the update — Apply's isRunning
+// guard is the real protection against a locked payload.
+func pidAlive(pid int) bool {
+	out, err := exec.Command("tasklist", "/FI", "PID eq "+strconv.Itoa(pid), "/NH", "/FO", "CSV").Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), strconv.Itoa(pid))
+}
+
 func isRunning(dir string) (bool, error) {
 	exe, err := findLauncher(dir)
 	if err != nil {

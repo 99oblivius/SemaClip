@@ -21,7 +21,7 @@
  * status is surfaced in-app rather than hidden, so a Windows user is not shown
  * "update ready" forever with nothing happening.
  */
-import { ensureSidecar } from "@/adapters/outbound/platform/sidecar.ts";
+import { ensureSidecar, appDirPath } from "@/adapters/outbound/platform/sidecar.ts";
 import { bakedVersion } from "@/adapters/outbound/platform/app-version.ts";
 import {
   appImagePath,
@@ -85,8 +85,11 @@ const status: UpdateStatus = {
   current: baked?.version ?? null,
   pendingVersion: null,
   lastRollback: null,
-  // Linux AppImages apply their own update on exit; Windows cannot (the sidecar does it).
-  canApply: Deno.build.os !== "windows",
+  // BOTH platforms apply their own update on restart now. Linux replaces the AppImage file from a
+  // helper; Windows starts the sidecar and quits, and the sidecar swaps the payload while the app is
+  // closed. The previous `Deno.build.os !== "windows"` was true when Windows could only be told to
+  // run a .cmd by hand, which is the manual step the sidecar exists to remove.
+  canApply: true,
   appImagePath: appImagePath(),
   appImageError: null,
   sidecarPath: null,
@@ -170,8 +173,7 @@ export function applyAppImageUpdate(): { restarting: boolean; error: string | nu
 }
 
 /**
- * Windows: check the manifest OURSELVES and, when a newer version exists, tell the user to run the
- * sidecar's launcher.
+ * Windows: check the manifest OURSELVES and, when a newer version exists, offer a RESTART.
  *
  * ── WHY THE RUNTIME'S OWN CHECK CANNOT DO THIS ──────────────────────────────────────────────
  * `Deno.autoUpdate()` compares `manifest.version` against `Deno.desktopVersion`... which is NULL on
@@ -186,15 +188,15 @@ export function applyAppImageUpdate(): { restarting: boolean; error: string | nu
  *     Updates: current 26.232, polling the baseUrl baked into this build
  *     -> no patch staged, no banner. The runtime's check is inert here.
  *
- * So the same reconciliation Linux does is used, minus the download: Windows does NOT need the
- * patch, because the sidecar installs the published payload itself. Verified on that same build:
+ * ── WHY THIS IS A RESTART AND NOT "RUN THE LAUNCHER" ────────────────────────────────────────
+ * The sidecar exists so the user does NOT have to do the swap by hand, and the first version of this
+ * told them to run a .cmd from a hidden per-user directory — which is exactly the manual step the
+ * sidecar was built to remove. It now does what every other desktop app does: the app relaunches
+ * itself through the sidecar, and the sidecar waits for this process to exit, applies the update in
+ * place and starts the new version. `canApplyByRestart: true` is therefore the truth on Windows now.
  *
- *     SemaClipUpdater.exe -check -app C:\wintest232
- *     no version recorded here; installing the published 26.233
- *     installed= latest=26.233 update=true
- *
- * NOTHING IS STAGED HERE. `pendingVersion` means "an update is ready and the user must act", and on
- * Windows the action is running the launcher — so that is what the UI is told.
+ * The version comparison is numeric, not string equality: the scheme advances by commit count, so
+ * "26.9" vs "26.10" must order numerically or a release would look OLDER than the one before it.
  */
 async function checkWindowsUpdate(
   manifestUrl: string,
@@ -218,17 +220,11 @@ async function checkWindowsUpdate(
   const latest = manifest.version;
   if (!latest) return { available: false, error: "manifest has no version" };
   if (latest === status.current) return { available: false, reason: `up to date (${status.current})` };
-
-  // Older published version than what is installed: a rolled-back release, or a local build ahead
-  // of the manifest. Never offer to "update" backwards.
   if (compareVersions(latest, status.current) <= 0) {
-    return {
-      available: false,
-      reason: `published ${latest} is not newer than ${status.current}`,
-    };
+    return { available: false, reason: `published ${latest} is not newer than ${status.current}` };
   }
 
-  if (!status.sidecarPath || !status.sidecarLauncherPath) {
+  if (!status.sidecarPath) {
     return {
       available: false,
       error:
@@ -238,14 +234,53 @@ async function checkWindowsUpdate(
   }
 
   status.pendingVersion = latest;
-  console.log(
-    `Updates: ${latest} available (running ${status.current}) — apply by running ` +
-      `${status.sidecarLauncherPath}`,
-  );
-  // `canApplyByRestart: false` is the truth on Windows: there is no in-app restart that installs
-  // it. The banner renders the launcher instruction instead of a Restart button.
-  emitAppEvent({ type: "update-staged", version: latest, canApplyByRestart: false });
+  console.log(`Updates: ${latest} available (running ${status.current}) — restart to install`);
+  // `canApplyByRestart: true` — the app can now start the sidecar itself and quit, which is what
+  // makes the banner's Restart button honest instead of a pointer to a .cmd file.
+  emitAppEvent({ type: "update-staged", version: latest, canApplyByRestart: true });
   return { available: true };
+}
+
+/**
+ * Apply a staged Windows update by handing off to the sidecar, then quitting.
+ *
+ * The sidecar waits for THIS pid to exit (it cannot swap a loaded DLL), replaces the payload in
+ * place and relaunches. So the sequence is: start it detached, then quit — the same shape as the
+ * Linux AppImage helper, for the same reason.
+ *
+ * `-wait-pid` is passed explicitly rather than letting the sidecar use its parent, because the
+ * sidecar is started detached and its parent would not be this process.
+ */
+export function applyWindowsUpdate(): { restarting: boolean; error: string | null } {
+  if (!status.pendingVersion) return { restarting: false, error: "no update is staged" };
+  const sidecar = status.sidecarPath;
+  if (!sidecar) {
+    return { restarting: false, error: "the updater is not available, so the update cannot be applied" };
+  }
+  try {
+    // Detached: the helper must outlive this process, because this process is what it waits for.
+    const cmd = new Deno.Command(sidecar, {
+      args: [
+        "-relaunch",
+        "-wait-pid",
+        String(Deno.pid),
+        "-app",
+        appDirPath(),
+      ],
+      stdin: "null",
+      stdout: "null",
+      stderr: "null",
+    });
+    cmd.spawn().unref();
+  } catch (err) {
+    return {
+      restarting: false,
+      error: `could not start the updater: ${err instanceof Error ? err.message : err}`,
+    };
+  }
+  // Quit so the sidecar can take the payload. Deferred slightly so this response is flushed first.
+  setTimeout(() => Deno.exit(0), 250);
+  return { restarting: true, error: null };
 }
 
 /**

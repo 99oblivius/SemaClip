@@ -120,8 +120,8 @@
         {#if canRestart}
           Updates apply on launch, so this restarts SemaClip to install it.
         {:else}
-          Windows cannot replace a running program, so run the update launcher to install it:
-          <span class="text-ash">{launcherPath ?? 'Launch SemaClip (updates).cmd in the app folder'}</span>
+          This build cannot restart itself to install the update. Re-download SemaClip
+          when convenient — the update is already available.
         {/if}
       </span>
     </div>

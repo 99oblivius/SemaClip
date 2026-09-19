@@ -52,7 +52,7 @@
  * so development keeps working: under `deno run` there is no window to manage.
  */
 
-import { applyAppImageUpdate, updateStatus } from "@/adapters/outbound/platform/auto-update.ts";
+import { applyAppImageUpdate, applyWindowsUpdate, updateStatus } from "@/adapters/outbound/platform/auto-update.ts";
 import {
   beginDrag as winBeginDrag,
   continueDrag as winContinueDrag,
@@ -616,18 +616,25 @@ export async function restartApp(): Promise<{ restarting: boolean; error: string
       // Fall through to a plain restart so a failed swap still restarts the app the user has.
     }
 
+    // WINDOWS WITH A STAGED UPDATE: the app hands off to the sidecar and quits. This is the same
+    // shape as the Linux branch above and for the same reason — a running image cannot be replaced,
+    // so a helper must outlive us. Before this, Windows restarted through a `cmd /c start` of the
+    // LAUNCHER, which is a user-facing file the app should not need to name at all.
+    if (Deno.build.os === "windows" && updateStatus().pendingVersion) {
+      const res = applyWindowsUpdate();
+      if (res.restarting) return res;
+      // Fall through to a plain restart so a failed hand-off still restarts the app the user has.
+    }
+
     const exe = Deno.execPath();
     const dir = exe.includes("/") ? exe.slice(0, exe.lastIndexOf("/"))
       : exe.includes("\\") ? exe.slice(0, exe.lastIndexOf("\\"))
       : ".";
 
     if (Deno.build.os === "windows") {
-      // Prefer the sidecar: it applies any staged update, then launches the app.
-      const sidecar = `${dir}\\SemaClipUpdater.exe`;
-      const target = await Deno.stat(sidecar).then(() => true).catch(() => false)
-        ? `${dir}\\Launch SemaClip (updates).cmd`
-        : exe;
-      new Deno.Command("cmd", { args: ["/c", "start", "", target], cwd: dir }).spawn();
+      // No staged update (or the hand-off failed): relaunch the app itself. The sidecar still runs
+      // at startup and applies anything pending, so this is a plain restart, not a lost update.
+      new Deno.Command("cmd", { args: ["/c", "start", "", exe], cwd: dir }).spawn();
     } else {
       // `setsid`-style detach: the child must not die with this process.
       new Deno.Command("sh", {

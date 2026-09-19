@@ -20,6 +20,45 @@ import (
 // different path, which is why the URL is also read from version.txt.
 const DefaultManifestURL = "https://99oblivius.github.io/SemaClip/latest.json"
 
+// stateFile is a PER-BUNDLE record of the version the updater applied to THAT bundle.
+//
+// ── WHY IT IS NOT PER-USER ANY MORE ─────────────────────────────────────────────────────────
+// This was `%LOCALAPPDATA%\SemaClip\state.txt` — one file per user, shared by every copy of the app
+// on the machine. That is wrong, and the owner hit it exactly:
+//
+//	updated 26.234 -> 26.235, then re-extracted the 26.234 zip;
+//	the fresh 26.234 copy reported "up to date" while its files were 26.234.
+//
+// Installed() read the per-user file, which still said 26.235 — a claim about a DIFFERENT directory.
+// The recorded version was never bound to the bundle it described, so any second copy (a portable
+// unzip, a re-extracted archive, a Program Files install beside a portable one) inherited another
+// install's version and either refused a real update or re-applied one forever.
+//
+// It is written INSIDE the bundle, beside the payload it describes. That is the only place a version
+// can be authoritative for a specific set of files, and it keeps the two properties the previous
+// design was reaching for:
+//   - the archive stays version-idempotent: the file is not SHIPPED, it is written on first update;
+//   - a read-only install directory (Program Files) degrades to "unknown", and unknown already means
+//     "install the published payload", which is correct rather than stale.
+//
+// The name is dot-prefixed so it reads as machine state rather than part of the payload.
+const stateFile = ".semaclip-version"
+
+// legacyStatePath is the OLD per-user location. It is READ once, only to migrate a bundle that
+// recorded its version there, and never written. See Installed().
+func legacyStatePath() string {
+	base := os.Getenv("LOCALAPPDATA")
+	if base == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			base = filepath.Join(home, "AppData", "Local")
+		}
+	}
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "SemaClip", "state.txt")
+}
+
 // versionFile is a TOMBSTONE: nothing writes it any more, and it is only READ so a bundle laid
 // down by an older build still reports its version. The file is deliberately not deleted on sight
 // (an older copy of the app reads it), and a bundle without it is fully supported.
@@ -105,26 +144,33 @@ func LoadConfig(appDir string) (Config, error) {
 	return cfg, nil
 }
 
-// Installed answers "what version is on disk", or "" when nothing records one.
+// Installed answers "what version is on disk in THIS bundle", or "" when nothing records one.
 //
-// The bundle's own version.txt is used when readable (a bundle from an older build), and the
-// per-user state file otherwise. The per-user state is the source that matters now: it is what the
-// updater itself writes after applying an update, and it survives the payload being replaced.
+// THE RECORD MUST DESCRIBE THESE FILES. It is read from inside the bundle (see stateFile for why the
+// per-user file was wrong), with the tombstoned version.txt still honoured for a bundle laid down by
+// an older build.
+//
+// ── THE LEGACY PER-USER FILE IS DELIBERATELY NOT CONSULTED ───────────────────────────────────
+// It is tempting to adopt it so an install updated by the older updater keeps its version instead of
+// re-downloading once. That is WRONG, and it was measured: the file is per USER, so it is readable
+// from ANY bundle, and adoption cannot tell "this bundle was updated" from "some other bundle was
+// updated". Reproduced — a fresh 26.234 extraction adopted a legacy "26.235" recorded for a
+// different directory, which means that if 26.235 were the published version the fresh copy would
+// report "up to date" while its files are 26.234. That is the exact bug this whole change exists to
+// remove, so the migration must not be able to recreate it.
+//
+// The trade-off is explicit: a bundle updated by the old updater reports UNKNOWN and installs the
+// published payload once, costing one redundant download. Unknown always resolves to "install",
+// which can never leave a bundle claiming a version it does not have.
 //
 // AN EMPTY ANSWER IS NOT AN ERROR. It genuinely means "this bundle does not claim a version", which
-// is the normal state of a version-idempotent payload. Callers decide what that implies: Check()
-// treats it as needing the published payload, because installing files that are already correct
-// costs a download but cannot leave the bundle wrong, whereas skipping when the on-disk version is
-// genuinely older would strand the user. The old code returned an error here, which — combined
-// with LoadConfig's fatal read — meant a bundle without version.txt could not update at all.
+// is the normal state of a version-idempotent payload.
 func (u *Updater) Installed() string {
 	if v, err := readVersionFrom(filepath.Join(u.Dir, versionFile)); err == nil {
 		return v
 	}
-	if p := stateFilePath(); p != "" {
-		if v, err := readVersionFrom(p); err == nil {
-			return v
-		}
+	if v, err := readVersionFrom(filepath.Join(u.Dir, stateFile)); err == nil {
+		return v
 	}
 	return ""
 }
@@ -159,6 +205,13 @@ type Updater struct {
 }
 
 func (u *Updater) log(format string, args ...any) {
+	// Out is optional on purpose: a bare &Updater{} is a legitimate way to ask a question
+	// (Installed(), selfName()) without a configured logging sink, and a nil writer must not panic
+	// in the middle of answering it. The nil interface is checked explicitly because fmt.Fprintf on
+	// a nil io.Writer panics rather than failing.
+	if u.Out == nil {
+		return
+	}
 	fmt.Fprintf(u.Out, format+"\n", args...)
 }
 
@@ -451,19 +504,17 @@ func resolveArtifactURL(manifestURL, name string) string {
 	return strings.TrimSuffix(manifestURL, "latest.json") + name
 }
 
-// writeVersion records the applied version in the PER-USER state file.
+// writeVersion records the applied version INSIDE the bundle it describes.
 //
-// It deliberately no longer writes into the bundle. The version is a fact about THIS MACHINE's
-// installation, not about the payload, and writing it beside the payload made every updated bundle
-// carry a per-machine byte string — which is exactly the version-stamped archive the packaging is
-// being changed to avoid. A state file also survives the payload being replaced wholesale, whereas
-// a bundle copy is destroyed by the very swap that gives it its new value.
+// See stateFile for why the per-user file was wrong: a version is a fact about ONE set of files, and
+// a per-user record let every other copy on the machine inherit it — a re-extracted 26.234 reported
+// "up to date" because another directory had recorded 26.235.
 //
-// A STALE version.txt IN THE BUNDLE IS REMOVED HERE. Older bundles carry one, and leaving it would
-// make the bundle shadow the state file on the next run (Installed() reads the bundle first), so an
-// update would appear not to have happened and would be re-applied on every launch. Removal is
-// best-effort: a read-only install directory is normal (Program Files) and the state file is the
-// authority anyway.
+// A read-only install directory (Program Files) is still supported: the write fails, the version
+// stays unknown, and unknown already means "install the published payload" on the next run. That
+// costs a download and cannot leave the bundle wrong, which is the correct failure direction.
+//
+// The tombstoned version.txt is removed here so this bundle's own record is unambiguous.
 func writeVersion(dir, version, manifest string) error {
 	if versionFile != "" {
 		if err := os.Remove(filepath.Join(dir, versionFile)); err == nil {
@@ -476,17 +527,8 @@ func writeVersion(dir, version, manifest string) error {
 	if manifest != "" {
 		fmt.Fprintf(&b, "manifest=%s\n", manifest)
 	}
-	body := []byte(b.String())
-
-	statePath := stateFilePath()
-	if statePath == "" {
-		return fmt.Errorf("no per-user state location is known; cannot record that %s is installed", version)
-	}
-	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
-		return fmt.Errorf("cannot create the state directory: %w", err)
-	}
-	if err := writeFileAtomic(statePath, body); err != nil {
-		return fmt.Errorf("cannot record the version: %w", err)
+	if err := writeFileAtomic(filepath.Join(dir, stateFile), []byte(b.String())); err != nil {
+		return fmt.Errorf("cannot record the version in %s: %w", dir, err)
 	}
 	return nil
 }
@@ -551,6 +593,29 @@ func extractZip(zipPath, dest string) error {
 		}
 	}
 	return nil
+}
+
+// waitForPIDExit blocks until the given process is gone, or the deadline passes.
+//
+// WHY NOT `p.Wait()`. That needs an os.Process handle, which a fresh process cannot obtain for an
+// unrelated pid. The app is a DIFFERENT process from the sidecar it starts, so the only question
+// available is "is this pid still alive" — polled, because the standard library exposes no
+// wait-by-pid on Windows. `pidAlive` supplies that per platform (tasklist / signal 0).
+//
+// A TIMEOUT IS NOT AN ERROR. The caller proceeds to Apply() either way, and Apply's own isRunning
+// guard is what refuses a swap that would fail on a locked payload. Blocking forever would be worse:
+// a wedged app would leave an updater running with no way for the user to see why.
+func waitForPIDExit(pid int, limit time.Duration) {
+	if pid <= 0 {
+		return
+	}
+	deadline := time.Now().Add(limit)
+	for time.Now().Before(deadline) {
+		if !pidAlive(pid) {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 // findBundleRoot locates the directory holding the app inside an extracted
@@ -721,6 +786,18 @@ func readBefore(r io.Reader, deadline time.Time) ([]byte, error) {
 // The launcher is identified by being the executable, never by a hardcoded name:
 // the name is a build detail (SemaClip.exe today) and an update that looked for
 // the wrong one would refuse to relaunch the app it just updated.
+//
+// `hidewin.exe` IS EXCLUDED, and the reason is a LATENT bug rather than a live one — stated
+// precisely, because the naive version was measured:
+//
+//   - The candidates are sorted by BYTE order. With the shipped names, `SemaClip.exe` (0x53 'S')
+//     sorts BEFORE `hidewin.exe` (0x68 'h'), so the generic rule picks correctly today.
+//   - It stops being correct the moment the launcher's name begins with a character above 'h' or
+//     below 'S' — a lowercase `semaclip.exe` picks `hidewin.exe` immediately (measured).
+//
+// hidewin is a console-hiding relay that ships beside the launcher, never the app, so excluding it
+// by name removes the ordering dependency entirely instead of relying on which letters happen to
+// be in the filename.
 func findLauncher(dir string) (string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -732,9 +809,13 @@ func findLauncher(dir string) (string, error) {
 			continue
 		}
 		name := strings.ToLower(e.Name())
-		if strings.HasSuffix(name, ".exe") && !strings.Contains(name, "updater") {
-			candidates = append(candidates, filepath.Join(dir, e.Name()))
+		if !strings.HasSuffix(name, ".exe") {
+			continue
 		}
+		if name == "hidewin.exe" || strings.Contains(name, "updater") {
+			continue
+		}
+		candidates = append(candidates, filepath.Join(dir, e.Name()))
 	}
 	if len(candidates) == 0 {
 		return "", fmt.Errorf("no launcher executable in %s", dir)

@@ -30,6 +30,15 @@ func main() {
 	checkOnly := flag.Bool("check", false, "report whether an update is available, change nothing")
 	noLaunch := flag.Bool("no-launch", false, "apply any pending update but do not launch the app")
 	force := flag.Bool("force", false, "reinstall the published version even if it matches")
+	// -relaunch is the APPLY-AND-RESTART mode the running app starts. It differs from a plain run in
+	// one way that matters: it waits for the app to EXIT before touching the payload, which is what a
+	// running app needs and a cold start does not.
+	//
+	// Without it the app could only tell the user to run the launcher by hand, which is what the
+	// banner said and what the owner rightly objected to: the sidecar exists precisely so the user
+	// does not have to do that.
+	relaunch := flag.Bool("relaunch", false, "wait for the app to exit, apply the update in place, then relaunch it")
+	waitPid := flag.Int("wait-pid", 0, "with -relaunch: the process to wait for before updating (0 = this process's parent)")
 	manifestURL := flag.String("manifest", "", "override the manifest URL (default: from version.txt / built-in)")
 	timeout := flag.Duration("timeout", 10*time.Minute, "overall deadline for download and swap")
 	flag.Parse()
@@ -62,6 +71,29 @@ func main() {
 			fatal("check failed: %v", err)
 		}
 		fmt.Printf("installed=%s latest=%s update=%v\n", res.Installed, res.Latest, res.Available)
+		return
+	}
+
+	if *relaunch {
+		// Restart mode. The app is STILL RUNNING when this starts: Windows refuses to replace a
+		// loaded DLL, so the wait is the operation, not a formality. `-wait-pid` is preferred
+		// because the app knows its own pid; falling back to the parent covers a launcher that
+		// started us directly.
+		pid := *waitPid
+		if pid == 0 {
+			pid = os.Getppid()
+		}
+		u.log("waiting for the app (pid %d) to exit before updating %s", pid, abs)
+		waitForPIDExit(pid, 5*time.Minute)
+
+		if err := u.Apply(*force); err != nil {
+			// A failed update must not leave the user with no app: report it and continue to the
+			// relaunch below, which starts whatever is on disk now.
+			fmt.Fprintf(os.Stderr, "update skipped: %v\n", err)
+		}
+		if err := u.LaunchAndWait(); err != nil {
+			fatal("%v", err)
+		}
 		return
 	}
 

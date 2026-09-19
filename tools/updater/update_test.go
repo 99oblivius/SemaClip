@@ -430,10 +430,6 @@ func TestLoadConfigToleratesNoVersionFile(t *testing.T) {
 func TestInstalledIsEmptyWithoutAnyRecord(t *testing.T) {
 	// "No version recorded" is a legitimate answer, not an error, and it is what makes a
 	// version-idempotent payload possible.
-	stateDir := t.TempDir()
-	prev := os.Getenv("LOCALAPPDATA")
-	t.Cleanup(func() { os.Setenv("LOCALAPPDATA", prev) })
-	os.Setenv("LOCALAPPDATA", stateDir)
 
 	u := &Updater{Dir: t.TempDir(), Out: os.Stdout}
 	if got := u.Installed(); got != "" {
@@ -467,8 +463,10 @@ func TestApplyRemovesAStaleBundleVersionFile(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, versionFile)); err == nil {
 		t.Fatal("the bundle still carries a version stamp after an update")
 	}
-	if got := read(t, filepath.Join(stateDir, "SemaClip", "state.txt")); !strings.Contains(got, "version=v26.2") {
-		t.Fatalf("per-user state did not record the applied version: %q", got)
+	// THE RECORD IS THE BUNDLE'S OWN, beside the payload it describes — see stateFile for why a
+	// per-user file let a second copy of the app inherit another directory's version.
+	if got := read(t, filepath.Join(dir, stateFile)); !strings.Contains(got, "version=v26.2") {
+		t.Fatalf("the bundle did not record the applied version: %q", got)
 	}
 }
 
@@ -603,23 +601,35 @@ func TestApplyDoesNotReplaceTheUpdater(t *testing.T) {
 	}
 }
 
-func TestInstalledFallsBackToPerUserState(t *testing.T) {
-	// The Program Files case: the bundle's version.txt may be absent (the MSI is
-	// authored before the build can write one) or unreadable, and the updater must
-	// still know its version rather than re-downloading a payload it already has.
+func TestInstalledIgnoresThePerUserFileEntirely(t *testing.T) {
+	// ── WHY ADOPTION OF THE PER-USER FILE WAS REMOVED ───────────────────────────────────────────
+	// Adopting it looks helpful and is WRONG: the file is per USER, so it is readable from ANY bundle,
+	// and adoption cannot tell "this bundle was updated" from "some other bundle was updated". It was
+	// measured: a fresh extraction adopted a legacy "26.235" recorded for a DIFFERENT directory, so
+	// had 26.235 been the published version the fresh copy would have reported "up to date" while its
+	// files were older. That is the reported bug, recreated by the migration.
+	//
+	// The cost of ignoring it is one redundant download for an install last updated by the old
+	// updater. Unknown resolves to "install", which can never leave a bundle claiming a version it
+	// does not have.
 	dir := t.TempDir()
-	os.Remove(filepath.Join(dir, versionFile))
+	mkBundle(t, dir, "")
 	stateDir := t.TempDir()
-	write(t, filepath.Join(stateDir, "SemaClip", "state.txt"), "version=v26.5\nchannel=nightly\n")
-
-	prev := os.Getenv("LOCALAPPDATA")
-	t.Cleanup(func() { os.Setenv("LOCALAPPDATA", prev) })
-	os.Setenv("LOCALAPPDATA", stateDir)
+	t.Setenv("LOCALAPPDATA", stateDir)
+	if err := os.MkdirAll(filepath.Join(stateDir, "SemaClip"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "SemaClip", "state.txt"),
+		[]byte("version=v26.5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	u := &Updater{Dir: dir, Out: os.Stdout}
-	got := u.Installed()
-	if got != "v26.5" {
-		t.Fatalf("got %q, want v26.5", got)
+	if got := u.Installed(); got != "" {
+		t.Fatalf("the per-user file must be ignored, got %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, stateFile)); err == nil {
+		t.Fatal("reading must not create a record as a side effect")
 	}
 }
 
@@ -641,28 +651,35 @@ func TestBundleVersionWinsOverState(t *testing.T) {
 	}
 }
 
-func TestWriteVersionFallsBackWhenBundleIsReadOnly(t *testing.T) {
-	// A per-machine install lives in Program Files and is not writable by a
-	// non-elevated process. The applied version must still be recorded, or every
-	// launch re-offers an update it already applied.
-	dir := t.TempDir()
-	mkBundle(t, dir, "v26.1")
+func TestWriteVersionIntoAnUnwritableBundleIsReported(t *testing.T) {
+	// A per-machine install lives in Program Files and is not writable by a non-elevated process.
+	//
+	// THE TRADE-OFF CHANGED when the record moved INTO the bundle: it can now fail to write, where a
+	// per-user file always could. That is accepted deliberately, and this test pins the accepted
+	// behaviour rather than pretending it cannot happen — the failure is REPORTED, and the version
+	// stays unknown, which Check() treats as "install the published payload". One redundant download
+	// beats a version that is shared between unrelated directories.
 	stateDir := t.TempDir()
-	prev := os.Getenv("LOCALAPPDATA")
-	t.Cleanup(func() { os.Setenv("LOCALAPPDATA", prev) })
-	os.Setenv("LOCALAPPDATA", stateDir)
-
-	// Make the version file unwritable by replacing it with a DIRECTORY: rename
-	// onto it fails, which is what an ACL-protected file looks like from here.
-	os.Remove(filepath.Join(dir, versionFile))
-	os.MkdirAll(filepath.Join(dir, versionFile), 0o755)
-
-	if err := writeVersion(dir, "v26.9", "http://x/m.json"); err != nil {
-		t.Fatalf("writeVersion: %v", err)
+	t.Setenv("LOCALAPPDATA", stateDir)
+	// A bundle with NO stamp: the tombstoned version.txt would otherwise answer Installed() first and
+	// this test would pass for the wrong reason.
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "SemaClip.exe"), "launcher")
+	write(t, filepath.Join(dir, "SemaClip.dll"), "payload")
+	if err := os.MkdirAll(filepath.Join(dir, stateFile), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	got := read(t, filepath.Join(stateDir, "SemaClip", "state.txt"))
-	if !strings.Contains(got, "v26.9") {
-		t.Fatalf("version not recorded anywhere: %q", got)
+
+	err := writeVersion(dir, "v26.9", "http://x/m.json")
+	if err == nil {
+		t.Fatal("a version that could not be recorded must be reported, not silently accepted")
+	}
+	if !strings.Contains(err.Error(), dir) {
+		t.Fatalf("the error should name the directory it could not write to: %v", err)
+	}
+	u := &Updater{Dir: dir, Out: os.Stdout}
+	if got := u.Installed(); got != "" {
+		t.Fatalf("an unwritable bundle must report unknown, got %q", got)
 	}
 }
 
@@ -734,5 +751,64 @@ func TestForceReinstallsAtTheSameVersion(t *testing.T) {
 	}
 	if got := read(t, filepath.Join(dir, "SemaClip.dll")); got != "payload v26.2" {
 		t.Fatalf("--force must reinstall the published payload, got %q", got)
+	}
+}
+
+func TestTwoBundlesDoNotShareAVersion(t *testing.T) {
+	// ── THE REPORTED BUG, AS A PROPERTY ─────────────────────────────────────────────────────────
+	// Updating 26.234 -> 26.235 and then re-extracting the 26.234 archive left the fresh 26.234 copy
+	// reporting "up to date", because the version was recorded per USER and the fresh copy inherited
+	// the other directory's claim.
+	//
+	// This asserts the property that removes it: a bundle records its OWN version, and a bundle with
+	// no history reports UNKNOWN — which Check() resolves to "install", never to "up to date".
+	updated := t.TempDir()
+	mkBundle(t, updated, "v26.1")
+	fresh := t.TempDir()
+	// The fresh copy is what the published archive looks like: no version stamp at all.
+	write(t, filepath.Join(fresh, "SemaClip.exe"), "launcher")
+	write(t, filepath.Join(fresh, "SemaClip.dll"), "payload")
+
+	// A legacy per-user record exists, describing the OTHER directory. Nothing may read it.
+	stateDir := t.TempDir()
+	t.Setenv("LOCALAPPDATA", stateDir)
+	if err := os.MkdirAll(filepath.Join(stateDir, "SemaClip"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "SemaClip", "state.txt"),
+		[]byte("version=v26.99\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The update lands in `updated` only.
+	zipPath := filepath.Join(t.TempDir(), "payload.zip")
+	mkZip(t, zipPath, "SemaClip", "v26.2")
+	u, _ := newTestUpdater(t, updated, map[string]any{
+		"version": "v26.2",
+		"artifacts": map[string]any{"win-x64": map[string]string{
+			"name": "payload.zip", "sha256": sha256File(t, zipPath),
+		}},
+	}, zipPath)
+	if err := u.Apply(false); err != nil {
+		t.Fatal(err)
+	}
+	if got := u.Installed(); got != "v26.2" {
+		t.Fatalf("the updated bundle reports %q, want v26.2", got)
+	}
+
+	// The fresh copy must NOT claim v26.2 (or anything else) just because another directory did.
+	freshU := &Updater{Dir: fresh, Cfg: u.Cfg, Out: os.Stdout}
+	if got := freshU.Installed(); got != "" {
+		t.Fatalf("a fresh bundle inherited a version: %q", got)
+	}
+	chk, err := freshU.Check()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !chk.Available {
+		t.Fatal("a bundle with no record must be offered the update, never told it is current")
+	}
+	if _, err := os.Stat(filepath.Join(fresh, stateFile)); err == nil {
+		t.Fatal("a bundle with no history must not have written a record")
 	}
 }
