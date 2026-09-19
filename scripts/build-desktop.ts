@@ -119,13 +119,22 @@ const envArg = ".env";
 // BUILD time, so it bakes the build machine's value. Neither can name a directory on
 // the user's machine. WEBVIEW2_USER_DATA_FOLDER is therefore resolved at RUNTIME in
 // server/adapters/outbound/platform/webview-fix.ts.
+//
+// The version is read HERE, before the env file is written, because the env file is where it is
+// baked in. `readVersion()` is hoisted below as a function declaration; this is its first use.
+const version = await readVersion();
 const launchEnv = platform === "win-x64"
-  // Nothing to set here: the Windows profile path is per-user and resolved at runtime.
-  ? {}
+  // SEMACLIP_VERSION is the WINDOWS version channel. `Deno.desktopVersion` is null on the Windows
+  // target even when deno.json carries a version (measured: the same app reports "9.9.9" on
+  // linux-x64 and null on win-x64, with "app_version":"9.9.9" present in the Windows dylib), and
+  // every consumer guards on it — so without this the Windows update check is a silent no-op and the
+  // user is never prompted. server/adapters/outbound/platform/app-version.ts reads it as the second
+  // channel. It is set for EVERY platform for the same reason: one mechanism, no per-OS surprise.
+  ? { SEMACLIP_VERSION: version }
   // Linux keeps native Wayland: the DMA-BUF renderer is what fails on NVIDIA +
   // Wayland, and this flag is the same for every user, so build time is correct.
   // GDK_BACKEND=x11 also works but downgrades the whole app to X11.
-  : { WEBKIT_DISABLE_DMABUF_RENDERER: "1" };
+  : { WEBKIT_DISABLE_DMABUF_RENDERER: "1", SEMACLIP_VERSION: version };
 await Deno.writeTextFile(
   envFile,
   Object.entries(launchEnv).map(([k, v]) => `${k}=${v}`).join("\n") + "\n",

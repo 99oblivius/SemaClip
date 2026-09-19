@@ -6,6 +6,7 @@ import {
   reportWebviewLaunchEnvironment,
 } from "@/adapters/outbound/platform/webview-fix.ts";
 import { startAutoUpdate } from "@/adapters/outbound/platform/auto-update.ts";
+import { displayVersion } from "@/adapters/outbound/platform/app-version.ts";
 import {
   adoptWindowLifecycle,
   chromeState,
@@ -18,23 +19,11 @@ import {
 import type { WhisperPaths } from "@/adapters/outbound/transcribe/TranscribeAdapter.ts";
 
 /**
- * The app's version, for the window title.
- *
- * `Deno.desktopVersion` is what a packaged build was compiled with; under `deno run`
- * it is null, so a dev run falls back to the same file the banner reads. Reading the
- * file at startup is cheap and keeps the title honest in both cases.
+ * The app's version, for the window title and the update check. See app-version.ts for the two
+ * build channels and the measurement showing `Deno.desktopVersion` is null on the Windows target.
  */
 function appVersion(): string {
-  const baked = (Deno as { desktopVersion?: string | null }).desktopVersion;
-  if (baked) return baked;
-  try {
-    const pkg = JSON.parse(
-      Deno.readTextFileSync(new URL("../frontend/package.json", import.meta.url)),
-    );
-    return String(pkg.version ?? "dev");
-  } catch {
-    return "dev";
-  }
+  return displayVersion();
 }
 
 const PORT = parseInt(Deno.env.get("PORT") ?? "5174", 10);

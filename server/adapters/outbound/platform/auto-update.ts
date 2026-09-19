@@ -22,6 +22,7 @@
  * "update ready" forever with nothing happening.
  */
 import { ensureSidecar } from "@/adapters/outbound/platform/sidecar.ts";
+import { bakedVersion } from "@/adapters/outbound/platform/app-version.ts";
 import {
   appImagePath,
   downloadAndStageAppImage,
@@ -78,8 +79,10 @@ export interface UpdateStatus {
   sidecarError: string | null;
 }
 
+const baked = bakedVersion();
+
 const status: UpdateStatus = {
-  current: (Deno as { desktopVersion?: string | null }).desktopVersion ?? null,
+  current: baked?.version ?? null,
   pendingVersion: null,
   lastRollback: null,
   // Linux AppImages apply their own update on exit; Windows cannot (the sidecar does it).
@@ -175,6 +178,7 @@ export async function startAutoUpdate(baseUrl?: string): Promise<void> {
     console.log("Updates: disabled (no version baked in — dev run)");
     return;
   }
+  console.log(`Updates: version ${status.current} (from ${baked?.source})`);
 
   // WINDOWS FIRST: the updater's swap needs a real file outside the payload's virtual
   // filesystem, and this is the only process that can read the embedded copy. Doing it

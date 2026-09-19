@@ -315,7 +315,13 @@ jobs:
           # header documents this trap.
           OFF=$(bash scripts/repack-appimage.sh --offset-only dist/SemaClip.AppImage)
           echo "payload offset: $OFF"
-          echo "payload offset: $OFF"
+          # THE COMPRESSOR IS THE APPIMAGE'S LIFE OR DEATH. The type-2 runtime mounts with
+          # squashfuse, which its own error text says "supports only" zlib and zstd; a repacked xz
+          # image is a perfectly valid squashfs that the runtime cannot mount AT ALL, so the app
+          # opens to nothing. That shipped once (every Linux release from the first repack) because
+          # nothing checked it. This asserts the repacked payload uses the SAME compressor deno
+          # desktop produced.
+          python3 scripts/ci/appimage_compressor.py dist/SemaClip.AppImage "$OFF"
           unsquashfs -o "$OFF" -l dist/SemaClip.AppImage | grep -q "\.DirIcon" \
             || { echo "::error::repacked AppImage has no .DirIcon — libappimage integration would fail"; exit 1; }
           unsquashfs -o "$OFF" -l dist/SemaClip.AppImage | grep -q "usr/share/icons/hicolor/512x512/apps/semaclip.png" \

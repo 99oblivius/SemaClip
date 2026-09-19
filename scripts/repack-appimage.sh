@@ -106,6 +106,15 @@ good = [o for o, ok in cands if ok]
 print(f"  hsqs candidates: {cands}")
 assert good, "no valid squashfs superblock found"
 off = good[0]
+
+# The SOURCE's compressor, which the repack MUST preserve. See the note on -comp below: writing a
+# different one produced an AppImage the runtime could not mount at all.
+COMPRESSORS = {1: "gzip", 2: "lzma", 3: "lzo", 4: "xz", 5: "lz4", 6: "zstd"}
+comp = int.from_bytes(d[off + 20:off + 22], "little")
+assert comp in COMPRESSORS, f"unknown source compression id {comp}"
+open(f"{work}/comp", "w").write(str(comp))
+print(f"  source compression id: {comp} ({COMPRESSORS[comp]})")
+
 open(f"{work}/runtime", "wb").write(d[:off])
 open(f"{work}/payload.squashfs", "wb").write(d[off:])
 # The offset is written out because READING the result back needs it: `unsquashfs` derives the
@@ -134,10 +143,49 @@ mkdir -p "$WORK/root/usr/share/icons/hicolor/512x512/apps"
 cp "$ICON" "$WORK/root/usr/share/icons/hicolor/512x512/apps/semaclip.png"
 cp "$ICON" "$WORK/root/usr/share/icons/hicolor/512x512/apps/SemaClip.png"
 
-# 3. mksquashfs with the AppImage conventions: xz, and NO appended padding so the concatenation stays
-#    tight. -all-root records the ownership an AppImage's contents must have.
+# 3. mksquashfs with the SOURCE'S OWN compressor, and NO appended padding so the concatenation
+#    stays tight. -all-root records the ownership an AppImage's contents must have.
+#
+#    ── WHY THE COMPRESSOR IS PRESERVED AND NOT CHOSEN ───────────────────────────────────────
+#    This used to hard-code xz. The type-2 runtime's FUSE mount is squashfuse-based and its own
+#    error string is "Squashfs image uses %s compression, this version supports only " — zlib and
+#    zstd, in the build Deno ships. A repacked xz image therefore FAILED TO MOUNT AT ALL, and the
+#    app could not be opened: every Linux release from the first repack until this fix was dead.
+#    The source (deno desktop's own output) is zstd, so preserving it is both correct and what the
+#    runtime can read. `-comp` is derived from the superblock, not hard-coded, so a future Deno
+#    that changes its default keeps working without touching this script.
+COMP_ID="$(cat "$WORK/comp")"
+case "$COMP_ID" in
+  1) COMP_COMP=gzip ;;
+  2) COMP_COMP=lzma ;;
+  3) COMP_COMP=lzo ;;
+  4) COMP_COMP=xz ;;
+  5) COMP_COMP=lz4 ;;
+  6) COMP_COMP=zstd ;;
+  *) echo "unsupported source compression id $COMP_ID" >&2; exit 1 ;;
+esac
+echo "  repacking with the source compressor: $COMP_COMP"
 fakeroot -i "$WORK/fakeroot.state" -s "$WORK/fakeroot.state" --   mksquashfs "$WORK/root" "$WORK/new.squashfs" \
-    -comp xz -b 128K -noappend -all-root -no-progress >/dev/null
+    -comp "$COMP_COMP" -b 128K -noappend -all-root -no-progress >/dev/null
+
+# FAIL LOUDLY if the result is not readable by the runtime. This is the check whose absence let an
+# unopenable AppImage ship: the squashfs is valid, self-consistent and passes every other assertion
+# here, and only the compressor makes it unusable. The superblock of the OUTPUT is re-read and
+# compared with the source, so a repack that silently switches compressor cannot get past this.
+python3 - "$WORK/new.squashfs" "$COMP_ID" <<'CHECKSQ'
+import sys
+
+path, want = sys.argv[1], int(sys.argv[2])
+d = open(path, "rb").read(64)
+comp = int.from_bytes(d[20:22], "little")
+NAMES = {1: "gzip", 2: "lzma", 3: "lzo", 4: "xz", 5: "lz4", 6: "zstd"}
+assert comp == want, (
+    f"repacked compression id {comp} ({NAMES.get(comp)}) != source {want} ({NAMES.get(want)}) — "
+    f"the runtime mounts only what the source used"
+)
+print(f"  repacked compression verified: {comp} ({NAMES.get(comp)})")
+CHECKSQ
+
 
 # 4. Reassemble runtime + new squashfs.
 cat "$WORK/runtime" "$WORK/new.squashfs" > "$OUT"
