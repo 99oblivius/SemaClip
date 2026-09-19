@@ -56,6 +56,7 @@ import type { ResizeEdge } from "@/adapters/outbound/platform/gtk-frame.ts";
 import { logFilePath, readLogTail } from "@/adapters/outbound/platform/log-file.ts";
 import { retryUpdateCheck, updateStatus } from "@/adapters/outbound/platform/auto-update.ts";
 import { updateLogPath } from "@/adapters/outbound/platform/sidecar.ts";
+import { displayVersion } from "@/adapters/outbound/platform/app-version.ts";
 import { emitAppEvent, subscribeAppEvents, sseFrame } from "@/application/events.ts";
 import { fetchWithTimeout, MEDIA_TIMEOUT_MS } from "@/adapters/outbound/net/fetch-timeout.ts";
 
@@ -998,7 +999,12 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
       logPath: logFilePath(),
       logEnabled: Boolean(logFilePath()),
       chrome: chromeState(),
-      version: (Deno as { desktopVersion?: string | null }).desktopVersion ?? "dev",
+      // displayVersion(), NOT the raw field. `Deno.desktopVersion` is NULL on the Windows target even
+      // when the version is baked in (measured — that is why app-version.ts exists), so reading it
+      // directly reported "dev" on every packaged Windows build. Verified on a real run: with
+      // SEMACLIP_VERSION=26.999 this endpoint answered "dev" while the app's actual version was
+      // 26.999, which is the one fact diagnostics exists to report.
+      version: displayVersion(),
       os: Deno.build.os,
       serveAddress: Deno.env.get("DENO_SERVE_ADDRESS") ?? null,
     }));

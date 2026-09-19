@@ -33,18 +33,42 @@ export const SIDECAR_NAME = "SemaClipUpdater.exe";
 const EMBEDDED_DIR = new URL("../../../appfiles/", import.meta.url);
 
 /**
- * The updater's own log, written inside the bundle by `tools/updater`.
+ * The updater's own log, written by `tools/updater` into the APP DIRECTORY.
  *
- * The app runs the updater detached with its output discarded (it is about to exit and cannot babysit
- * a console), so this file is the only account of what actually happened. Kept in sync with
- * `updateLogName` in tools/updater/main.go — the two must name the same file or the log is written
- * somewhere nothing reads.
+ * ── THE PLACE MATTERS, AND IT WAS WRONG ─────────────────────────────────────────────────────────
+ * The updater opens its log at `filepath.Join(appDir, updateLogName)` — the directory passed as
+ * `-app`, i.e. the bundle. This constant first pointed at `sidecarDir()` (`%LOCALAPPDATA%\SemaClip`,
+ * where the UPDATER is extracted), which is a DIFFERENT directory for a portable install: the
+ * endpoint would have reported "no updater log" on every portable build while the file sat in the
+ * app folder. Verified against a real run, where the log landed in `C:\chain\SemaClip\`.
+ *
+ * Kept in sync with `updateLogName` and `openUpdateLog` in tools/updater/main.go. If one changes,
+ * the other must.
  */
 export const UPDATE_LOG_NAME = ".semaclip-update.log";
 
-/** Absolute path of the updater's log, for the app to read back. */
-export function updateLogPath(env?: (k: string) => string | undefined): string {
-  return `${sidecarDir(env)}\\${UPDATE_LOG_NAME}`;
+/**
+ * Absolute path of the updater's log, for the app to read back.
+ *
+ * The app directory, NOT the sidecar directory — see above. The app knows its own directory from
+ * `Deno.execPath()`, which is what `-app` is set to, so the two agree by construction.
+ */
+export function updateLogPath(): string {
+  return `${appDirPath()}\\${UPDATE_LOG_NAME}`;
+}
+
+/**
+ * The updater's record of the version it applied to THIS bundle.
+ *
+ * The name is shared with `stateFile` in tools/updater/update.go. A record that disagrees with the
+ * running binary means a hand-off closed the app without completing its swap, which is the only
+ * signal available that an update silently failed.
+ */
+export const UPDATE_RECORD_NAME = ".semaclip-version";
+
+/** Absolute path of the updater's version record for this bundle. */
+export function updateRecordPath(): string {
+  return `${appDirPath()}\\${UPDATE_RECORD_NAME}`;
 }
 
 /**

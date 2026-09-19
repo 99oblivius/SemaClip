@@ -28,7 +28,7 @@ import {
   downloadAndStageAppImage,
   launchSwapHelper,
 } from "@/adapters/outbound/platform/appimage-update.ts";
-import { sidecarDir } from "@/adapters/outbound/platform/sidecar.ts";
+import { sidecarDir, updateRecordPath } from "@/adapters/outbound/platform/sidecar.ts";
 import { downloadVerified } from "@/adapters/outbound/platform/update-download.ts";
 import { emitAppEvent } from "@/application/events.ts";
 
@@ -139,6 +139,31 @@ const status: UpdateStatus = {
 
 export function updateStatus(): UpdateStatus {
   return { ...status };
+}
+
+/**
+ * The version the UPDATER recorded as installed in this bundle, or null.
+ *
+ * Read from the bundle's own `.semaclip-version`, which the updater writes INSIDE the app directory
+ * after a successful swap (see tools/updater writeVersion). A record that disagrees with the running
+ * binary is the signature of a failed hand-off: the app closed, the swap did not complete, and the
+ * next launch is the old build again.
+ *
+ * Null covers three normal cases and they all mean "say nothing": the file is absent (never updated),
+ * unreadable, or carries no version= line. A diagnosis must not invent a failure out of a missing
+ * file, because every hand-unpacked zip starts that way.
+ */
+async function recordedVersion(): Promise<string | null> {
+  try {
+    const raw = await Deno.readTextFile(updateRecordPath());
+    for (const line of raw.split("\n")) {
+      const [key, value] = line.split("=");
+      if (key?.trim() === "version" && value?.trim()) return value.trim();
+    }
+  } catch {
+    // No record: nothing to reconcile.
+  }
+  return null;
 }
 
 /** What a check or download reports back. Both platform paths already return this shape. */
@@ -627,6 +652,21 @@ export async function startAutoUpdate(baseUrl?: string): Promise<void> {
     return;
   }
   console.log(`Updates: version ${status.current} (from ${baked?.source})`);
+
+  // ── DID A PREVIOUS HAND-OFF ACTUALLY LAND? ──────────────────────────────────────────────────
+  // The updater records the version it APPLIED inside the bundle. So if the record claims a version
+  // this binary is not, the previous hand-off did not take: the app closed, the swap failed, and the
+  // user was left on the old build with nothing on screen — and because the startup check runs again,
+  // they are offered the same update and the loop repeats on every launch.
+  //
+  // Checked BEFORE anything else so the message survives even if the check below fails too.
+  const previous = await recordedVersion();
+  if (previous && previous !== status.current) {
+    status.updateError =
+      `The last update did not install: this build is ${status.current} but the updater recorded ` +
+      `${previous} as installed, so the swap did not complete. SemaClip will offer it again below.`;
+    console.warn(`Updates: ${status.updateError}`);
+  }
 
   // WINDOWS FIRST: the updater's swap needs a real file outside the payload's virtual
   // filesystem, and this is the only process that can read the embedded copy. Doing it
