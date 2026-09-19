@@ -322,3 +322,87 @@ func TestCsvHasPidMatchesTheFieldNotASubstring(t *testing.T) {
 		t.Fatal("an absent pid must not match")
 	}
 }
+
+func TestVerifyPayloadStructureIsStructural(t *testing.T) {
+	// The preflight used to EXTRACT the payload to decide this. Measured on the real 110MB archive:
+	// 934ms and 200MB written then erased inside the app dir — so on a full volume the check itself
+	// failed with ENOSPC and refused an update that would have worked. This inspects the listing.
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.zip")
+	mkZip(t, good, "SemaClip", "v26.2")
+	if err := verifyPayloadStructure(good); err != nil {
+		t.Fatalf("a real payload must pass: %v", err)
+	}
+
+	// An unwrapped archive (files at the root) is also valid — findBundleRoot accepts it.
+	unwrapped := filepath.Join(dir, "unwrapped.zip")
+	mkZip(t, unwrapped, "", "v26.2")
+	if err := verifyPayloadStructure(unwrapped); err != nil {
+		t.Fatalf("an unwrapped payload must pass: %v", err)
+	}
+
+	// A zip with no bundle: accepted by the zip reader, must be refused here.
+	noBundle := filepath.Join(dir, "nobundle.zip")
+	zf, err := os.Create(noBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(zf)
+	for _, name := range []string{"notes.txt", "docs/readme.md"} {
+		w, _ := zw.Create(name)
+		w.Write([]byte("nothing to install"))
+	}
+	zw.Close()
+	zf.Close()
+	if err := verifyPayloadStructure(noBundle); err == nil {
+		t.Fatal("an archive with no bundle must be refused")
+	}
+
+	// An empty archive.
+	empty := filepath.Join(dir, "empty.zip")
+	zf2, _ := os.Create(empty)
+	zw2 := zip.NewWriter(zf2)
+	zw2.Close()
+	zf2.Close()
+	if err := verifyPayloadStructure(empty); err == nil {
+		t.Fatal("an empty archive must be refused")
+	}
+
+	// A path traversal must be refused BEFORE anything is written, not during the swap.
+	traversal := filepath.Join(dir, "traversal.zip")
+	zf3, _ := os.Create(traversal)
+	zw3 := zip.NewWriter(zf3)
+	w, _ := zw3.Create("../escape.exe")
+	w.Write([]byte("x"))
+	w2, _ := zw3.Create("SemaClip/SemaClip.dll")
+	w2.Write([]byte("y"))
+	zw3.Close()
+	zf3.Close()
+	if err := verifyPayloadStructure(traversal); err == nil {
+		t.Fatal("a traversal entry must be refused")
+	}
+}
+
+func TestPreflightWritesNothingToTheAppDir(t *testing.T) {
+	// The property that makes the check safe on a full disk: it must not write the payload anywhere.
+	dir := t.TempDir()
+	mkBundle(t, dir, "v26.1")
+	payload := filepath.Join(t.TempDir(), "update.zip")
+	mkZip(t, payload, "SemaClip", "v26.2")
+
+	u := &Updater{Dir: dir, Out: os.Stdout}
+	if err := u.Preflight(payload, sha256File(t, payload)); err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	var written int64
+	filepath.Walk(dir, func(p string, info os.FileInfo, e error) error {
+		if e == nil && info != nil && !info.IsDir() {
+			written += info.Size()
+		}
+		return nil
+	})
+	// The bundle itself is 2 small files; anything near the payload's size means it extracted.
+	if written > 4096 {
+		t.Fatalf("preflight wrote %d bytes into the app dir; it must inspect, not extract", written)
+	}
+}
