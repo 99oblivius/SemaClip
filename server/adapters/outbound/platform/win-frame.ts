@@ -521,12 +521,14 @@ export function isMinimized(): boolean {
  * Returns whether the move succeeded; a refusal is reported rather than hidden.
  */
 
-/** The point inside the window that a drag grabbed, in screen pixels. Null when not dragging. */
+/**
+ * The point inside the window that a drag grabbed, in screen pixels. Null when not dragging.
+ *
+ * Only the offset is state: the window target is `cursor - offset`, computed from the CURRENT cursor,
+ * so nothing the previous frame did has to be remembered.
+ */
 let dragGrabX: number | null = null;
 let dragGrabY: number | null = null;
-/** The cursor position at grab time, so the first move is computed as a delta and cannot jump. */
-let dragCursorX = 0;
-let dragCursorY = 0;
 
 /** Point the OS reports for the cursor, in physical pixels. */
 function cursorPos(): { x: number; y: number } | null {
@@ -563,21 +565,21 @@ function windowOrigin(h: Deno.PointerValue): { x: number; y: number } | null {
  */
 export function beginDrag(clientX: number, clientY: number): boolean {
   const h = findOwnWindow();
-  const cur = cursorPos();
-  if (h === null || !cur) return false;
+  // The cursor is read to prove the drag can actually be driven before claiming it started; the
+  // value itself is not needed, since the target is computed from the cursor live on each move.
+  if (h === null || !cursorPos()) return false;
   dragGrabX = Math.round(clientX);
   dragGrabY = Math.round(clientY);
-  dragCursorX = cur.x;
-  dragCursorY = cur.y;
   return true;
 }
 
 /**
  * Continue a drag: put the window where the pointer says, keeping the grab point fixed.
  *
- * Called on every pointer move while the button is held. The delta form (cursor now vs cursor at
- * grab) rather than an absolute `cursor - grabOffset` is what keeps this correct when the window is
- * moved by something else mid-drag, and it makes a synthetic test unambiguous.
+ * Called on every pointer move while the button is held. The target is recomputed from the live
+ * cursor rather than accumulated as a delta, so the grab point stays exact however many moves are
+ * dropped, coalesced or delivered out of order — a dropped frame costs nothing, while an
+ * accumulated delta would permanently offset the window.
  */
 export function continueDrag(): { x: number; y: number } | null {
   if (dragGrabX === null || dragGrabY === null) return null;
