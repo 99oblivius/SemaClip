@@ -662,16 +662,6 @@ export function startUpdateDownload(): { started: boolean; error: string | null 
 }
 
 /**
- * The version offered to the user, for the UI to render a Download button for.
- *
- * Not part of `UpdateStatus`'s persisted shape: it is derived from the fields the check sets, so
- * there is one source of truth for "what is being offered" rather than two that can disagree.
- */
-export function offeredVersion(): string | null {
-  return status.availableVersion;
-}
-
-/**
  * The command that starts the updater so it OUTLIVES this process.
  *
  * ── WHY NOT A DIRECT SPAWN ──────────────────────────────────────────────────────────────────────

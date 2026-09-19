@@ -110,7 +110,7 @@ Six jobs:
 |---|---|
 | `version` | writes the version, asserts tag/version agreement and that both version files carry it, rejects any suffix |
 | `build (linux-x64)` | frontend build, native fetch, `build-desktop.ts` → AppImage + runtime dylib, `sha256` sidecars |
-| `build (win-x64)` | same for Windows → `.msi` + portable `.zip` + runtime dll, with the sidecar updater and launcher asserted present in the zip and a version stamp asserted ABSENT (the payload is version-idempotent) |
+| `build (win-x64)` | same for Windows → portable `.zip` + runtime dll, with the sidecar updater asserted present in the zip and a version stamp asserted ABSENT (the payload is version-idempotent). No `.msi` is produced |
 | `publish` | verifies hashes, creates the release (serially, one asset at a time), writes `latest.json`, pushes Pages |
 | `patch` | qbsdiff delta from the previous release, merges the entry, republishes manifest + patch in one commit |
 | `verify` | downloads the assets back over the PUBLIC urls, hashes them, polls the live manifest, applies every listed patch and compares the result to the target dylib byte-for-byte |
@@ -202,22 +202,30 @@ pending detail.
     program to the shell so its parent is not the app. See
     `updaterLaunchCommand` in `auto-update.ts` for the required `""` title
     argument and why the path must be quoted.
-- **There is no installer offered for Windows, and that is deliberate.** `deno
+- **There is no Windows installer at all: not offered, not built.** `deno
   desktop` authors a per-machine `.msi` under `%ProgramFiles%`, where the WebView2
   runtime cannot write its profile, so the window comes up blank
   (upstream `denoland/deno#36768`, still open). No in-app fix is possible: the
   runtime initialises WebView2 before the entrypoint runs and there is no config
-  option for that folder. The `.msi` is still BUILT and published so the per-user
-  install work has an artifact to test, but it is not offered on the landing page.
-  The portable zip is unaffected because it unpacks somewhere writable. The `yy`
-  version scheme above still holds, since the MSI is still built.
+  option for that folder. The `.msi` extension is what makes `deno desktop` author
+  an installer, so the build targets a plain directory and the release zips that —
+  the artifact was previously built and uploaded while never being offered, which
+  cost ~10MB of upload per release for a container nobody could use. The portable
+  zip is unaffected because it unpacks somewhere writable. Version `yy` survives
+  for the reason below (Windows Installer's `ProductVersion` bounds forced the
+  scheme originally, and it is now simply the project's scheme).
 - **`deno desktop` is experimental.** That is why release jobs pin Deno exactly
   (`v2.9.6`) while `check.yml` deliberately floats on `v2.9.x` as early warning.
 - **The payload carries no version stamp.** The archive holds exactly the same files for every
-  release: the manifest names the target version and the updater records what it applied in a
-  per-user state file (`%LOCALAPPDATA%\SemaClip\state.txt`), so there is nothing per-release to
-  embed. A bundle with no `version.txt` updates normally, and an update does not write one back —
-  both measured. This is why the portable zip can be unpacked over any version.
+  release: the manifest names the target version and the updater records what it applied INSIDE the
+  bundle it swapped (`.semaclip-version`), so there is nothing per-release to embed. A bundle with no
+  `version.txt` updates normally, and an update does not write one back — both measured. This is why
+  the portable zip can be unpacked over any version.
+  The record is deliberately NOT per-user (`%LOCALAPPDATA%`): a per-user file is readable from every
+  copy on the machine, so a re-extracted older bundle inherited a newer version recorded for a
+  DIFFERENT directory and reported "up to date" while its files were old. Unknown always means
+  "install the published payload", which costs one redundant download on a fresh extraction and
+  cannot leave a bundle claiming a version it does not have.
 - **The AppImage cannot update itself.** Deno stages a patch as `<dylib>.update` — NEXT TO THE
   DYLIB — and inside an AppImage that directory is a read-only squashfs mount, so staging fails with
   `os error 30` (EROFS). Measured on a real read-only mount against the live manifest. The `.AppImage`
@@ -285,10 +293,10 @@ manifest) rather than left in place.
    patched app.
 5. Confirm the rollback path by staging a deliberately broken patch on a test
    install, or at minimum confirm `<dylib>.backup` appears and is replaced.
-6. On Windows, run the portable zip and update through `Update and launch
-   SemaClip.cmd`. DONE for the updater itself (a 26.225 bundle applied 26.226, dylib
-   byte-identical to the published one, and the launcher's `-app` targeting was fixed
-   after it was found to fail on every run). Still to report from real hardware: the
-   RELAUNCH — the updater starts the app again once the swap is done, and that step
-   needs a desktop session, so it is not exercised by the `-no-launch` runs that
-   proved the swap.
+6. On Windows, run the portable zip and update from the app itself: it offers a
+   new version, downloads only when asked, and restarts into it. The launcher
+   (`Update and launch SemaClip.cmd`) is RETIRED — it existed so a user could apply
+   an update by hand, and the app now starts the updater itself, so it is removed
+   from every install that had one. The swap is proven on real hardware (a bundle
+   applied the published payload, dylib byte-identical); the RELAUNCH needs a
+   desktop session, so it is not exercised by the `-no-launch` runs.
