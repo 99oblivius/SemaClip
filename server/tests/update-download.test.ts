@@ -32,7 +32,9 @@ function serve(
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const d = await crypto.subtle.digest("SHA-256", bytes);
+  // `bytes.buffer` is `ArrayBufferLike` (it may be shared), which the strict DOM lib refuses for
+  // `digest`. Copying into a fresh Uint8Array gives an `ArrayBuffer`-backed view.
+  const d = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
   return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
@@ -55,7 +57,11 @@ Deno.test("downloadVerified streams the payload and reports progress to completi
   assertEquals(res.sha256, sum);
   assert(seen.length > 0, "progress must be reported at least once");
   // Monotonic: a progress bar that goes backwards is a bug the user sees immediately.
-  for (let i = 1; i < seen.length; i++) assert(seen[i] >= seen[i - 1], `progress went backwards: ${seen}`);
+  for (let i = 1; i < seen.length; i++) {
+    const prev = seen[i - 1]!;
+    const cur = seen[i]!;
+    assert(cur >= prev, `progress went backwards: ${seen}`);
+  }
   assertEquals(seen.at(-1), 1, "the final report must be complete");
   // The bytes on disk are the bytes served.
   assertEquals((await Deno.readFile(dest)).length, body.length);

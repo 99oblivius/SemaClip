@@ -53,6 +53,7 @@ export interface DownloadResult {
 /** How often progress is reported, so a fast download cannot flood the event stream. */
 const PROGRESS_INTERVAL_MS = 250;
 
+
 /**
  * Stream `url` to `dest`, verifying its sha256 and reporting progress.
  *
@@ -68,7 +69,13 @@ export async function downloadVerified(
     onProgress?: (p: DownloadProgress) => void;
     signal?: AbortSignal;
     log?: (msg: string) => void;
-  } = {},
+    /**
+     * Minimum ms between progress reports. Overridable so a test can observe every chunk of a
+     * transfer that finishes faster than the production interval — at the default, a 64KB local
+     * download completes before the first report and the progress path is never exercised.
+     */
+    intervalMs?: number;
+    } = {},
 ): Promise<DownloadResult> {
   const log = opts.log ?? (() => {});
   const part = `${dest}.part`;
@@ -104,7 +111,7 @@ export async function downloadVerified(
       hasher.update(chunk);
       received += chunk.byteLength;
       const now = performance.now();
-      if (now - lastReport >= PROGRESS_INTERVAL_MS) {
+      if (now - lastReport >= (opts.intervalMs ?? PROGRESS_INTERVAL_MS)) {
         lastReport = now;
         opts.onProgress?.({
           received,

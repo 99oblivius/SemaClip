@@ -68,8 +68,8 @@ Deno.test("only a staged frame announces something installable", async () => {
 
   const staged = seen.filter((e) => e.type === "update-staged");
   assertEquals(staged.length, 1);
-  assertEquals(staged[0].version, "26.241");
-  assertEquals(staged[0].canApplyByRestart, true);
+  assertEquals(staged[0]!.version, "26.241");
+  assertEquals(staged[0]!.canApplyByRestart, true);
   un();
 });
 
@@ -84,8 +84,8 @@ Deno.test("a rollback reports its reason and is a distinct frame type", async ()
   emitAppEvent({ type: "update-rollback", version: "previous launch failed" });
 
   assertEquals(seen.length, 1);
-  assertEquals(seen[0].type, "update-rollback");
-  assertEquals(seen[0].version, "previous launch failed");
+  assertEquals(seen[0]!.type, "update-rollback");
+  assertEquals(seen[0]!.version, "previous launch failed");
   un();
 });
 
