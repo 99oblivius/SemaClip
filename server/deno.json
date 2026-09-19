@@ -1,6 +1,6 @@
 {
   "name": "semaclip-server",
-  "version": "26.232",
+  "version": "26.233",
   "exports": "./main.ts",
   "nodeModulesDir": "auto",
   "tasks": {

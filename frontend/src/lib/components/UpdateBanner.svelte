@@ -23,6 +23,7 @@
 
   let staged = $state<string | null>(null);
   let canRestart = $state(true);
+  let launcherPath = $state<string | null>(null);
   let restarting = $state(false);
   let error = $state<string | null>(null);
   let dismissed = $state<string | null>(null);
@@ -36,6 +37,7 @@
         if (s.pendingVersion) {
           staged = s.pendingVersion;
           canRestart = s.canApply;
+          launcherPath = s.sidecarLauncherPath;
         }
       })
       .catch(() => {
@@ -118,8 +120,8 @@
         {#if canRestart}
           Updates apply on launch, so this restarts SemaClip to install it.
         {:else}
-          Windows applies updates while the app is closed and cannot swap a running
-          program — use the update launcher in the app's folder.
+          Windows cannot replace a running program, so run the update launcher to install it:
+          <span class="text-ash">{launcherPath ?? 'Launch SemaClip (updates).cmd in the app folder'}</span>
         {/if}
       </span>
     </div>

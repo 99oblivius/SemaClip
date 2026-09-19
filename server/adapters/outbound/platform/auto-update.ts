@@ -170,6 +170,101 @@ export function applyAppImageUpdate(): { restarting: boolean; error: string | nu
 }
 
 /**
+ * Windows: check the manifest OURSELVES and, when a newer version exists, tell the user to run the
+ * sidecar's launcher.
+ *
+ * ── WHY THE RUNTIME'S OWN CHECK CANNOT DO THIS ──────────────────────────────────────────────
+ * `Deno.autoUpdate()` compares `manifest.version` against `Deno.desktopVersion`... which is NULL on
+ * the Windows target even when a version is baked (measured with a minimal app: "9.9.9" on
+ * linux-x64, null on win-x64, with `"app_version":"9.9.9"` present in the Windows dylib). With a
+ * null side of the comparison the runtime never stages, so the banner could never appear.
+ *
+ * MEASURED on a 26.232 win-x64 build with a working version channel, against a published 26.233
+ * whose patch downloads fine (HTTP 200, patch-26.232-to-26.233.bin):
+ *
+ *     Updates: version 26.232 (from env)
+ *     Updates: current 26.232, polling the baseUrl baked into this build
+ *     -> no patch staged, no banner. The runtime's check is inert here.
+ *
+ * So the same reconciliation Linux does is used, minus the download: Windows does NOT need the
+ * patch, because the sidecar installs the published payload itself. Verified on that same build:
+ *
+ *     SemaClipUpdater.exe -check -app C:\wintest232
+ *     no version recorded here; installing the published 26.233
+ *     installed= latest=26.233 update=true
+ *
+ * NOTHING IS STAGED HERE. `pendingVersion` means "an update is ready and the user must act", and on
+ * Windows the action is running the launcher — so that is what the UI is told.
+ */
+async function checkWindowsUpdate(
+  manifestUrl: string,
+): Promise<{ available: boolean; reason?: string; error?: string }> {
+  if (!status.current) {
+    return { available: false, reason: "no version baked in (dev run)" };
+  }
+
+  let manifest: { version?: string };
+  try {
+    const res = await fetch(manifestUrl, { signal: AbortSignal.timeout(30_000) });
+    if (!res.ok) return { available: false, error: `manifest fetch failed: HTTP ${res.status}` };
+    manifest = await res.json();
+  } catch (err) {
+    return {
+      available: false,
+      error: `manifest fetch failed: ${err instanceof Error ? err.message : err}`,
+    };
+  }
+
+  const latest = manifest.version;
+  if (!latest) return { available: false, error: "manifest has no version" };
+  if (latest === status.current) return { available: false, reason: `up to date (${status.current})` };
+
+  // Older published version than what is installed: a rolled-back release, or a local build ahead
+  // of the manifest. Never offer to "update" backwards.
+  if (compareVersions(latest, status.current) <= 0) {
+    return {
+      available: false,
+      reason: `published ${latest} is not newer than ${status.current}`,
+    };
+  }
+
+  if (!status.sidecarPath || !status.sidecarLauncherPath) {
+    return {
+      available: false,
+      error:
+        `an update to ${latest} exists but the updater could not be placed, so it cannot be ` +
+        `applied. ${status.sidecarError ?? ""}`.trim(),
+    };
+  }
+
+  status.pendingVersion = latest;
+  console.log(
+    `Updates: ${latest} available (running ${status.current}) — apply by running ` +
+      `${status.sidecarLauncherPath}`,
+  );
+  // `canApplyByRestart: false` is the truth on Windows: there is no in-app restart that installs
+  // it. The banner renders the launcher instruction instead of a Restart button.
+  emitAppEvent({ type: "update-staged", version: latest, canApplyByRestart: false });
+  return { available: true };
+}
+
+/**
+ * Numeric compare of `v{yy}.{patch}` (and any dotted numeric version).
+ *
+ * Plain `===` on the strings is not enough: the scheme advances by commit count, so "26.9" vs
+ * "26.10" must compare numerically or a release would look OLDER than the one before it and the
+ * update would never be offered.
+ */
+export function compareVersions(a: string, b: string): number {
+  const parse = (v: string) => v.split(".").map((p) => Number.parseInt(p, 10) || 0);
+  const [x, y] = [parse(a), parse(b)];
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0);
+    if (d !== 0) return d < 0 ? -1 : 1;
+  }
+  return 0;
+}
+/**
  * Starts the updater. Safe to call unconditionally: it is inert under
  * `deno run` and on a build with no release.baseUrl configured.
  */
@@ -200,6 +295,20 @@ export async function startAutoUpdate(baseUrl?: string): Promise<void> {
         `Updates: Windows sidecar could not be placed — staged updates cannot be applied. ${sc.error ?? ""}`,
       );
     }
+    // THE CHECK IS OURS, NOT THE RUNTIME'S. See checkWindowsUpdate(): the runtime compares against
+    // Deno.desktopVersion, which is null on this target, so autoUpdate() never stages anything and
+    // the user is never told. Returning here also means the runtime's call below is never reached
+    // on Windows — a call that provably does nothing (measured: no patch staged with a valid
+    // version channel and a downloadable patch).
+    const manifestUrl = baseUrl ?? Deno.env.get("SEMACLIP_UPDATE_URL") ?? DEFAULT_MANIFEST_URL;
+    const res = await checkWindowsUpdate(manifestUrl);
+    if (res.error) {
+      status.sidecarError = res.error;
+      console.warn(`Updates: ${res.error}`);
+    } else if (!res.available && res.reason) {
+      console.log(`Updates: ${res.reason}`);
+    }
+    return;
   }
   // LINUX: the runtime's own updater CANNOT work from an AppImage, so this does the check and the
   // download itself. See appimage-update.ts for the mechanism and the measurement.
