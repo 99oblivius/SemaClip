@@ -41,10 +41,26 @@ Deno.test("a consumer reading stdout receives every byte the child wrote", async
   });
 
   // Feed something so the piped path is taken (that is the path under test on Windows).
+  //
+  // A FAILED WRITE IS EXPECTED, NOT AN ERROR. If the child exits before this write lands, the pipe is
+  // already closed and `write` throws `BrokenPipe` — which made this test flaky on CI (measured: it
+  // failed this way on a commit whose diff did not touch this path at all, and passed on a rerun of
+  // the same code locally). The write is part of the SETUP, not the property under test, so a broken
+  // pipe here changes nothing about what is being asserted; the child simply never waited for input.
+  // Letting it throw turned a setup race into a red suite.
   const writer = child.stdin!.getWriter();
-  await writer.write(new TextEncoder().encode("x"));
-  writer.releaseLock();
-  await child.stdin!.close();
+  try {
+    await writer.write(new TextEncoder().encode("x"));
+  } catch {
+    // The child already exited and left nothing to write to. The byte-count assertion below is the
+    // real check and is unaffected.
+  }
+  try {
+    writer.releaseLock();
+    await child.stdin!.close();
+  } catch {
+    // Same: closing a pipe whose far end is gone must not fail the test.
+  }
 
   let read = 0;
   if (child.stdout) {
