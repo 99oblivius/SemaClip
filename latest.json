@@ -1,6 +1,11 @@
 {
   "version": "26.224",
-  "patches": {},
+  "patches": {
+    "26.223": {
+      "name": "patch-26.223-to-26.224.bin",
+      "sha256": "a585dbfbd4def131b4985d9324bf36ecaad73bd1724631c916fde08d56cdb3a6"
+    }
+  },
   "artifacts": {
     "win-x64": {
       "name": "SemaClip-26.224-win-x64-portable.zip",
