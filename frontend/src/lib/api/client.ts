@@ -256,6 +256,14 @@ export interface UpdateStatus {
   updateError: string | null;
   sidecarPath: string | null;
   sidecarError: string | null;
+  /**
+   * The version the check FOUND and is offering, before anything is downloaded.
+   *
+   * Distinct from `pendingVersion`, which means "downloaded and a restart installs it". The app
+   * offers an update on open and downloads only when the user asks, so this is what the Download
+   * button acts on; conflating the two would offer a restart that installs nothing.
+   */
+  availableVersion: string | null;
 }
 
 export async function getUpdateStatus(): Promise<UpdateStatus> {
@@ -285,6 +293,17 @@ export async function restartApp(): Promise<{ restarting: boolean; error: string
  */
 export async function retryUpdateCheck(): Promise<{ started: boolean; error: string | null }> {
   const r = await fetch('/api/update/check', { method: 'POST' });
+  return await r.json();
+}
+
+/**
+ * Download the offered update.
+ *
+ * The check only OFFERS an update now — nothing is fetched on open — so this is the one way the
+ * bytes move. It returns as soon as the transfer starts; progress arrives over /api/events.
+ */
+export async function downloadUpdate(): Promise<{ started: boolean; error: string | null }> {
+  const r = await fetch('/api/update/download', { method: 'POST' });
   return await r.json();
 }
 

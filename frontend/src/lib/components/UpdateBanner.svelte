@@ -6,9 +6,8 @@
    * 1. DOWNLOADING. The payload is fetched while the app is fully usable, with a progress bar and
    *    an explicit "keep this window open". It is downloaded on open, so by the time the user
    *    notices this banner the transfer is usually already done.
-   * 2. READY. Downloaded and verified. SemaClip restarts itself to install it — the user is not
-   *    asked to do anything, and the copy says so rather than presenting a button they would have
-   *    to guess at.
+   * 2. READY. Downloaded and verified, waiting for the user to restart. NOTHING installs on its own:
+   *    the app never closes itself, and the button is the only way to apply it.
    * 3. WORKING. A restart is held back while a job is queued or running, and the copy names what it
    *    is waiting for. Closing the window on its own mid-download is the least intuitive thing an
    *    auto-update can do, so it waits and restarts the moment nothing is running.
@@ -23,7 +22,14 @@
    * miss a stage that already happened.
    */
   import Icon from '$lib/components/Icon.svelte';
-  import { apiClient, getUpdateLog, getUpdateStatus, restartApp, retryUpdateCheck } from '$lib/api/client';
+  import {
+    apiClient,
+    downloadUpdate,
+    getUpdateLog,
+    getUpdateStatus,
+    restartApp,
+    retryUpdateCheck,
+  } from '$lib/api/client';
   import { onMount } from 'svelte';
   import { browser } from '$app/environment';
 
@@ -43,18 +49,36 @@
   /** True once the payload is downloaded and verified, which is when a restart installs it. */
   let readyToInstall = $state(false);
   /**
+   * The version the check found and is OFFERING, before anything has been downloaded.
+   *
+   * ── WHY THE APP ASKS INSTEAD OF FETCHING ────────────────────────────────────────────────────
+   * The check used to start a ~100MB download on open, unasked. The owner rejected that: opening the
+   * app should not spend their bandwidth. So the check stops at the offer, and the download happens
+   * here, when they click.
+   */
+  let offered = $state<string | null>(null);
+  /** True while the download request is in flight, so the button cannot be pressed twice. */
+  let startingDownload = $state(false);
+  /**
    * Jobs that are still working, and therefore the reason a restart is being held back.
    *
    * ── WHY A RESTART WAITS FOR THEM ────────────────────────────────────────────────────────────
-   * "it will automatically restart" has to mean SAFELY. A job that is downloading, transcribing or
-   * detecting is killed by a restart, and the user would watch the app close because they clicked
-   * something unrelated. So while any job is queued or running the banner SAYS it is waiting
-   * instead of taking the window away, and it restarts on its own the moment the queue drains.
+   * A restart kills any job that is downloading, transcribing or detecting, so when work is running
+   * the first click WARNS instead of proceeding. The second click proceeds: nothing closes the app on
+   * its own, so a deferral that could not be overridden would make the button refuse forever.
    * A job status is read the same way the rest of the app reads it: queued/running are live.
    */
   let activeJobs = $state(0);
   /** Set when a restart was deferred, so the copy can explain the wait rather than look stuck. */
   let waitingForJobs = $state(false);
+  /**
+   * True once the user has been TOLD that work is running and has clicked again.
+   *
+   * The deferral exists to inform, not to block. With the automatic path gone, the button is the only
+   * way to apply an update and it must not be able to refuse forever — the jobs are the user's to
+   * risk, and they can see the warning.
+   */
+  let confirmedWithWork = $state(false);
   /**
    * Why the last check or download failed, when it did.
    *
@@ -84,15 +108,29 @@
    * "is it safe" and one place that restarts. A second copy on the auto path is how the two drift
    * and the automatic one starts killing work the button would have waited for.
    */
-  async function restartNowChecked(opts: { byHand: boolean }) {
+  /**
+   * Apply the update when the user ASKS, and only then.
+   *
+   * ── WHY THERE IS NO TIMER HERE ANY MORE ─────────────────────────────────────────────────────
+   * This used to restart on its own a few seconds after the download landed, "because the user was
+   * told they would not need to press anything". The owner rejected that outright: "why is it
+   * triggering the update on itself after being done downloading?" A window that closes itself while
+   * someone is reading is indistinguishable from a crash, and it takes the decision away from them.
+   *
+   * The timer is REMOVED, not merely delayed. Nothing on this component may close the app unless a
+   * click asked for it — the Restart button below is the only caller of restartNowChecked.
+   */
+  async function restartNowChecked(): Promise<void> {
     if (restarting) return;
+    // ── THE USER ASKED, SO THE ANSWER IS THEIRS ────────────────────────────────────────────────
+    // A restart that is DEFERRED because work is running is still a refusal of what they asked for,
+    // and it was the automatic path that made that deferral defensible. With nothing closing the app
+    // on its own, the button does what it says: the jobs are the user's to lose, and the copy warns
+    // them rather than blocking.
     await refreshActiveJobs();
-    if (activeJobs > 0) {
-      // DEFERRED, deliberately. The user is told rather than interrupted: closing the window on its
-      // own while work is running is the least intuitive thing an auto-update can do. `byHand` is
-      // carried so the button can say "waiting for the running job" instead of appearing to fail.
+    if (activeJobs > 0 && !confirmedWithWork) {
+      // Told, not trapped: the first click explains that work is running and the second proceeds.
       waitingForJobs = true;
-      void opts;
       return;
     }
     waitingForJobs = false;
@@ -106,29 +144,31 @@
       error = err instanceof Error ? err.message : 'Restart failed';
       // A refused hand-off means the updater ran and recorded why, so offer its account.
       failedBefore = true;
-      void opts;
     }
   }
 
   /**
-   * Once downloaded, apply it without being asked — but only when nothing is running.
+   * Download the offered update, because the user asked for it.
    *
-   * The delay keeps the app from closing the instant the last byte lands, which would feel like a
-   * crash. Re-checking every few seconds is what makes the restart happen on its OWN once the queue
-   * drains, rather than waiting for the user to press the button that they were told they would not
-   * need.
+   * Progress arrives over the event stream, so this only starts the transfer: the button disables
+   * and the progress banner takes over as soon as the first frame lands.
    */
-  $effect(() => {
-    if (!browser) return;
-    if (!readyToInstall || !canRestart || dismissed !== null) return;
-    const tick = setInterval(() => {
-      if (restarting) return;
-      void refreshActiveJobs().then(() => {
-        if (activeJobs === 0) void restartNowChecked({ byHand: false });
-      });
-    }, 5000);
-    return () => clearInterval(tick);
-  });
+  async function startDownload() {
+    if (startingDownload) return;
+    startingDownload = true;
+    try {
+      const res = await downloadUpdate();
+      if (!res.started) {
+        updateError = res.error ?? 'Could not start the download';
+        startingDownload = false;
+      }
+      // On success the progress frames drive the UI; leaving the button disabled would strand it if
+      // a frame never arrived, so the progress listener below re-enables it via `offered = null`.
+    } catch (err) {
+      updateError = err instanceof Error ? err.message : 'Could not start the download';
+      startingDownload = false;
+    }
+  }
 
   /** Bytes as MB, for the label under the bar. */
   function mb(bytes: number): string {
@@ -141,6 +181,12 @@
     if (!browser) return;
     getUpdateStatus()
       .then((s) => {
+        // An offer first: it is the state a fresh launch lands in, since nothing is downloaded
+        // until the user asks. Checked before the staged/downloading cases because those are what
+        // the offer BECOMES, and a status carrying both is already past offering.
+        if (s.availableVersion && !s.pendingVersion && s.phase === 'idle') {
+          offered = s.availableVersion;
+        }
         if (s.pendingVersion) {
           staged = s.pendingVersion;
           canRestart = s.canApply;
@@ -190,6 +236,20 @@
         // restart is never offered for a payload that is still arriving.
         readyToInstall = false;
         staged = null;
+        // And the OFFER is over: it is being fulfilled, so leaving the Download button up would
+        // invite a second fetch of the same 100MB.
+        offered = null;
+        startingDownload = false;
+      } catch {
+        // A malformed frame must not break the surface.
+      }
+    };
+    const onAvailable = (ev: MessageEvent) => {
+      try {
+        const data = JSON.parse(ev.data) as { version: string };
+        if (!data.version) return;
+        offered = data.version;
+        updateError = null;
       } catch {
         // A malformed frame must not break the surface.
       }
@@ -224,10 +284,12 @@
         // as above
       }
     };
+    es.addEventListener('update-available', onAvailable);
     es.addEventListener('update-progress', onProgress);
     es.addEventListener('update-staged', onStaged);
     es.addEventListener('update-rollback', onRollback);
     return () => {
+      es.removeEventListener('update-available', onAvailable);
       es.removeEventListener('update-progress', onProgress);
       es.removeEventListener('update-staged', onStaged);
       es.removeEventListener('update-rollback', onRollback);
@@ -235,8 +297,15 @@
     };
   });
 
+  /**
+   * What the Restart button calls.
+   *
+   * A second click, after the work warning, is a confirmation: the user has been told and still wants
+   * the update applied.
+   */
   async function restartNow() {
-    await restartNowChecked({ byHand: true });
+    confirmedWithWork = activeJobs > 0;
+    await restartNowChecked();
   }
 
   function askNotify() {
@@ -345,6 +414,43 @@
   </div>
 {/if}
 
+{#if offered && !progress && dismissed !== `offered-${offered}`}
+  <!-- THE OFFER. A newer version exists and NOTHING has been downloaded: the app never fetches an
+       update on its own, so this is where the user decides. Without this the offer would be
+       invisible — the check would find an update and the UI would show nothing at all. -->
+  <div
+    class="flex items-center gap-3 border-b border-accent/40 bg-accent/10 px-3 py-2"
+    role="status"
+    aria-live="polite"
+  >
+    <Icon name="download" size={14} class="shrink-0 text-accent" />
+    <div class="flex min-w-0 flex-1 flex-col">
+      <span class="font-mono text-xs text-ink">
+        SemaClip {offered} is available
+      </span>
+      <span class="font-mono text-[10px] text-ash-dim">
+        Nothing is downloaded yet. It installs when you restart, and you can keep working while it
+        downloads.
+      </span>
+    </div>
+    <button
+      class="shrink-0 rounded bg-accent px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
+      onclick={startDownload}
+      disabled={startingDownload}
+      title="Download the update in the background"
+    >
+      {startingDownload ? 'Starting…' : 'Download'}
+    </button>
+    <button
+      class="shrink-0 rounded border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent"
+      onclick={() => (dismissed = `offered-${offered}`)}
+      title="Not now; the offer returns on the next launch"
+    >
+      Later
+    </button>
+  </div>
+{/if}
+
 {#if progress && dismissed !== `downloading-${progress.version}`}
   <!-- THE DOWNLOAD IS HAPPENING WHILE THE APP IS OPEN, which is the whole point: the user can keep
        working, and is told not to close the window until it finishes. The bar animates while the
@@ -364,8 +470,8 @@
           {/if}
         </span>
         <span class="font-mono text-[10px] text-ash-dim">
-          Keep this window open. Once the download finishes, SemaClip restarts itself and installs
-          the update — you can keep working until then.
+          Downloading in the background — keep working. Nothing installs until you restart SemaClip
+          yourself.
           {#if progress.total > 0}
             <span class="text-ash">{mb(progress.received)} of {mb(progress.total)}</span>
           {/if}
@@ -399,11 +505,10 @@
       </span>
       <span class="font-mono text-[10px] text-ash-dim">
         {#if waitingForJobs}
-          Waiting for {activeJobs === 1 ? 'a download or job' : `${activeJobs} downloads or jobs`} to
-          finish. SemaClip restarts by itself the moment nothing is running.
+          {activeJobs === 1 ? 'A download or job is' : `${activeJobs} downloads or jobs are`} still
+          running, and restarting now would lose that work. Click again to restart anyway.
         {:else if canRestart}
-          Downloaded and verified. SemaClip restarts by itself to install it, as soon as nothing is
-          running. You can keep working until then.
+          Downloaded and verified. Restart when it suits you — nothing installs until you do.
         {:else}
           This build cannot restart itself to install the update. Re-download SemaClip
           when convenient — the update is already available.
@@ -420,7 +525,7 @@
         {#if restarting}
           Restarting…
         {:else if waitingForJobs}
-          Restart when idle
+          Restart anyway
         {:else}
           Restart now
         {/if}

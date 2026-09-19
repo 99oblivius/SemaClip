@@ -50,6 +50,22 @@ func openUpdateLog(dir string) (*os.File, error) {
 	return f, nil
 }
 
+// failure writes to the log AND to stderr.
+//
+// ── WHY EVERY FAILURE GOES TO THE LOG ───────────────────────────────────────────────────────────
+// The failure paths all wrote to os.Stderr, which the APP DISCARDS: it starts this program detached
+// with its standard handles null, because it is about to exit and cannot babysit a console. So every
+// diagnosis the updater reached after the app quit went nowhere — the owner's log ended mid-story,
+// with the failing step missing, and the only visible evidence was the app closing.
+//
+// u.log writes through Out, which is already a MultiWriter over stdout and the log file (see main).
+// Routing these through it is what makes the log a COMPLETE account rather than a partial one.
+func (u *Updater) failure(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	u.log("FAILED: %s", msg)
+	fmt.Fprintf(os.Stderr, "%s\n", msg)
+}
+
 func main() {
 	appDir := flag.String("app", "", "directory holding the app (default: the updater's own directory)")
 	checkOnly := flag.Bool("check", false, "report whether an update is available, change nothing")
@@ -88,24 +104,18 @@ func main() {
 	if *appDir == "" {
 		exe, err := os.Executable()
 		if err != nil {
-			fatal("cannot locate this executable: %v", err)
+			// NOT `fatal(logFile, …)` and it cannot be: the log lives in the app directory, which is
+			// exactly what could not be determined here. A plain exit is the honest thing.
+			earlyFatal("cannot locate this executable: %v", err)
 		}
 		*appDir = filepath.Dir(exe)
 	}
 	abs, err := filepath.Abs(*appDir)
 	if err != nil {
-		fatal("bad app dir %q: %v", *appDir, err)
+		earlyFatal("bad app dir %q: %v", *appDir, err)
 	}
 
-	cfg, err := LoadConfig(abs)
-	if err != nil {
-		fatal("%v", err)
-	}
-	if *manifestURL != "" {
-		cfg.ManifestURL = *manifestURL
-	}
-
-	u := &Updater{Dir: abs, Cfg: cfg, Deadline: time.Now().Add(*timeout), Out: os.Stdout}
+	u := &Updater{Dir: abs, Cfg: Config{ManifestURL: DefaultManifestURL}, Deadline: time.Now().Add(*timeout), Out: os.Stdout}
 
 	// EVERYTHING IS ALSO WRITTEN TO A FILE IN THE BUNDLE.
 	//
@@ -114,17 +124,33 @@ func main() {
 	// owner saw a console flash and vanish and had nothing to report but "it closed". A file in the
 	// app directory survives the window and is readable from the UI, so a failed update can explain
 	// itself after the fact.
+	//
+	// OPENED BEFORE THE CONFIG IS READ, deliberately. It used to open late, after LoadConfig, so a
+	// failure on the way there — or anything else in that window — was reported only to the discarded
+	// stderr. The log is the one surface the user can read, so it opens as soon as the directory is
+	// known and every subsequent failure reaches it.
 	// A log is best-effort. The bundle's own checks in Preflight report a missing or read-only app
 	// dir; this must not report one as present by creating it.
+	var logFile *os.File
 	if f, err := openUpdateLog(abs); err == nil {
 		defer f.Close()
+		logFile = f
 		u.Out = io.MultiWriter(os.Stdout, f)
 	}
+
+	cfg, err := LoadConfig(abs)
+	if err != nil {
+		fatal(logFile, "%v", err)
+	}
+	if *manifestURL != "" {
+		cfg.ManifestURL = *manifestURL
+	}
+	u.Cfg = cfg
 
 	if *checkOnly {
 		res, err := u.Check()
 		if err != nil {
-			fatal("check failed: %v", err)
+			fatal(logFile, "check failed: %v", err)
 		}
 		fmt.Printf("installed=%s latest=%s update=%v\n", res.Installed, res.Latest, res.Available)
 		return
@@ -150,8 +176,17 @@ func main() {
 		if pid == 0 {
 			pid = os.Getppid()
 		}
-		u.log("waiting for the app (pid %d) to exit before updating %s", pid, abs)
-		waitForPIDExit(pid, 5*time.Minute)
+		// WAIT FOR THE APP BY NAME AS WELL AS PID.
+	//
+	// Waiting on the pid alone is not enough: the app can hand the same work to another process, and a
+	// pid that never clears means the wait burns its whole five-minute bound with nothing on screen —
+	// which is indistinguishable from a hang. Waiting for "nothing is running from this directory" is
+	// the condition the swap actually needs, so it cannot disagree with the swap's own isRunning gate.
+	if err := u.WaitForAppExit(pid, 5*time.Minute); err != nil {
+		// Reported and CONTINUED: refusing to install is recoverable, and the relaunch below still
+		// gives the user their app back.
+		u.log("continuing anyway: %v", err)
+	}
 
 		// THE APP ALREADY DOWNLOADED IT. Installing that archive is what makes the restart quick
 		// and the progress the user watched meaningful; re-fetching would do neither.
@@ -160,13 +195,13 @@ func main() {
 			if err := u.ApplyStaged(*payloadPath, *payloadSha, *payloadVersion); err != nil {
 				// A failed update must not leave the user with no app, so fall through to the
 				// relaunch, which starts whatever is on disk now.
-				fmt.Fprintf(os.Stderr, "update skipped: %v\n", err)
+				u.failure("update skipped (the downloaded payload did not install): %v", err)
 			}
 		} else if err := u.Apply(*force); err != nil {
-			fmt.Fprintf(os.Stderr, "update skipped: %v\n", err)
+			u.failure("update skipped: %v", err)
 		}
 		if err := u.LaunchAndWait(); err != nil {
-			fatal("%v", err)
+			fatal(logFile, "%v", err)
 		}
 		return
 	}
@@ -174,25 +209,49 @@ func main() {
 	if *payloadPath != "" {
 		// -payload only makes sense with -relaunch (it exists so a running app can hand off what it
 		// downloaded). Refusing is better than silently ignoring the app's work.
-		fatal("-payload requires -relaunch: it installs an archive the running app downloaded")
+		fatal(logFile, "-payload requires -relaunch: it installs an archive the running app downloaded")
 	}
 
 	// A failed update must never prevent the app from starting: a user with a
 	// broken network or a half-published manifest still needs their clipper. Every
 	// error below is reported and then stepped over.
 	if err := u.Apply(*force); err != nil {
-		fmt.Fprintf(os.Stderr, "update skipped: %v\n", err)
+		u.failure("update skipped: %v", err)
 	}
 
 	if *noLaunch {
 		return
 	}
 	if err := u.LaunchAndWait(); err != nil {
-		fatal("%v", err)
+		fatal(logFile, "%v", err)
 	}
 }
 
-func fatal(format string, args ...any) {
+// earlyFatal reports and exits when the log file's own location is not yet known.
+//
+// It exists so the two failures that happen BEFORE the app directory is resolved cannot pretend to
+// have written a log. Everything after that point goes through fatal, which does write one.
+func earlyFatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
+	os.Exit(1)
+}
+
+// fatal reports and exits.
+//
+// ── WHY IT ALSO WRITES THE LOG NOW ──────────────────────────────────────────────────────────────
+// It wrote only to stderr, which the app discards. A relaunch that failed here — "no launcher
+// executable in <dir>", for instance — exited before leaving evidence anywhere the user could read,
+// so the log stopped and the app simply did not come back. That is precisely the shape of the
+// reported failure, and a log that ends without saying why is worse than no log.
+//
+// The sink is passed in rather than being package-level because the log lives in the APP directory,
+// which is only known after flags are parsed. `log` is nil-safe, so this works even when the log
+// file could not be opened at all.
+func fatal(f *os.File, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr, "error: %s\n", msg)
+	if f != nil {
+		fmt.Fprintf(f, "FAILED: %s\n", msg)
+	}
 	os.Exit(1)
 }

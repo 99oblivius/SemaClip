@@ -1,16 +1,22 @@
 /**
- * The auto-restart must NOT fire while work is running, and MUST fire once it is not.
+ * The restart happens when the USER asks, and never on its own.
  *
- * ── WHY THIS IS A TEST AND NOT A VISUAL CHECK ───────────────────────────────────────────────────
- * "it will automatically restart" is the one promise in the update flow that can destroy user work:
- * a job mid-download or mid-transcription is killed by the process exiting. That is a behavioural
- * property, so it is asserted here against the real component's logic rather than eyeballed in a
- * browser. The component is driven through the SAME decision function the UI uses, with a stubbed
- * jobs endpoint, so the assertion is about the decision the app makes and not a copy of it.
+ * ── WHY THIS TEST EXISTS, AND WHAT IT USED TO SAY ────────────────────────────────────────────────
+ * It used to assert the opposite: that a timer restarted the app automatically once nothing was
+ * running, on the reasoning that the banner had promised the user they would not need to press
+ * anything. The owner rejected that outright:
+ *
+ *   "why is it triggering the update on itself after being done downloading? Even the downloading
+ *    should not be happening automatically."
+ *
+ * A window that closes itself while someone is reading is indistinguishable from a crash, and it
+ * takes a decision away from them. So the assertions are INVERTED: no timer, no automatic restart,
+ * and a download that only starts on a click. The properties that stay are the ones that protect
+ * work — the jobs check, and the latch against a double restart.
  *
  * Svelte 5 components cannot be mounted outside a browser build here (no jsdom in this project), so
- * the decision is extracted and exercised directly. The extraction is the point: one function decides
- * "safe to restart" for both the button and the automatic path.
+ * the component is read as source. That is a weaker check, so each assertion names the specific
+ * line that would have to change for the behaviour to regress.
  */
 import { readFileSync } from "node:fs";
 
@@ -25,25 +31,57 @@ function check(name, ok, detail = "") {
   if (!ok) failures++;
 }
 
-console.log("=== the automatic path exists and is guarded");
+console.log("=== nothing restarts the app on its own");
 
 check(
-  "an automatic restart path exists",
-  /if \(activeJobs === 0\) void restartNowChecked\(\{ byHand: false \}\)/.test(SRC),
-  "the timer must call the checked restart",
+  "no timer exists to restart the app",
+  !/setInterval\s*\(/.test(SRC) && !/setTimeout\s*\(\s*\(\)\s*=>\s*restart/.test(SRC),
+  "the automatic path was a setInterval; any timer here is a regression",
 );
 
 check(
-  "the automatic path does NOT call restartApp directly",
-  // A second, unguarded call to the API on the auto path is exactly the bug: it would kill work the
-  // button would have waited for.
+  "no automatic call to the checked restart remains",
+  !/restartNowChecked\(\{\s*byHand/.test(SRC),
+  "the auto path passed byHand:false and is gone; the argument should be gone with it",
+);
+
+check(
+  "there is exactly ONE place that restarts the app",
   (SRC.match(/restartApp\(\)/g) ?? []).length === 1,
-  `${(SRC.match(/restartApp\(\)/g) ?? []).length} call sites`,
+  `${(SRC.match(/restartApp\(\)/g) ?? []).length} call sites — a second one is the bug`,
 );
 
 check(
-  "the guard is the jobs check, not a timer alone",
-  /await refreshActiveJobs\(\);[\s\S]{0,200}?if \(activeJobs > 0\)/.test(SRC),
+  "the button is the only caller of the restart decision",
+  /onclick=\{restartNow\}/.test(SRC),
+  "the click handler must be wired to the restart path",
+);
+
+console.log("\n=== the download starts only when asked");
+
+check(
+  "a Download button exists",
+  /onclick=\{startDownload\}/.test(SRC),
+  "the check only offers an update, so the UI must be able to request one",
+);
+
+check(
+  "the offer is shown as an offer, not as a ready update",
+  /SemaClip \{offered\} is available/.test(SRC),
+  "the offered state needs its own copy, or the user cannot tell it is not downloaded",
+);
+
+check(
+  "the offer copy says nothing is downloaded yet",
+  /Nothing is downloaded yet/.test(SRC),
+  "the distinction between offered and staged is the whole point of the split",
+);
+
+console.log("\n=== work is still protected");
+
+check(
+  "the restart re-checks jobs before proceeding",
+  /await refreshActiveJobs\(\);[\s\S]{0,300}?if \(activeJobs > 0/.test(SRC),
   "restartNowChecked must re-check jobs before restarting",
 );
 
@@ -53,61 +91,48 @@ check(
   "a queued job is work that a restart would destroy just as much as a running one",
 );
 
-console.log("\n=== the wait is visible, not silent");
-
 check(
-  "the banner says what it is waiting for",
-  /waitingForJobs/.test(SRC) && /Waiting for/.test(SRC),
-  "the user must be told, or the deferral looks like a stuck update",
+  "the user is told when work is running",
+  /waitingForJobs/.test(SRC) && /restarting now would lose that work/.test(SRC),
+  "the warning must name the consequence, not just the fact",
 );
 
 check(
-  "the button reflects the deferral",
-  /Restart when idle/.test(SRC),
-  "clicking Restart during work must not look like a failure",
+  "a second click proceeds anyway",
+  /confirmedWithWork/.test(SRC),
+  "the button is the only way to apply an update; a deferral that could not be overridden would refuse forever",
 );
-
-check(
-  "the READY copy promises the automatic restart",
-  // Scoped to the ready branch. The waiting branch also says "restarts by itself", so an unscoped
-  // match stayed green when the ready copy was replaced — the test proved nothing about the state
-  // the promise matters most in.
-  /Downloaded and verified\.[\s\S]{0,120}?restarts by itself to install it/i.test(SRC),
-  "the whole point: the user is told they do not need to press anything",
-);
-
-console.log("\n=== the automatic restart cannot loop or double-fire");
 
 check(
   "restarting is latched before the call",
   /restarting = true;[\s\S]{0,400}?await restartApp\(\)/.test(SRC),
-  "without the latch a re-entrant tick would spawn two restarts",
+  "without the latch a double click would spawn two restarts",
 );
 
 check(
   "a re-entrant call is refused",
-  /async function restartNowChecked\(opts: \{ byHand: boolean \}\) \{\s*\n\s*if \(restarting\) return;/.test(SRC),
-  "the guard must be the first statement",
-);
-
-check(
-  "the timer is cleared on teardown",
-  /return \(\) => clearInterval\(tick\)/.test(SRC),
-  "an uncleared interval keeps polling after the effect is gone",
+  /if \(restarting\) return;/.test(SRC),
+  "the guard must come first in the restart function",
 );
 
 console.log("\n=== downloading does not offer a restart");
 
 check(
-  "readiness is required for the automatic path",
-  /\$effect\(\(\) => \{\s*\n\s*if \(!browser\) return;\s*\n\s*if \(!readyToInstall \|\| !canRestart \|\| dismissed !== null\) return;/.test(SRC),
-  "a restart must never be offered for a payload that is still arriving",
-);
-
-check(
   "a progress frame clears readiness",
   /readyToInstall = false;\s*\n\s*staged = null;/.test(SRC),
   "a new download invalidates an earlier ready state",
+);
+
+check(
+  "a progress frame clears the offer",
+  /readyToInstall = false;\s*\n\s*staged = null;[\s\S]{0,200}?offered = null;/.test(SRC),
+  "leaving the Download button up during a download would invite a second fetch",
+);
+
+check(
+  "the ready copy does NOT promise an automatic restart",
+  !/restarts by itself to install it/i.test(SRC),
+  "the app never restarts itself now, so any such sentence is a lie",
 );
 
 console.log(`\nRESULT: ${failures === 0 ? "all passed" : `${failures} failed`}`);

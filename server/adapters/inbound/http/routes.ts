@@ -54,7 +54,7 @@ import {
 } from "@/adapters/outbound/platform/window-lifecycle.ts";
 import type { ResizeEdge } from "@/adapters/outbound/platform/gtk-frame.ts";
 import { logFilePath, readLogTail } from "@/adapters/outbound/platform/log-file.ts";
-import { retryUpdateCheck, updateStatus } from "@/adapters/outbound/platform/auto-update.ts";
+import { retryUpdateCheck, startUpdateDownload, updateStatus } from "@/adapters/outbound/platform/auto-update.ts";
 import { updateLogPath } from "@/adapters/outbound/platform/sidecar.ts";
 import { displayVersion } from "@/adapters/outbound/platform/app-version.ts";
 import { emitAppEvent, subscribeAppEvents, sseFrame } from "@/application/events.ts";
@@ -1012,6 +1012,17 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   // The UPDATER's own log, which is written by a separate process the app cannot read through the
   // normal log path.
   //
+  // Start the download the user asked for. The check only OFFERS an update now, so this is the
+  // one way bytes move: without it a newer version would be visible and never fetched.
+  //
+  // The reply returns as soon as the transfer STARTS. Holding the request open for a 100MB download
+  // would give the UI a request it cannot render progress for; the progress arrives over
+  // /api/events, which is what the banner already listens to.
+  app.post("/api/update/download", (c) => {
+    const res = startUpdateDownload();
+    return c.json(res, res.started ? 200 : 409);
+  });
+
   // The app starts the updater detached with its output discarded, so when an update failed the user
   // had nothing to report but "a console flashed and closed". This is that process's account of what
   // it did, and it is the difference between a diagnosable failure and a guess.

@@ -15,7 +15,14 @@
 export interface AppEvent {
   /** Monotonic, so a client can tell a replayed frame from a new one. */
   id: number;
-  type: "update-staged" | "update-rollback" | "update-progress";
+  /**
+   * `update-available` is the OFFER: a newer version exists and nothing has been downloaded.
+   *
+   * It is distinct from `update-staged` on purpose. Staged means the bytes are on disk and a restart
+   * installs them; available means the user has been told and the download has not started. A UI
+   * that conflated them would offer a restart that installs nothing.
+   */
+  type: "update-available" | "update-staged" | "update-rollback" | "update-progress";
   /** Human-facing version, or the rollback reason. */
   version: string;
   /**

@@ -355,7 +355,7 @@ func (u *Updater) ApplyStaged(payloadPath, sha, version string) error {
 	}
 	if err := swapBundleSkipping(root, u.Dir, backup, u.selfName(), updateLogName); err != nil {
 		if rbErr := swapBundleSkipping(backup, u.Dir, "", u.selfName(), updateLogName); rbErr != nil {
-			return fmt.Errorf("swap failed AND rollback failed (%v then %v) — reinstall from the .msi", err, rbErr)
+			return fmt.Errorf("swap failed AND rollback failed (%v then %v) — re-download SemaClip", err, rbErr)
 		}
 		return fmt.Errorf("swap failed, rolled back: %w", err)
 	}
@@ -585,7 +585,7 @@ func (u *Updater) Apply(force bool) error {
 	if err := swapBundleSkipping(root, u.Dir, backup, u.selfName(), updateLogName); err != nil {
 		// Put the old files back before reporting, so the app is left runnable.
 		if rbErr := swapBundleSkipping(backup, u.Dir, "", u.selfName(), updateLogName); rbErr != nil {
-			return fmt.Errorf("swap failed AND rollback failed (%v then %v) — reinstall from the .msi", err, rbErr)
+			return fmt.Errorf("swap failed AND rollback failed (%v then %v) — re-download SemaClip", err, rbErr)
 		}
 		return fmt.Errorf("swap failed, rolled back: %w", err)
 	}
@@ -800,25 +800,56 @@ func extractZip(zipPath, dest string) error {
 	return nil
 }
 
-// waitForPIDExit blocks until the given process is gone, or the deadline passes.
+// WaitForAppExit blocks until the app is gone, or the deadline passes.
 //
-// WHY NOT `p.Wait()`. That needs an os.Process handle, which a fresh process cannot obtain for an
-// unrelated pid. The app is a DIFFERENT process from the sidecar it starts, so the only question
-// available is "is this pid still alive" — polled, because the standard library exposes no
-// wait-by-pid on Windows. `pidAlive` supplies that per platform (tasklist / signal 0).
+// ── WHY THIS WAITS ON A HANDLE, NOT A POLL ──────────────────────────────────────────────────────
+// It polled `tasklist` every 250ms. That is a process spawn per tick, it can answer "alive" for a
+// row that is not this process, and — the reason this was rewritten — it made a process that
+// lingers block the install for the whole five-minute bound even though nothing was locked.
 //
-// A TIMEOUT IS NOT AN ERROR. The caller proceeds to Apply() either way, and Apply's own isRunning
-// guard is what refuses a swap that would fail on a locked payload. Blocking forever would be worse:
-// a wedged app would leave an updater running with no way for the user to see why.
-func waitForPIDExit(pid int, limit time.Duration) {
-	if pid <= 0 {
-		return
-	}
+// TWO CONDITIONS, because they answer different questions and neither is sufficient:
+//
+//	THE PID  — the process the app told us to wait for. WaitForSingleObject on a handle to it
+//	           returns the instant it exits; no polling, no name matching.
+//	THE DIR  — nothing running from THIS DIRECTORY, which is the condition the swap itself needs
+//	           (ApplyStaged asks the same question through isRunning). A pid can be gone while a
+//	           same-named process started from this directory lives on, and a pid can linger while
+//	           the payload is already unlocked.
+//
+// Requiring both is what keeps the wait honest: an app that handed off and exited releases on the
+// first check, so a normal restart is instant rather than a five-minute stare.
+//
+// An UNKNOWN answer (no such process, or a wait that failed) counts as GONE. That is the safe
+// direction for this condition: the swap then runs and reports for itself whether the payload was
+// actually locked, which is a real error message instead of a silent timeout.
+func (u *Updater) WaitForAppExit(pid int, limit time.Duration) error {
+	u.log("waiting for the app to exit before updating %s (pid %d)", u.Dir, pid)
 	deadline := time.Now().Add(limit)
-	for time.Now().Before(deadline) {
-		if !pidAlive(pid) {
-			return
+	for {
+		appGone := true
+		if pid > 0 {
+			exited, ok := waitForProcessExit(pid, time.Until(deadline))
+			if ok {
+				appGone = exited
+			} else {
+				// No handle: ask the platform's other way (tasklist / /proc), which can tell
+				// "already exited" from "still running" but cannot wait.
+				appGone = !pidAlive(pid)
+			}
 		}
+		running, _ := isRunning(u.Dir)
+		if appGone && !running {
+			u.log("the app has exited; nothing is running from %s", u.Dir)
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf(
+				"waited %s and the app is still present (process alive=%v, running from %s=%v); installing anyway",
+				limit, !appGone, u.Dir, running,
+			)
+		}
+		// Only reached when the wait was inconclusive (a live process we cannot hold a handle to),
+		// so this is a retry cadence, not the mechanism.
 		time.Sleep(250 * time.Millisecond)
 	}
 }

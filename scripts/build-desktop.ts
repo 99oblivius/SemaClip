@@ -66,22 +66,27 @@ for (const sub of Object.keys(TRIPLES)) {
 
 const out = Deno.env.get("OUT") ?? join(REPO, "dist", "SemaClip");
 const appImage = Deno.env.get("SEMACLIP_APPIMAGE") === "1";
-// Per-target container format. Windows ships a real .msi (owner decision:
-// native installer, authored by deno desktop in pure Rust and cross-compiled
-// from Linux). The version scheme is what makes this possible -- see
-// scripts/version.sh for the Windows Installer ProductVersion bounds.
-// MEASURED: the .msi write ALSO leaves the assembled app directory beside it
-// (SemaClip/ with the .exe and .dll), so a portable zip needs no second build.
+// Per-target container format. Windows ships the portable BUNDLE DIRECTORY, which the release
+// zips; there is no installer, and none is built.
+// ── NO .msi IS BUILT (owner decision) ───────────────────────────────────────────────────────────
+// Windows gets a portable-bundle DIRECTORY, which is zipped by the release. This used to be
+// `${out}.msi`, because a per-machine installer was the original plan; that plan was abandoned
+// (the .msi installs under Program Files, where the WebView2 runtime it needs cannot write its
+// profile, so the window comes up blank) and the installer was then built and uploaded while never
+// being OFFERED by the manifest.
+//
+// MEASURED: the extension is what decides. With a `.msi` path `deno desktop` authors an installer
+// and leaves the app directory beside it; with no extension it emits the directory alone.
 const output = platform === "win-x64"
-  ? `${out}.msi`
+  ? out
   : appImage
   ? `${out}.AppImage`
   : out;
 
-// Windows needs two files INSIDE the assembler's input, so they must exist before
-// `deno desktop` runs — a post-step only reaches the app directory it leaves
-// beside the .msi, never the .msi's own cabinet (measured: the installer carried
-// exactly the payload and the launcher, with no updater and no version.txt).
+// Windows needs two files before `deno desktop` runs, because they must be IN
+// the assembled bundle. They are written into the app directory after the build
+// instead of being `--include`d, which embeds a file in the payload's virtual
+// filesystem where a SEPARATE process (the updater) cannot reach it.
 //
 // NO version.txt IS STAGED, deliberately. A version stamp in the archive makes the payload
 // version-SPECIFIC when it is not: the same files serve any version, and the manifest already
@@ -192,11 +197,10 @@ if (status.code !== 0) Deno.exit(status.code);
 // SEPARATE process — the Windows sidecar — cannot, and the portable zip that the
 // sidecar downloads is built from this directory.
 //
-// The MSI is authored before this point and so cannot carry these (deno desktop
-// limitation); the sidecar records what it applied in a per-user state file, which
-// is also the only location that stays writable in Program Files.
+// The sidecar and its log live in the bundle and record what they applied, so the
+// payload stays version-idempotent regardless of where the bundle is unpacked.
 if (platform === "win-x64") {
-  const appDir = output.endsWith(".msi") ? output.slice(0, -4) : output;
+  const appDir = output;
   await Deno.remove(join(appDir, "version.txt")).catch(() => {});
   await buildSidecar(appDir);
   await buildHideConsoleRelay(appDir);
@@ -215,8 +219,7 @@ await Deno.remove(envFile).catch(() => {});
 
 if (platform === "win-x64" && !Deno.env.get("SEMACLIP_SKIP_ICON")) {
   const ico = join(REPO, "assets", "icon.ico");
-  // The .msi build leaves the assembled app directory next to the installer.
-  const appDir = output.endsWith(".msi") ? output.slice(0, -4) : output;
+  const appDir = output;
   const r = await new Deno.Command(join(REPO, "scripts", "apply-windows-icon.sh"), {
     args: [appDir, ico],
     stdin: "inherit",

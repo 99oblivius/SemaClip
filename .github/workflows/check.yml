@@ -111,4 +111,10 @@ jobs:
         working-directory: frontend
       - name: Build
         run: npm run build
+
+      - name: Frontend unit tests
+        # THE UPDATE SURFACES HAD NO CI STEP AT ALL. The restart policy, the error surface and the
+        # updater log were asserted by tests that nothing ran, so a change could break all three
+        # with no signal. The update flow is the one path a user cannot exercise for themselves.
+        run: npm test
         working-directory: frontend

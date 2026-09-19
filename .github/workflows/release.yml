@@ -272,13 +272,17 @@ jobs:
           # Linux payload is 277MB (AppImage) / 577MB (runtime dylib) with the
           # exclusions, against 473MB / 560MB before them.
           #
-          # Produce an .msi on this Linux runner — deno desktop authors it in
-          # pure Rust and cross-compiles, so no Windows host is needed.
+          # NO .msi IS PRODUCED AT ALL (owner decision). It used to be built and uploaded
+          # while never being OFFERED by the manifest, which made it pure cost: ~10MB of
+          # upload per release for a container the project does not ship. The .msi also
+          # installs per-machine under Program Files, where the WebView2 runtime it needs
+          # cannot write its profile, so the window comes up blank.
           #
-          # The version scheme had to change for this to be possible: Windows
-          # Installer packs ProductVersion as major(0-255).minor(0-255).build
-          # (0-65535), so the original v{year}.{patch} (major 2026) was rejected
-          # outright. versions are now v{yy}.{patch} (26.148), which fits.
+          # Removing the `-o ...msi` extension is what removes the installer: deno desktop
+          # emits the assembled app directory alone, which the next step zips.
+          #
+          # NOTE the version scheme still uses v{yy}.{patch}: it is now simply the
+          # project's scheme, chosen when the MSI's ProductVersion field required it.
           deno run --allow-all scripts/build-desktop.ts
 
       - name: Repack the AppImage with the icon bits libappimage needs
@@ -336,7 +340,6 @@ jobs:
         run: |
           set -euo pipefail
           V="${{ needs.version.outputs.version }}"
-          mv dist/SemaClip.msi "dist/SemaClip-$V-win-x64.msi"
           cd dist
           # The portable zip IS the update payload: unzipped over an install it replaces
           # the app files, and unzipped anywhere it is a working SemaClip.
@@ -396,7 +399,7 @@ jobs:
 
           case "$P" in
             linux-x64) ART="dist/SemaClip.AppImage" ;;
-            win-x64) ART="dist/SemaClip-$V-win-x64.msi" ;;
+            win-x64) ART="dist/SemaClip-$V-win-x64-portable.zip" ;;
             *) echo "::error::unhandled platform $P"; exit 1 ;;
           esac
 
@@ -457,8 +460,6 @@ jobs:
             # looking for an artifact the build never uploaded.
             dist/*-win-x64-portable.zip
             dist/*-win-x64-portable.zip.sha256
-            dist/*-win-x64.msi
-            dist/*-win-x64.msi.sha256
             dist/*-runtime.*
             dist/build-meta-*.txt
           if-no-files-found: error
@@ -489,8 +490,6 @@ jobs:
           for f in \
             "dist/SemaClip.AppImage" \
             "dist/SemaClip.AppImage.sha256" \
-            "dist/SemaClip-$V-win-x64.msi" \
-            "dist/SemaClip-$V-win-x64.msi.sha256" \
             "dist/SemaClip-$V-win-x64-portable.zip" \
             "dist/SemaClip-$V-win-x64-portable.zip.sha256" \
             "dist/SemaClip-$V-linux-x64-runtime.so" \
@@ -504,7 +503,6 @@ jobs:
           # sidecar it never checked against the bytes it is about to send.
           for art in \
             "dist/SemaClip.AppImage" \
-            "dist/SemaClip-$V-win-x64.msi" \
             "dist/SemaClip-$V-win-x64-portable.zip"
           do
             want="$(awk '{print $1}' "$art.sha256")"
@@ -544,13 +542,13 @@ jobs:
             echo "\`webkit2gtk\` installed."
             echo
             echo "Windows: \`SemaClip-$V-win-x64-portable.zip\` needs no install — unzip it"
-            echo "somewhere you can write, then run \`SemaClip.exe\`. It updates itself:"
-            echo "the update downloads while you work, and the app restarts into it."
+            echo "somewhere you can write, then run \`SemaClip.exe\`. It downloads updates in"
+            echo "the background and installs one when you restart it. Nothing installs or"
+            echo "closes on its own."
             echo
-            echo "There is no installer for now: the .msi installs per-machine under"
-            echo "Program Files, where the WebView2 runtime it depends on cannot write its"
-            echo "profile, so the window comes up blank. The portable build does not have"
-            echo "that problem."
+            echo "There is no Windows installer, and none is built. An .msi installs"
+            echo "per-machine under Program Files, where the WebView2 runtime it depends on"
+            echo "cannot write its profile, so the window comes up blank."
             echo
             echo "Every artifact has a \`.sha256\` sidecar, so a download can be verified"
             echo "with \`sha256sum -c\`."
@@ -562,8 +560,6 @@ jobs:
           bash scripts/ci/publish-release.sh "$TAG" "SemaClip $V" /tmp/release-notes.md \
             "dist/SemaClip.AppImage" \
             "dist/SemaClip.AppImage.sha256" \
-            "dist/SemaClip-$V-win-x64.msi" \
-            "dist/SemaClip-$V-win-x64.msi.sha256" \
             "dist/SemaClip-$V-win-x64-portable.zip" \
             "dist/SemaClip-$V-win-x64-portable.zip.sha256" \
             "dist/SemaClip-$V-linux-x64-runtime.so" \
@@ -952,8 +948,6 @@ jobs:
             --repo "$GITHUB_REPOSITORY" --dir back \
             --pattern 'SemaClip.AppImage' \
             --pattern 'SemaClip.AppImage.sha256' \
-            --pattern "SemaClip-$V-win-x64.msi" \
-            --pattern "SemaClip-$V-win-x64.msi.sha256" \
             --pattern "SemaClip-$V-win-x64-portable.zip" \
             --pattern "SemaClip-$V-win-x64-portable.zip.sha256" \
             --pattern "SemaClip-$V-linux-x64-runtime.so" \
@@ -963,7 +957,6 @@ jobs:
           fail=0
           for art in \
             "SemaClip.AppImage" \
-            "SemaClip-$V-win-x64.msi" \
             "SemaClip-$V-win-x64-portable.zip"
           do
             if [ ! -f "back/$art" ] || [ ! -f "back/$art.sha256" ]; then

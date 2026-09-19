@@ -128,6 +128,21 @@ export interface UpdateStatus {
    */
   stagedPath: string | null;
   stagedSha256: string | null;
+  /**
+   * The version the check found and is OFFERING, before anything is downloaded.
+   *
+   * ── WHY THIS IS SEPARATE FROM pendingVersion ────────────────────────────────────────────────
+   * `pendingVersion` means "downloaded and installable", and it is set only after the bytes are
+   * verified. An offered-but-not-fetched update is a different state, and conflating them would
+   * make the banner offer a restart that installs nothing. This is the version a Download button
+   * acts on, and it is cleared once the download is staged.
+   */
+  availableVersion: string | null;
+  /** The offered artifact's hash and name, kept so the download verifies what the check read. */
+  availableSha256: string | null;
+  availableName: string | null;
+  /** Explicit URL when the manifest supplies one; otherwise it is derived from the manifest path. */
+  availableUrl: string | null;
 }
 
 const baked = bakedVersion();
@@ -150,6 +165,10 @@ const status: UpdateStatus = {
   sidecarError: null,
   stagedPath: null,
   stagedSha256: null,
+  availableVersion: null,
+  availableSha256: null,
+  availableName: null,
+  availableUrl: null,
 };
 
 export function updateStatus(): UpdateStatus {
@@ -354,7 +373,21 @@ export function retryUpdateCheck(): { started: boolean; error: string | null } {
 const DEFAULT_MANIFEST_URL = "https://99oblivius.github.io/SemaClip/latest.json";
 
 /**
- * Check the manifest ONCE at startup and, if a newer version is published, download and stage it.
+ * Check the manifest ONCE at startup and, if a newer version is published, tell the UI about it.
+ *
+ * ── WHAT CHANGED, AND WHY (owner decision) ──────────────────────────────────────────────────────
+ * This used to download the payload automatically on open, on the reasoning that "checking for
+ * updates at open" implied fetching one. The owner rejected the implication:
+ *
+ *   "why is it triggering the update on itself after being done downloading? Even the downloading
+ *    should not be happening automatically."
+ *
+ * So the automatic path STOPS AT THE OFFER. It fetches the manifest (small, one per launch, as
+ * asked), records that a newer version exists, and pushes that to the UI. Nothing is downloaded
+ * until the user clicks Download, which keeps the decision — and the bandwidth — in their hands.
+ *
+ * This changes the meaning of the check, not its cadence: still exactly one check per launch, and
+ * still no polling.
  *
  * This is the whole Linux policy: "on opening the app the releases are polled for an update", with
  * no further checks until the next launch. A failure is reported, never swallowed — the previous
@@ -501,7 +534,51 @@ async function checkWindowsUpdate(
     return { available: false, error: `manifest has no win-x64 artifact (published ${latest})` };
   }
 
-  // ── The download, while the app runs ──────────────────────────────────────────────────────
+  // ── THE OFFER, NOT THE DOWNLOAD ───────────────────────────────────────────────────────────────
+  // The check ends here. It used to continue straight into a ~100MB download, which meant opening
+  // the app silently spent the user's bandwidth on an update they had not asked for. The owner
+  // rejected that, so the offer is recorded and the UI asks; `downloadWindowsUpdate` is what
+  // actually fetches, and only a click reaches it.
+  status.availableVersion = latest;
+  status.availableSha256 = entry.sha256;
+  status.availableName = entry.name;
+  status.availableUrl = entry.url ?? null;
+  emitAppEvent({ type: "update-available", version: latest });
+  console.log(`Updates: ${latest} is available (this build is ${status.current}); waiting for the user`);
+  return { available: true };
+}
+
+/**
+ * Download the offered update, reporting progress.
+ *
+ * ── WHY THIS IS SEPARATE FROM THE CHECK ─────────────────────────────────────────────────────────
+ * It is the step that costs the user bandwidth and time, so it runs only when they ask for it.
+ * Splitting it out is what makes "nothing downloads automatically" true rather than a promise: the
+ * check cannot reach this function, and the only caller is the download endpoint.
+ *
+ * The payload is STAGED OUTSIDE THE INSTALL DIRECTORY. The swap only renames entries that are IN
+ * the extracted archive, so a 100MB zip left beside the payload would never be replaced or removed
+ * by an update — it would just accumulate in the install directory forever.
+ * `%LOCALAPPDATA%\SemaClip` is the per-user directory the sidecar already lives in.
+ */
+async function downloadWindowsUpdate(): Promise<{ ok: boolean; error?: string }> {
+  const latest = status.availableVersion;
+  const sha = status.availableSha256;
+  if (!latest || !sha) {
+    return { ok: false, error: "no update is being offered" };
+  }
+  if (status.phase === "downloading") {
+    return { ok: false, error: "a download is already running" };
+  }
+  if (!status.sidecarPath) {
+    return {
+      ok: false,
+      error: `the updater could not be placed, so the update cannot be applied. ${status.sidecarError ?? ""}`
+        .trim(),
+    };
+  }
+  const manifestUrl = Deno.env.get("SEMACLIP_UPDATE_URL") ?? DEFAULT_MANIFEST_URL;
+
   status.phase = "downloading";
   status.download = { version: latest, received: 0, total: 0, fraction: null };
   emitAppEvent({
@@ -513,11 +590,7 @@ async function checkWindowsUpdate(
   });
 
   const base = manifestUrl.replace(/\/[^/]*$/, "");
-  const url = entry.url ?? `${base}/${entry.name}`;
-  // STAGED OUTSIDE THE INSTALL DIRECTORY. The swap only renames entries that are IN the extracted
-  // archive, so a 100MB zip left beside the payload would never be replaced or removed by an
-  // update — it would just accumulate in the install directory forever. `%LOCALAPPDATA%\SemaClip`
-  // is the per-user directory the sidecar already lives in.
+  const url = status.availableUrl ?? `${base}/${status.availableName ?? ""}`;
   const stageDir = sidecarDir();
   await Deno.mkdir(stageDir, { recursive: true }).catch(() => {});
   // A payload for a version that was superseded before the user restarted would otherwise sit here
@@ -535,7 +608,7 @@ async function checkWindowsUpdate(
   }
   const staged = `${stageDir}\\update-${latest}.zip`;
 
-  const res = await downloadVerified(url, staged, entry.sha256, {
+  const res = await downloadVerified(url, staged, sha, {
     log: (m) => console.log(m),
     onProgress: (p) => {
       status.download = { version: latest, received: p.received, total: p.total, fraction: p.fraction };
@@ -553,7 +626,7 @@ async function checkWindowsUpdate(
   if (!res.ok) {
     status.phase = "idle";
     status.download = null;
-    return { available: false, error: res.error ?? "download failed" };
+    return { ok: false, error: res.error ?? "download failed" };
   }
 
   status.stagedPath = staged;
@@ -566,7 +639,36 @@ async function checkWindowsUpdate(
   );
   // `canApplyByRestart: true` — the payload is on disk, so a restart genuinely installs it now.
   emitAppEvent({ type: "update-staged", version: latest, canApplyByRestart: true });
-  return { available: true };
+  return { ok: true };
+}
+
+/**
+ * Download the offered update because the user asked for it.
+ *
+ * Exported for the endpoint. Returns as soon as the download STARTS: progress arrives over the event
+ * stream, so the request does not hold the connection open for the length of a 100MB transfer.
+ */
+export function startUpdateDownload(): { started: boolean; error: string | null } {
+  if (!status.availableVersion) return { started: false, error: "no update is being offered" };
+  if (status.phase === "downloading") return { started: false, error: "a download is already running" };
+  void downloadWindowsUpdate().then((res) => {
+    if (!res.ok) {
+      status.updateError = res.error ?? "download failed";
+      status.phase = "idle";
+      status.download = null;
+    }
+  });
+  return { started: true, error: null };
+}
+
+/**
+ * The version offered to the user, for the UI to render a Download button for.
+ *
+ * Not part of `UpdateStatus`'s persisted shape: it is derived from the fields the check sets, so
+ * there is one source of truth for "what is being offered" rather than two that can disagree.
+ */
+export function offeredVersion(): string | null {
+  return status.availableVersion;
 }
 
 /**

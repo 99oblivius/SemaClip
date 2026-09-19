@@ -81,20 +81,62 @@ Deno.test("a download in flight is not offered as installable", () => {
   // `pendingVersion` is set ONLY after the bytes are on disk and verified. Setting it when the
   // download STARTS would let the banner offer a restart that installs nothing.
   //
-  // Scoped to the WINDOWS function: an unscoped search finds the Linux path's assignment first, and
-  // the test then compares against the wrong line and passes for no reason (it did).
-  const winStart = SRC.indexOf("async function checkWindowsUpdate");
-  const winEnd = SRC.indexOf("export function applyWindowsUpdate");
-  assert(winStart > 0 && winEnd > winStart, "the Windows check function must exist");
-  const win = SRC.slice(winStart, winEnd);
+  // Scoped to the DOWNLOAD FUNCTION, not the check. The check no longer downloads at all, so a
+  // window from the check to `applyWindowsUpdate` would now include the download helper and prove
+  // nothing about the function it names — which is exactly how this test passed before the split.
+  const start = SRC.indexOf("async function downloadWindowsUpdate");
+  const end = SRC.indexOf("export function startUpdateDownload");
+  assert(start > 0 && end > start, "the download function must exist on its own");
+  const fn = SRC.slice(start, end);
 
-  const setPending = win.indexOf("status.pendingVersion = latest;");
-  const downloadCall = win.indexOf("await downloadVerified(url, staged");
+  const setPending = fn.indexOf("status.pendingVersion = latest;");
+  const downloadCall = fn.indexOf("await downloadVerified(url, staged");
   assert(downloadCall > 0 && setPending > 0, "both the download and the assignment must exist");
   assert(
     setPending > downloadCall,
     "the pending version must be assigned AFTER the download, not before it",
   );
+});
+
+Deno.test("opening the app OFFERS an update and downloads nothing", () => {
+  // ── THE OWNER'S DIRECTIVE ───────────────────────────────────────────────────────────────────
+  // "Even the downloading should not be happening automatically." So the check must not be able to
+  // reach a download: no downloadVerified call inside it, and the offer recorded instead.
+  //
+  // This is asserted on the CHECK's own body, because that is the function the startup path runs.
+  const start = SRC.indexOf("async function checkWindowsUpdate");
+  const end = SRC.indexOf("async function downloadWindowsUpdate");
+  assert(start > 0 && end > start, "the Windows check function must exist");
+  const check = SRC.slice(start, end);
+
+  assertEquals(
+    check.includes("downloadVerified"),
+    false,
+    "the check must not download: opening the app must not spend the user's bandwidth",
+  );
+  assert(
+    /status\.availableVersion\s*=\s*latest;/.test(check),
+    "the check must RECORD the offer, or the UI would never learn an update exists",
+  );
+  assert(
+    check.includes('emitAppEvent({ type: "update-available"'),
+    "the offer must be pushed to the UI, which is the only surface that can ask for it",
+  );
+});
+
+Deno.test("the download is reachable ONLY through an explicit request", () => {
+  // The other half of the directive: bytes may move on a click and on nothing else. The only caller
+  // of the download is the exported entry point the endpoint uses.
+  const start = SRC.indexOf("export function startUpdateDownload");
+  assert(start > 0, "an explicit start entry point must exist");
+  const fn = SRC.slice(start, start + 800);
+  assert(
+    fn.includes("downloadWindowsUpdate()"),
+    "the explicit path must be what actually fetches",
+  );
+  // `void` rather than `await`: the endpoint answers immediately and progress arrives over the
+  // event stream. Awaiting would hold the HTTP request for the length of a 100MB transfer.
+  assert(fn.includes("void downloadWindowsUpdate()"), "the fetch must not block the request");
 });
 
 Deno.test("the hand-off is DETACHED, because it must outlive the process it waits for", () => {
