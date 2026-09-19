@@ -94,6 +94,14 @@
   let frontierBytes = 0;
   let frontierAtLastReload = 0;
   let reloadInFlight = false;
+  /**
+   * True when the download view says the artifact is COMPLETE (fully servable).
+   *
+   * A separate flag rather than a sentinel frontier: see shouldReloadMedia for the measurement, but
+   * in short a complete file must never be reloaded, and a "huge bytes" sentinel cannot express that
+   * inside a predicate that detects growth.
+   */
+  let mediaComplete = $state(false);
 
   /**
    * Media URL — always a LOCAL file served by the media route, never the VOD URL.
@@ -168,10 +176,15 @@
     const v = dlView;
     if (!v) return;
     if (!v.active) {
-      // Complete: the file is fully servable, no more reloads needed.
-      frontierBytes = Number.MAX_SAFE_INTEGER;
+      // Complete: the file is fully servable, so there is nothing to reload. This is a FLAG, not
+      // `frontierBytes = MAX_SAFE_INTEGER` — that sentinel satisfied the growth comparison and made
+      // the stall detector reload a complete file, resetting the element and producing the reported
+      // snap-to-zero on a finished project.
+      mediaComplete = true;
+      frontierBytes = 0;
       return;
     }
+    mediaComplete = false;
     // The file review PLAYS is the proxy when it exists (the view picked it, so ask the
     // view), otherwise the video. Reading the video's bytes here once made a
     // still-growing proxy look complete, so the stall detector never fired.
@@ -179,27 +192,62 @@
     frontierBytes = playable?.bytes ?? Number.MAX_SAFE_INTEGER;
   });
 
-  /** Reload the media at the current position to pick up newly written bytes. */
+  /**
+   * Reload the media at the current position to pick up newly written bytes.
+   *
+   * ── THE SNAP-TO-ZERO THIS PREVENTS ────────────────────────────────────────────────────────
+   * The resume was applied ONLY from the `loadedmetadata` handler, and `videoEl.load()` — which is
+   * what a `src` change triggers — fires an `emptied` event that sets `currentTime` to 0 first.
+   * Between `load()` and `loadedmetadata` the element therefore reports 0, and anything that writes
+   * that 0 into the shared store (the seek effect reads the store, and `ontimeupdate` writes it)
+   * makes the player jump to the start. That is the reported "pressing play returns to 00:00 and
+   * pauses": a reload is attempted, the element resets, and nothing resumes it.
+   *
+   * Two changes make the resume reliable rather than a race:
+   *
+   *   1. `autoplay` re-requests playback as part of the load itself, so the element resumes WITHOUT
+   *      waiting for a script callback to run `play()` — the rejected-play path cannot strand it.
+   *   2. The position is applied from BOTH `loadedmetadata` and `loadeddata`, and a `durationchange`
+   *      guard covers an element whose duration only becomes known slightly later. Re-applying is
+   *      idempotent; missing the one event that matters is not.
+   *
+   * The store is deliberately NOT written here: while the reload is in flight the element's reported
+   * time is meaningless, and echoing it back is what pulled the UI to zero.
+   */
   function reloadMedia() {
     if (!videoEl || reloadInFlight) return;
     reloadInFlight = true;
     const resumeAt = videoEl.currentTime;
     const wasPlaying = !videoEl.paused;
     reloadCount++;
-    const onMeta = () => {
-      videoEl?.removeEventListener('loadedmetadata', onMeta);
-      if (!videoEl) return;
+    const applyResume = () => {
+      const v = videoEl;
+      if (!v) return;
       try {
-        videoEl.currentTime = resumeAt;
+        // Only correct a position that is genuinely wrong, so a second event cannot undo a seek the
+        // user made in the meantime.
+        if (Math.abs(v.currentTime - resumeAt) > 0.5) v.currentTime = resumeAt;
       } catch {
-        // seek rejected on a not-yet-seekable stream; position is kept by
-        // the store and re-applied by the seek effect
+        // seek rejected on a not-yet-seekable stream; the next event retries
       }
-      if (wasPlaying) void videoEl.play().catch(() => {});
+    };
+    const finish = () => {
+      videoEl?.removeEventListener('loadedmetadata', onMeta);
+      videoEl?.removeEventListener('loadeddata', onMeta);
       reloadInFlight = false;
       lastProgressTime = performance.now();
     };
+    const onMeta = () => {
+      applyResume();
+      if (wasPlaying && videoEl?.paused) void videoEl.play().catch(() => {});
+      // Do not clear the guard on the FIRST event: loadeddata usually follows and is the more
+      // reliable moment to seek a fragmented MP4.
+      if (videoEl && videoEl.readyState >= 2) finish();
+    };
     videoEl.addEventListener('loadedmetadata', onMeta);
+    videoEl.addEventListener('loadeddata', onMeta);
+    // If neither fires (an empty or rejected load), stop blocking the detector.
+    setTimeout(finish, 4000);
   }
 
   // Stall detector: a growing file that stops advancing needs a reload.
@@ -223,6 +271,7 @@
         inFlight: reloadInFlight,
         stallMs: STALL_MS,
         minGrowth: REFRESH_MIN_GROWTH,
+        complete: mediaComplete,
       })) return;
       frontierAtLastReload = frontierBytes;
       if (replaced) reloadCount = 0; // a fresh source: start the cache-buster over
@@ -246,10 +295,25 @@
     seek(Math.max(0, Math.min(videoDuration, videoEl.currentTime + delta)));
   }
 
+  /**
+   * Toggle play/pause.
+   *
+   * The rejection is SURFACED, not swallowed. `void videoEl.play()` hides the two real failure modes
+   * (a not-allowed autoplay policy, and `NotSupportedError` when no source is usable), and the owner's
+   * symptom — the control appearing to do nothing — is precisely what a discarded rejection looks
+   * like. A user who pressed play needs to know why nothing happened.
+   */
+  let playError = $state<string | null>(null);
   function togglePlay() {
     if (!videoEl) return;
-    if (videoEl.paused) void videoEl.play();
-    else videoEl.pause();
+    if (videoEl.paused) {
+      playError = null;
+      videoEl.play().catch((err: unknown) => {
+        playError = err instanceof Error ? err.message : String(err);
+      });
+    } else {
+      videoEl.pause();
+    }
   }
   function toggleMute() {
     if (!videoEl) return;
@@ -369,10 +433,28 @@
       e.currentTarget.muted = isMuted;
       playerStore.update((s) => ({ ...s, duration: e.currentTarget.duration }));
     }}
-    onplay={() => { isPlaying = true; playerStore.update((s) => ({ ...s, isPlaying: true })); }}
+    onplay={() => { isPlaying = true; playError = null; playerStore.update((s) => ({ ...s, isPlaying: true })); }}
     onpause={() => { isPlaying = false; playerStore.update((s) => ({ ...s, isPlaying: false })); }}
+    onended={() => {
+      // Playback reached the end. Without this there was NO handler at all, so "played to the end"
+      // was indistinguishable from "stopped" in the UI and in the store.
+      isPlaying = false;
+      playerStore.update((s) => ({ ...s, isPlaying: false }));
+    }}
+    onerror={() => {
+      const e = videoEl?.error;
+      playError = e ? `${e.code}: ${e.message || 'media error'}` : 'media error';
+    }}
     onvolumechange={() => { if (videoEl) { isMuted = videoEl.muted; currentVolume = videoEl.volume; } }}
   ><track kind="captions" /></video>
+
+  {#if playError}
+    <!-- Surfaced rather than swallowed: a play() rejection used to be invisible, which is how a
+         control that does nothing looked like a control that worked. -->
+    <div class="absolute left-3 top-3 z-10 rounded bg-black/70 px-2 py-1 font-mono text-[10px] text-error" role="alert">
+      playback failed: {playError}
+    </div>
+  {/if}
 
 
   <!-- Minimal control bar — sits at the bottom, subtle gradient only behind controls -->

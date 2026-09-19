@@ -53,13 +53,66 @@ export class MediaActionsUseCase {
     }
   }
 
-  /** Abort a live piece download, if any. */
-  cancelPiece(streamId: string): boolean {
+  /**
+   * Abort a live piece download AND remove what it wrote.
+   *
+   * ── THE BUG THIS FIXES ─────────────────────────────────────────────────────────────────────
+   * This only called `controller.abort()`. Every caller treats "cancel" as "stop and clean up", so
+   * the reported behaviour was exactly what the code did: the download stopped, the partial file and
+   * its `.fragments` index stayed on disk, and the UI still reported the piece as present. Verified
+   * on the owner's cache: completed projects carried a `.mp4` plus a `.fragments` after a cancel.
+   *
+   * The whole-download DELETE does sweep the directory, which is why "cancel" and "delete
+   * everything" behaved differently for the same gesture in two different panels. This makes the
+   * per-piece cancel honest on its own terms: abort, then remove THIS piece's files and reset only
+   * this piece's state.
+   *
+   * Deliberately NOT a directory purge — cancelling the proxy must not touch the video, the chat, or
+   * a piece that is already complete and on disk. Only files belonging to `kind` are removed, and
+   * only when the state does not record them as finished.
+   */
+  async cancelPiece(streamId: string, kind: "proxy" | "hq" | "chat"): Promise<boolean> {
     const controller = this.pieceAborts.get(streamId);
-    if (!controller) return false;
-    controller.abort();
-    this.pieceAborts.delete(streamId);
-    return true;
+    let aborted = false;
+    if (controller) {
+      controller.abort();
+      this.pieceAborts.delete(streamId);
+      aborted = true;
+    }
+    // An abort is asynchronous: the writer needs a beat to release its file handles before the
+    // files can be unlinked. Without this the remove can lose the race and leave the file behind —
+    // which is the very symptom being fixed.
+    await new Promise((r) => setTimeout(r, 300));
+
+    const removed = kind === "chat"
+      ? await this.deleteChat(streamId)
+      : kind === "proxy"
+        ? await this.deleteProxy(streamId)
+        : await this.deleteVideo(streamId);
+
+    // The piece's own state is reset HERE, after the delete, rather than relying on the delete's
+    // internal reset. Two reasons:
+    //   - a piece that never wrote a file (cancelled in its first second, or an orphaned state) makes
+    //     `deleteProxy` return early WITHOUT resetting anything, because it has nothing to remove;
+    //     the piece would keep reporting as running with the old counters;
+    //   - reading the state after the delete means this cannot clobber what the delete persisted.
+    const state = await this.orchestrator.getState(streamId);
+    const part = state.parts.find((x) => x.kind === kind);
+    if (part) {
+      part.status = "pending";
+      part.percent = 0;
+      part.downloadedBytes = 0;
+      part.downloadedSec = 0;
+      delete part.error;
+    }
+    if (state.phase === "running" || state.phase === "failed") {
+      state.phase = "idle";
+    }
+    await this.orchestrator.setState(streamId, state);
+    this.announce(streamId, "download");
+    // `aborted` alone would report failure for an orphaned state that had nothing to abort but
+    // whose files were successfully cleaned — the second half of this bug.
+    return aborted || removed.deleted;
   }
 
   /**
@@ -155,9 +208,16 @@ export class MediaActionsUseCase {
         if (await this.fs.exists(p)) videoPaths.add(p);
       }
     }
-    // The index always dies with its media, whatever it was named.
+    // The index always dies with its media, whatever it was named — and that has to include the
+    // index named after the RECORDED media file, not only the canonical/legacy names.
+    //
+    // MEASURED: this used to derive the index from the canonical names only, so a project whose file
+    // was `{slug} - video.mp4` (the current scheme) kept `{slug} - video.fragments` behind after a
+    // delete. The owner saw exactly that: a `.fragments` left on disk next to a removed `.mp4`.
+    // `indexPathFor` is the same helper the downloader uses to name the index, so deriving from the
+    // recorded path cannot drift from where it was written.
     for (const p of [...videoPaths]) {
-      if (p.endsWith(".mp4")) videoPaths.add(indexPathFor(p));
+      videoPaths.add(indexPathFor(p));
     }
     // Legacy single-file projects recorded the video as vodPath, but ONLY
     // when no separate proxy file exists.

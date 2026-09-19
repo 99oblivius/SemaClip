@@ -60,11 +60,43 @@ check('paused does not reload', shouldReloadMedia(decision({ ...replaced, paused
 check('in-flight does not reload', shouldReloadMedia(decision({ ...replaced, inFlight: true })) === false);
 check('not-yet-stalled does not reload', shouldReloadMedia(decision({ ...replaced, sinceProgressMs: 100 })) === false);
 
-// A finished file must not reload forever.
-check('a completed download stops reloading', shouldReloadMedia(decision({
-  frontierBytes: Number.MAX_SAFE_INTEGER,
-  frontierAtLastReload: Number.MAX_SAFE_INTEGER,
-})) === false);
+// A finished file must not reload AT ALL. This check used to assert only that it stops reloading
+// ONCE THE MARK CAUGHT UP (`frontierAtLastReload: MAX`) — which hid the bug rather than testing the
+// intent: with the mark still at 0 the old predicate fires a spurious reload of a COMPLETE file.
+// Measured: frontier=MAX, mark=0, paused=false, progressed -> old logic TRUE.
+check('a completed download stops reloading even with the mark still at 0 (the reported snap)',
+  shouldReloadMedia(decision({
+    frontierBytes: Number.MAX_SAFE_INTEGER,
+    frontierAtLastReload: 0,
+    complete: true,
+  })) === false);
+check('  ...and the OLD logic reloaded the complete file (this is the bug)',
+  oldLogic(decision({
+    frontierBytes: Number.MAX_SAFE_INTEGER,
+    frontierAtLastReload: 0,
+  })) === true);
+check('a completed download also stops once the mark has caught up',
+  shouldReloadMedia(decision({
+    frontierBytes: Number.MAX_SAFE_INTEGER,
+    frontierAtLastReload: Number.MAX_SAFE_INTEGER,
+    complete: true,
+  })) === false);
+// The completeness flag must override every growth signal, including a backwards frontier: a
+// complete file that reports fewer bytes than the mark is a RE-READ of the same artifact, not a
+// replacement, and reloading it is what reset the element.
+check('completeness wins over the replacement signal',
+  shouldReloadMedia(decision({
+    frontierBytes: 2 * 1024 * 1024,
+    frontierAtLastReload: 1024 * 1024 * 1024,
+    complete: true,
+  })) === false);
+// ...and the growing case must be unaffected, or the feature would be lost.
+check('a GROWING file still reloads while incomplete',
+  shouldReloadMedia(decision({
+    frontierBytes: 5 * 1024 * 1024,
+    frontierAtLastReload: 0,
+    complete: false,
+  })) === true);
 
 // The reload-loop guard: after a reload the mark equals the frontier, so the next tick must
 // not reload again or the player would thrash.

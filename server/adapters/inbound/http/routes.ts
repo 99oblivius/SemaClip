@@ -118,8 +118,8 @@ export interface HttpDeps {
   touchDownload: (streamId: string) => void;
   /** Remove a project's downloaded media directory. */
   purgeArtifacts: (streamId: string) => Promise<{ bytes: number }>;
-  cancelDownload: (streamId: string) => boolean;
-  cancelPiece: (streamId: string) => boolean;
+  cancelDownload: (streamId: string, kind?: "proxy" | "hq" | "chat") => Promise<boolean>;
+  cancelPiece: (streamId: string, kind: "proxy" | "hq" | "chat") => Promise<boolean>;
   deleteVideo: (streamId: string) => Promise<{ deleted: boolean }>;
   deleteProxy: (streamId: string) => Promise<{ deleted: boolean }>;
   deleteChat: (streamId: string) => Promise<{ deleted: boolean }>;
@@ -239,12 +239,17 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   // was a no-op for those).
   app.delete("/api/streams/:id/download", async (c) => {
     const streamId = c.req.param("id");
-    // ?piece=<kind> cancels just that piece (files + state kept, phase
-    // honestly restored); without it the whole download + artifacts go.
+    // ?piece=<kind> cancels just that piece: it aborts the run AND removes the
+    // files it wrote (media + fragment index + its own state). Without the
+    // query, the whole download and every artifact go.
     const piece = c.req.query("piece");
     if (piece === "proxy" || piece === "hq" || piece === "chat") {
-      const cancelled = deps.cancelPiece(streamId);
-      return c.json({ ok: cancelled });
+      try {
+        const cancelled = await deps.cancelPiece(streamId, piece);
+        return c.json({ ok: cancelled });
+      } catch (err) {
+        return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+      }
     }
     try {
       await deps.deleteDownload(streamId);

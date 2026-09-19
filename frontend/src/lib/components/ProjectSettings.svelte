@@ -555,9 +555,10 @@
                   <button
                     class="flex items-center gap-1 rounded-md border border-accent px-2 py-1 text-xs text-accent transition-colors hover:border-error hover:text-error"
                     onclick={() => cancelPieceMutation.mutate(art.kind)}
-                    title="Cancel this download (partial file is kept)"
+                    disabled={cancelPieceMutation.isPending}
+                    title="Cancel this download and remove the partial file"
                   >
-                    <Icon name="close" size={11} /> Cancel
+                    <Icon name="close" size={11} /> {cancelPieceMutation.isPending ? 'Cancelling…' : 'Cancel'}
                   </button>
                 {:else if art.onDisk}
                   <span class="flex items-center gap-1 font-mono text-[11px] text-success" title="On disk">

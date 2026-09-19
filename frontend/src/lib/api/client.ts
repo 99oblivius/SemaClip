@@ -74,7 +74,7 @@ export const apiClient = {
   deleteDownload: (streamId: string) =>
     api<{ ok: boolean }>(`/streams/${streamId}/download`, { method: 'DELETE' }),
 
-  /** Cancel a single piece download (files + state kept). */
+  /** Cancel a single piece download: aborts it AND removes the files it wrote. */
   cancelPiece: (streamId: string, kind: 'proxy' | 'hq' | 'chat') =>
     api<{ ok: boolean }>(`/streams/${streamId}/download?piece=${kind}`, { method: 'DELETE' }),
 

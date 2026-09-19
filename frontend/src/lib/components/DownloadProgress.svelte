@@ -29,6 +29,9 @@
     wasActive = active;
   });
 
+  // Cancel here stops THIS download. The whole-download DELETE is the honest verb for
+  // "the library started this and I want it gone": it aborts every live run and removes the
+  // artifacts. Re-downloading lives in project settings.
   const deleteMutation = createMutation(() => ({
     mutationFn: () => apiClient.deleteDownload(streamId),
     onSuccess: () => {

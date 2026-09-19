@@ -212,11 +212,16 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
     console.log(`Seeded ${DEFAULT_PRESETS.length} default export presets`);
   }
 
-  /** Stop every live download for a stream (piece + pipeline). */
-  const cancelLiveDownloads = (id: string): boolean => {
-    const piece = mediaActions.cancelPiece(id);
+  /**
+   * Stop every live download for a stream (piece + pipeline).
+   *
+   * `cancelPiece` now also REMOVES the piece's files, so this must not be used before a delete that
+   * wants the files gone anyway — it is, and the delete follows immediately, so the two agree. When
+   * only the abort is wanted (no cleanup), use `cancelProgressive` alone.
+   */
+  const cancelLiveDownloads = (id: string): Promise<boolean> => {
     const main = importByUrl.cancelProgressive(id);
-    return piece || main;
+    return mediaActions.cancelPiece(id, "proxy").then((piece) => piece || main);
   };
 
   return {
@@ -246,12 +251,13 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
       downloadRevision: (id: string) => id === "__global__" ? downloadOrchestrator.globalRev : downloadOrchestrator.revision(id),
       touchDownload: (id: string) => downloadOrchestrator.touch(id),
       purgeArtifacts: (id: string) => mediaActions.purgeArtifacts(id),
-      cancelDownload: (id: string) => {
-        const piece = mediaActions.cancelPiece(id);
-        const main = importByUrl.cancelProgressive(id);
-        return piece || main;
-      },
-      cancelPiece: (id: string) => mediaActions.cancelPiece(id),
+      // NOTE: `cancelDownload` was a separate entry here with no callers at all — the route uses
+      // `deleteDownload` for the whole-download case and `cancelPiece` for a single piece. It is
+      // kept only as the abort-everything primitive those two build on, so its signature matches
+      // `cancelPiece` and it cannot drift.
+      cancelDownload: async (id: string, kind: "proxy" | "hq" | "chat" = "proxy") =>
+        await mediaActions.cancelPiece(id, kind),
+      cancelPiece: (id: string, kind: "proxy" | "hq" | "chat") => mediaActions.cancelPiece(id, kind),
       // Deleting an artifact must not leave a live downloader writing into a
       // removed file (verified: DELETE /proxy during a run left ffmpeg
       // appending to a deleted inode while the view honestly showed 0 bytes).

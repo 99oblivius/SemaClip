@@ -29,10 +29,37 @@ export interface ReloadDecision {
   stallMs: number;
   /** New bytes required before a reload is worth doing. */
   minGrowth: number;
+  /**
+   * The download FINISHED, so the file is complete and fully servable.
+   *
+   * ── THE BUG THIS EXISTS FOR ────────────────────────────────────────────────────────────────
+   * "Complete" was previously expressed by setting `frontierBytes = Number.MAX_SAFE_INTEGER`
+   * (`if (!v.active) { frontierBytes = MAX_SAFE_INTEGER; return; }`), on the reasoning that "no more
+   * reloads are needed". The comparison then inverted the intent: a COMPLETE file's frontier is
+   * MAX_SAFE_INTEGER while `frontierAtLastReload` is still 0, so `frontier > mark + minGrowth` is
+   * TRUE and the stall detector fires a reload for a file that is not growing at all.
+   *
+   * That single spurious reload resets the element (`videoEl.load()`) and races its resume, which is
+   * the owner's report: on a COMPLETED project, pressing play snaps back to 00:00 and pauses. It
+   * reproduces on a finished download as well as during one, because `!v.active` is true in both the
+   * seconds after completion and whenever a complete artifact is re-read.
+   *
+   * Verified numerically against the shipped predicate: frontier=MAX, mark=0, paused=false,
+   * progressed -> old predicate TRUE (reloads a complete file); with `complete` -> FALSE. A
+   * genuinely growing file still reloads, which is what the detector is for.
+   *
+   * So "complete" is its own input rather than a sentinel value that happens to satisfy a growth
+   * comparison. A sentinel cannot express "never reload" in a predicate built to detect growth.
+   */
+  complete: boolean;
 }
 
 export function shouldReloadMedia(a: ReloadDecision): boolean {
   if (a.paused || a.inFlight) return false;
+  // A complete file is fully servable: there is no new data to pick up, and reloading it would
+  // reset the element for nothing. This MUST come before the growth comparisons — a completed
+  // download is exactly the case that must never reload.
+  if (a.complete) return false;
   // A stalled decoder with no new data would reload forever.
   if (a.sinceProgressMs < a.stallMs) return false;
   // The frontier went BACKWARDS: this is not the media the mark was tracking (a delete and
