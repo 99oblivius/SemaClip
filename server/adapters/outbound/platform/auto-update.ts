@@ -100,6 +100,20 @@ export interface UpdateStatus {
    */
   updateError: string | null;
   /**
+   * Set when the PREVIOUS hand-off closed the app without completing its swap.
+   *
+   * ── WHY THIS IS NOT `updateError` ────────────────────────────────────────────────────────────
+   * It shared that field at first, and a SUCCESSFUL check then erased it: `runUpdateCheck` clears
+   * `updateError` on success (correct for a retry), so "up to date (26.245)" wiped the diagnosis of
+   * the failed install one line after it was written. Verified on the guest — the warning reached
+   * stderr and `/api/update` still answered with an empty error, so the banner showed nothing and the
+   * loop stayed invisible.
+   *
+   * A successful CHECK says nothing about the previous APPLY. Only the next launch can clear this,
+   * by the record matching again.
+   */
+  handoffError: string | null;
+  /**
    * Windows: the updater that applies the downloaded payload. Null elsewhere, and null here when
    * extraction failed (then `sidecarError` says why).
    */
@@ -131,6 +145,7 @@ const status: UpdateStatus = {
   download: null,
   phase: "idle",
   updateError: null,
+  handoffError: null,
   sidecarPath: null,
   sidecarError: null,
   stagedPath: null,
@@ -138,7 +153,30 @@ const status: UpdateStatus = {
 };
 
 export function updateStatus(): UpdateStatus {
-  return { ...status };
+  // The banner reads `updateError`; the hand-off diagnosis is surfaced there so a failure that
+  // survived a successful check is still shown. Kept as a separate FIELD internally because the two
+  // have different lifetimes — see handoffError.
+  return { ...status, updateError: status.updateError ?? status.handoffError };
+}
+
+/**
+ * Compare the bundle's recorded version against the running build and record a failed hand-off.
+ *
+ * Exported with an optional path so the property can be tested against a seeded record rather than
+ * the running bundle. Returns the diagnosis it set, for a caller that wants to assert on it.
+ */
+export async function reconcileRecordedVersion(recordPath?: string): Promise<string | null> {
+  // A build with no version has nothing to compare against, and comparing would be actively wrong:
+  // measured, a record of "null" (which is what gets written when this build has no version) produced
+  // a diagnosis claiming the swap failed. A dev run must stay silent.
+  if (!status.current) return null;
+  const previous = await recordedVersion(recordPath);
+  if (!previous || previous === status.current) return null;
+  status.handoffError =
+    `The last update did not install: this build is ${status.current} but the updater recorded ` +
+    `${previous} as installed, so the swap did not complete. SemaClip will offer it again below.`;
+  console.warn(`Updates: ${status.handoffError}`);
+  return status.handoffError;
 }
 
 /**
@@ -153,12 +191,15 @@ export function updateStatus(): UpdateStatus {
  * unreadable, or carries no version= line. A diagnosis must not invent a failure out of a missing
  * file, because every hand-unpacked zip starts that way.
  */
-async function recordedVersion(): Promise<string | null> {
+async function recordedVersion(recordPath?: string): Promise<string | null> {
   try {
-    const raw = await Deno.readTextFile(updateRecordPath());
+    const raw = await Deno.readTextFile(recordPath ?? updateRecordPath());
     for (const line of raw.split("\n")) {
       const [key, value] = line.split("=");
-      if (key?.trim() === "version" && value?.trim()) return value.trim();
+      const v = value?.trim();
+      // "null"/"undefined" are treated as absent: a build without a version writes its own
+      // String(null) into the record, and reading that back as a version invented a failure.
+      if (key?.trim() === "version" && v && v !== "null" && v !== "undefined") return v;
     }
   } catch {
     // No record: nothing to reconcile.
@@ -660,13 +701,7 @@ export async function startAutoUpdate(baseUrl?: string): Promise<void> {
   // they are offered the same update and the loop repeats on every launch.
   //
   // Checked BEFORE anything else so the message survives even if the check below fails too.
-  const previous = await recordedVersion();
-  if (previous && previous !== status.current) {
-    status.updateError =
-      `The last update did not install: this build is ${status.current} but the updater recorded ` +
-      `${previous} as installed, so the swap did not complete. SemaClip will offer it again below.`;
-    console.warn(`Updates: ${status.updateError}`);
-  }
+  await reconcileRecordedVersion();
 
   // WINDOWS FIRST: the updater's swap needs a real file outside the payload's virtual
   // filesystem, and this is the only process that can read the embedded copy. Doing it

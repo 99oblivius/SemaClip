@@ -18,6 +18,11 @@
  */
 import { assert, assertEquals } from "@std/assert";
 
+// A packaged build carries a version; without one `status.current` is null and the reconciler stays
+// silent BY DESIGN (there is nothing to compare against). Set BEFORE the module is imported, because
+// `bakedVersion()` is evaluated at module load.
+Deno.env.set("SEMACLIP_VERSION", "26.245");
+
 const AUTO = await Deno.readTextFile(
   new URL("../../server/adapters/outbound/platform/auto-update.ts", import.meta.url),
 );
@@ -38,24 +43,104 @@ Deno.test("a recorded version that disagrees with the running build is reported"
   const body = AUTO.slice(i, AUTO.indexOf("export ", i + 10));
 
   assert(
-    /recordedVersion\(\)/.test(body),
+    /reconcileRecordedVersion\(\)/.test(body),
     "the startup path must reconcile the record against the running build",
   );
-  // The comparison is the whole point: equal means the hand-off landed, different means it did not.
+  // The comparison lives in the reconciler: equal means the hand-off landed, different means it did not.
   assert(
-    /previous !== status\.current/.test(body),
+    /previous === status\.current/.test(AUTO) || /previous !== status\.current/.test(AUTO),
     "a record that disagrees is the failure signature",
   );
-  // It must set the SAME field the banner renders, or the message has no reader.
+  // It must reach the field the banner renders — via handoffError, which the getter surfaces.
+  const reconciler = AUTO.slice(
+    AUTO.indexOf("export async function reconcileRecordedVersion"),
+    AUTO.indexOf("async function recordedVersion"),
+  );
   assert(
-    /status\.updateError =/.test(body),
-    "the diagnosis must reach the field the banner shows",
+    /status\.handoffError =/.test(reconciler),
+    "the diagnosis must be recorded",
+  );
+  assert(
+    /updateError: status\.updateError \?\? status\.handoffError/.test(AUTO),
+    "and surfaced in the field the banner reads",
   );
   // And it must run BEFORE the check, so the message survives even if the check also fails.
-  const reconcileAt = body.indexOf("recordedVersion()");
+  const reconcileAt = body.indexOf("reconcileRecordedVersion()");
   const checkAt = body.indexOf("ensureSidecar()");
   assert(checkAt > 0 && reconcileAt > 0, "both must exist on the startup path");
   assert(reconcileAt < checkAt, "the reconciliation must run before the update check");
+});
+
+Deno.test("the diagnosis SURVIVES a successful check", async () => {
+  // ── THE BUG THE FIRST VERSION SHIPPED ───────────────────────────────────────────────────────
+  // The message was written to `updateError`, and `runUpdateCheck` CLEARS that field on success (right
+  // for a retry). So "up to date (26.245)" erased the diagnosis one line after boot set it. Measured
+  // on the guest: stderr carried the warning while /api/update answered with an EMPTY error, so the
+  // banner showed nothing and the loop stayed invisible.
+  //
+  // Driven for real: seed a record, reconcile, then run a SUCCESSFUL check and assert the diagnosis
+  // is still readable through the getter the banner uses.
+  Deno.env.set("SEMACLIP_UPDATE_RETRY_MS", "0");
+  const mod = await import(`@/adapters/outbound/platform/auto-update.ts?t=${Date.now()}-survive`);
+
+  const dir = await Deno.makeTempDir();
+  const record = `${dir}/.semaclip-version`;
+  // A record claiming a version this build is not — the failed-hand-off signature.
+  await Deno.writeTextFile(record, "version=99.999\n");
+
+  const diagnosis = await mod.reconcileRecordedVersion(record);
+  assert(diagnosis !== null, "a disagreeing record must produce a diagnosis");
+  assert(diagnosis!.includes("did not install"), `unexpected wording: ${diagnosis}`);
+  assert(
+    mod.updateStatus().updateError === diagnosis,
+    "the banner's field must carry it once set",
+  );
+
+  // NOW the thing that broke: a successful check clears `updateError` for a retry.
+  await mod.runUpdateCheck(async () => ({ reason: "up to date" }));
+
+  assertEquals(
+    mod.updateStatus().updateError,
+    diagnosis,
+    "a successful CHECK must not erase a failed APPLY — that is the whole loop staying invisible",
+  );
+  await Deno.remove(record);
+});
+
+Deno.test("a matching or absent record clears the diagnosis", async () => {
+  // The other half: the next launch must be able to clear it, or a fixed install complains forever.
+  const mod = await import(`@/adapters/outbound/platform/auto-update.ts?t=${Date.now()}-clear`);
+  const dir = await Deno.makeTempDir();
+  const record = `${dir}/.semaclip-version`;
+
+  await Deno.writeTextFile(record, "version=99.999\n");
+  assert((await mod.reconcileRecordedVersion(record)) !== null, "precondition: a diagnosis exists");
+
+  // A record that agrees with this build means the hand-off landed.
+  const current = mod.updateStatus().current;
+  await Deno.writeTextFile(record, `version=${current}\n`);
+  assert(
+    (await mod.reconcileRecordedVersion(record)) === null,
+    "a record matching the running build must not (re)raise the diagnosis",
+  );
+  // An absent record is the normal state of a hand-unpacked zip.
+  await Deno.remove(record);
+  assert(
+    (await mod.reconcileRecordedVersion(record)) === null,
+    "no record must be silent, not treated as a failure",
+  );
+
+  // A record carrying the LITERAL "null" — which is what a build with no version writes into it — must
+  // also be silent. Measured: without this guard the reconciler raised a diagnosis claiming the swap
+  // failed, because String(null) was read back as a version.
+  await Deno.writeTextFile(record, "version=null\n");
+  assertEquals(
+    await mod.reconcileRecordedVersion(record),
+    null,
+    'a record of "null" is an absent version, not a failed install',
+  );
+  await Deno.writeTextFile(record, "version=undefined\n");
+  assertEquals(await mod.reconcileRecordedVersion(record), null, '"undefined" likewise');
 });
 
 Deno.test("a missing or unreadable record is silent, not a fabricated failure", () => {
@@ -69,8 +154,15 @@ Deno.test("a missing or unreadable record is silent, not a fabricated failure", 
     "no record must return null so the caller can skip the comparison",
   );
   // And the caller must guard on it being present.
-  const caller = AUTO.slice(AUTO.indexOf("export async function startAutoUpdate"));
-  assert(/if \(previous && previous !== status\.current\)/.test(caller), "null must skip the check");
+  const reconciler = AUTO.slice(AUTO.indexOf("export async function reconcileRecordedVersion"));
+  assert(
+    /if \(!previous \|\| previous === status\.current\) return null;/.test(reconciler),
+    "an absent or matching record must return null so the caller can skip it",
+  );
+  assert(
+    /if \(!status\.current\) return null;/.test(reconciler),
+    "a build with no version must not reconcile at all",
+  );
 });
 
 Deno.test("the record is read from the APP directory, where the updater writes it", () => {
