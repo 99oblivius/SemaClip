@@ -42,6 +42,8 @@ import type { ChildHandle } from "@/adapters/outbound/process/spawn.ts";;
 import {
   beginWindowDrag,
   beginWindowResize,
+  continueWindowDrag,
+  endWindowDrag,
   chromeState,
   closeWindow,
   minimizeWindow,
@@ -1093,18 +1095,39 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     return c.json(res ?? { maximized: false, unsupported: true });
   });
 
-  // Start an OS-run move, from a press in the app's own chrome bar.
+  // Start a window move, from a press in the app's own chrome bar.
   //
-  // THE drag mechanism, on both platforms — `-webkit-app-region: drag` is not available here
-  // (Electron-only CSS; the installed runtime has no `app-region` handling at all, measured), so
-  // the press is handed to Win32's move loop or GTK's `begin_move_drag`. Both give native edge
-  // snapping, which a hand-rolled position loop cannot.
+  // The two platforms use different mechanisms and that is NOT a preference. Linux hands the press
+  // to GTK's move loop (`gtk_window_begin_move_drag`), which owns the input there. Windows cannot:
+  // the press is captured by WebView2's own process, so the OS move loop never starts however the
+  // Win32 call is spelled (`ReleaseCapture` + `WM_NCLBUTTONDOWN` returns success and moves nothing).
+  // Windows therefore follows the pointer instead — /drag/move below.
   //
-  // The coordinates are the press position in window coordinates; `button` is 1 (left).
+  // `x`/`y` are the press position in window coordinates; `button` is 1 (left).
   app.post("/api/window/drag", async (c) => {
     const body = await c.req.json().catch(() => ({})) as { x?: number; y?: number; button?: number };
     const started = beginWindowDrag(Number(body.x ?? 0), Number(body.y ?? 0));
     return c.json({ dragging: started });
+  });
+
+  /**
+   * Continue a pointer-following window move (Windows).
+   *
+   * Takes NO coordinates: the server reads the cursor itself with `GetCursorPos` and moves the
+   * window with `SetWindowPos`, both in native physical pixels. Sending coordinates from the DOM
+   * would mean converting CSS pixels through `devicePixelRatio` and the client/screen origin, which
+   * is two chances to be wrong for no benefit — and it would make a synthetic test unable to drive
+   * the path, since a test can move the real cursor but cannot fake the DOM's.
+   */
+  app.post("/api/window/drag/move", (c) => {
+    const moved = continueWindowDrag();
+    return c.json({ moved: moved !== null, position: moved });
+  });
+
+  /** End a window move, so a lost mouse-up cannot leave a stale grab offset. */
+  app.post("/api/window/drag/end", (c) => {
+    endWindowDrag();
+    return c.json({ dragging: false });
   });
 
   /**

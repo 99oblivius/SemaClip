@@ -226,14 +226,67 @@
    * Only the dedicated drag layer calls this, so a press on a link or button never reaches it:
    * the exclusion is structural (paint order) rather than a selector list to keep in sync.
    */
-  function startWindowDrag(e: MouseEvent) {
-    if (!chrome.frameless) return;
-    if (e.button !== 0) return;
-    void fetch('/api/window/drag', {
+  /**
+   * A window move in progress: the pointer id to match moves against, plus a frame coalescer so a
+   * fast drag posts at most one move per frame instead of one per pointermove event.
+   *
+   * The SERVER does the moving (it reads the cursor and calls SetWindowPos), so nothing here has to
+   * know about devicePixelRatio or screen coordinates — the pointer's job is only to say "still
+   * dragging". That is also what makes the path testable, and drags stay smooth under display
+   * scaling without arithmetic that could be wrong on one axis.
+   */
+  let dragPointerId: number | null = null;
+  let dragFrame: number | null = null;
+
+  function postDrag(path: string, body?: unknown) {
+    void fetch(path, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ x: e.clientX, y: e.clientY }),
+      body: JSON.stringify(body ?? {}),
     }).catch(() => {});
+  }
+
+  /**
+   * Begin dragging the window from a press in the chrome bar.
+   *
+   * `setPointerCapture` is what makes this reliable: the pointer keeps being delivered to this
+   * element even when the cursor leaves it (which it immediately does — the window is moving), so
+   * the drag does not stop the moment the pointer outruns the window. Without it the moves stop at
+   * the first frame where the cursor is outside the bar, which is every frame after the first.
+   */
+  function startWindowDrag(e: PointerEvent) {
+    if (!chrome.frameless) return;
+    if (e.button !== 0) return;
+    dragPointerId = e.pointerId;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    postDrag('/api/window/drag', { x: e.clientX, y: e.clientY });
+  }
+
+  /** Continue the move, coalesced to one request per animation frame. */
+  function moveWindowDrag(e: PointerEvent) {
+    if (dragPointerId === null || e.pointerId !== dragPointerId) return;
+    if (dragFrame !== null) return;
+    dragFrame = requestAnimationFrame(() => {
+      dragFrame = null;
+      if (dragPointerId === null) return;
+      postDrag('/api/window/drag/move');
+    });
+  }
+
+  /** End the move. Also runs on pointercancel, so a lost pointer cannot leave the window stuck. */
+  function endWindowDrag(e: PointerEvent) {
+    if (dragPointerId === null || e.pointerId !== dragPointerId) return;
+    dragPointerId = null;
+    if (dragFrame !== null) {
+      cancelAnimationFrame(dragFrame);
+      dragFrame = null;
+    }
+    try {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {
+      // The capture is already gone (the pointer was cancelled); nothing to release.
+    }
+    postDrag('/api/window/drag/end');
   }
 
   /**
@@ -337,7 +390,10 @@
           class="absolute inset-0 z-0 cursor-default"
           role="presentation"
           aria-hidden="true"
-          onmousedown={startWindowDrag}
+          onpointerdown={startWindowDrag}
+          onpointermove={moveWindowDrag}
+          onpointerup={endWindowDrag}
+          onpointercancel={endWindowDrag}
         ></div>
       {/if}
       <a href="/" class="relative z-10 flex items-baseline gap-2" aria-label="SemaClip home">

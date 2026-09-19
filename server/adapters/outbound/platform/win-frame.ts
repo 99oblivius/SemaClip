@@ -96,10 +96,8 @@ const SW_RESTORE = 9;
 const SW_SHOW = 5;
 const SW_MINIMIZE = 6;
 const SW_MAXIMIZE = 3;
-
-/** Ask the OS to start a move loop, the way a native title bar does. */
-const WM_NCLBUTTONDOWN = 0x00a1;
-const HTCAPTION = 2;
+/** The one flag the drag needs that the block above does not already define. */
+const SWP_NOACTIVATE = 0x0010;
 
 /** Border metrics, for the app to size its own edge grab areas (SM_CXSIZEFRAME/CXPADDEDBORDER). */
 const SM_CXSIZEFRAME = 32;
@@ -133,9 +131,7 @@ const USER32_SYMBOLS = {
   IsWindow: { parameters: ["pointer"], result: "bool" },
   IsZoomed: { parameters: ["pointer"], result: "bool" },
   IsIconic: { parameters: ["pointer"], result: "bool" },
-  ReleaseCapture: { parameters: [], result: "bool" },
-  ClientToScreen: { parameters: ["pointer", "pointer"], result: "bool" },
-  SendMessageW: { parameters: ["pointer", "u32", "usize", "isize"], result: "isize" },
+  GetCursorPos: { parameters: ["pointer"], result: "bool" },
   GetSystemMetrics: { parameters: ["i32"], result: "i32" },
 } as const;
 
@@ -498,59 +494,122 @@ export function isMinimized(): boolean {
 }
 
 /**
- * Start dragging the window, from a mouse press in the app's own chrome bar.
+ * Move the window so the point that was grabbed stays under the cursor.
  *
- * `-webkit-app-region: drag` DOES NOTHING HERE. That CSS is an Electron extension; this app runs on
- * the `webview` backend (WebView2 on Windows, WebKitGTK on Linux), and searching the installed
- * runtime for `app-region` returns ZERO matches — which is why the chrome "can't be dragged around".
- * The mechanism every Win32 app uses instead is to release the mouse capture and ask the OS to run
- * its own move loop:
+ * ── WHY THIS IS NOT THE OS MOVE LOOP ──────────────────────────────────────────────────────
+ * The obvious Win32 idiom is `ReleaseCapture()` + `SendMessage(WM_NCLBUTTONDOWN, HTCAPTION, pt)`,
+ * which hands the drag to the OS. It DOES NOT WORK HERE, and it is not a matter of getting the
+ * parameters right: that handoff needs the mouse-down to be owned by the window that will run the
+ * move loop, and in a WebView2-hosted window the mouse capture during a press is held by WebView2's
+ * own process. `ReleaseCapture()` from this thread therefore cannot hand the drag off — measured
+ * symptom: `SendMessage` returns success, the app reports success, and the window never moves.
+ * (Reported and fixed the same way by another WebView2 app: gwdevhub/slopterm#77 — it removed
+ * exactly this code as "wrong mechanism for a webview".)
  *
- *   ReleaseCapture(); SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, MAKELPARAM(pt.x, pt.y));
+ * The mechanism that does work is to follow the pointer ourselves:
  *
- * The OS then moves the window until the button is released, with snapping, double-click-to-maximize
- * and the drag-threshold behaviour a hand-rolled position loop never reproduces.
+ *   - The press records where inside the window it landed (the "grab offset").
+ *   - Each subsequent move reads the REAL cursor position and puts the window at
+ *     `cursor - grabOffset`.
  *
- * ── THE lParam IS NOT OPTIONAL ────────────────────────────────────────────────────────────
- * The press must be reported in SCREEN coordinates inside `lParam`, and that was the bug: sending
- * `0` puts the point at the top-left of the desktop, and Windows then decides the click is not on
- * the window's caption at all — so the move loop never starts, `SendMessage` returns normally, and
- * the app cheerfully reports success while nothing moves. Client coordinates come from the DOM, so
- * `ClientToScreen` converts them first.
+ * Doing it server-side is deliberate. The cursor is read with `GetCursorPos` and the window is
+ * moved with `SetWindowPos`, both in the same physical-pixel space, so there is no client/screen or
+ * CSS/physical conversion to get wrong — and `devicePixelRatio` scaling never enters the picture.
+ * It also makes the behaviour testable: a synthetic pointer move is enough to observe the window
+ * move, which the OS move loop could never be driven by.
  *
- * It also needs a REAL mouse press to have happened (the OS reads the button state), which is why
- * this is called from a mousedown handler rather than a click.
+ * Returns whether the move succeeded; a refusal is reported rather than hidden.
  */
-/**
- * Pack a point into the `lParam` a non-client message expects.
- *
- * `MAKELPARAM(x, y)` — x in the low word, y in the high word, each a SIGNED 16-bit value. Exported
- * because this is where the drag bug lived: sending `0` put the press at the top-left of the
- * desktop, Windows decided the click was not on the caption, and the move loop never started while
- * the app still reported success. `lParam` is not observable without a real window, so the packing
- * is a pure function here and pinned by a test.
- */
-export function makeLParam(x: number, y: number): bigint {
-  return BigInt(((Math.round(y) & 0xffff) << 16) | (Math.round(x) & 0xffff));
+
+/** The point inside the window that a drag grabbed, in screen pixels. Null when not dragging. */
+let dragGrabX: number | null = null;
+let dragGrabY: number | null = null;
+/** The cursor position at grab time, so the first move is computed as a delta and cannot jump. */
+let dragCursorX = 0;
+let dragCursorY = 0;
+
+/** Point the OS reports for the cursor, in physical pixels. */
+function cursorPos(): { x: number; y: number } | null {
+  const lib = api();
+  if (!lib) return null;
+  try {
+    const pt = new Int32Array(2);
+    if (!lib.symbols.GetCursorPos(Deno.UnsafePointer.of(pt))) return null;
+    return { x: pt[0]!, y: pt[1]! };
+  } catch {
+    return null;
+  }
 }
 
+/** The window's top-left in screen pixels. */
+function windowOrigin(h: Deno.PointerValue): { x: number; y: number } | null {
+  const lib = api();
+  if (!lib) return null;
+  try {
+    const r = new Int32Array(4);
+    if (!lib.symbols.GetWindowRect(h, Deno.UnsafePointer.of(r))) return null;
+    return { x: r[0]!, y: r[1]! };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Record the grab offset for a drag that is starting.
+ *
+ * `clientX/clientY` are the DOM press coordinates, which are already window-relative — the offset
+ * into the window is exactly what following the pointer needs, so no coordinate conversion happens
+ * here at all. The cursor is read only to seed the delta.
+ */
 export function beginDrag(clientX: number, clientY: number): boolean {
+  const h = findOwnWindow();
+  const cur = cursorPos();
+  if (h === null || !cur) return false;
+  dragGrabX = Math.round(clientX);
+  dragGrabY = Math.round(clientY);
+  dragCursorX = cur.x;
+  dragCursorY = cur.y;
+  return true;
+}
+
+/**
+ * Continue a drag: put the window where the pointer says, keeping the grab point fixed.
+ *
+ * Called on every pointer move while the button is held. The delta form (cursor now vs cursor at
+ * grab) rather than an absolute `cursor - grabOffset` is what keeps this correct when the window is
+ * moved by something else mid-drag, and it makes a synthetic test unambiguous.
+ */
+export function continueDrag(): { x: number; y: number } | null {
+  if (dragGrabX === null || dragGrabY === null) return null;
   const lib = api();
   const h = findOwnWindow();
-  if (!lib || h === null) return false;
+  const cur = cursorPos();
+  if (!lib || h === null || !cur) return null;
+  const origin = windowOrigin(h);
+  if (!origin) return null;
+  // Where the window must go so the grabbed point sits under the cursor again.
+  const targetX = cur.x - dragGrabX;
+  const targetY = cur.y - dragGrabY;
   try {
-    // Client -> screen, because the lParam of an NC message is in screen coordinates.
-    const pt = new Int32Array([Math.round(clientX), Math.round(clientY)]);
-    lib.symbols.ClientToScreen(h, Deno.UnsafePointer.of(pt));
-    const x = pt[0]!;
-    const y = pt[1]!;
-    const lparam = makeLParam(x, y);
-    lib.symbols.ReleaseCapture();
-    lib.symbols.SendMessageW(h, WM_NCLBUTTONDOWN, BigInt(HTCAPTION), lparam);
-    return true;
+    lib.symbols.SetWindowPos(
+      h,
+      null,
+      targetX,
+      targetY,
+      0,
+      0,
+      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+    );
   } catch {
-    return false;
+    return null;
   }
+  return { x: targetX, y: targetY };
+}
+
+/** End a drag. Idempotent, so a lost mouse-up cannot leave a stale grab offset behind. */
+export function endDrag(): void {
+  dragGrabX = null;
+  dragGrabY = null;
 }
 
 /** The OS's resize-border thickness, so the app can size its own edge handles to match. */

@@ -54,6 +54,8 @@
 
 import {
   beginDrag as winBeginDrag,
+  continueDrag as winContinueDrag,
+  endDrag as winEndDrag,
   isMaximized as winIsMaximized,
   measureWindow as measureWin32Window,
   minimizeWindow as winMinimizeWindow,
@@ -375,11 +377,30 @@ export function restoreWindow(): boolean {
  * Returns whether the platform accepted the request; a refusal is reported rather than hidden.
  */
 export function beginWindowDrag(x: number, y: number): boolean {
-  // Both platforms get the press position: Win32 needs it in the message's lParam (in screen
-  // coordinates) and GTK needs it for its own move loop.
-  if (Deno.build.os === "windows") return winBeginDrag(Math.round(x), Math.round(y));
+  // Linux hands the drag to GTK's own move loop, which owns the input there.
   if (Deno.build.os === "linux") return gtkBeginMoveDrag(Math.round(x), Math.round(y));
+  // Windows CANNOT do that: the press is captured by WebView2's process, so the OS move loop never
+  // starts (measured — see win-frame.ts). The grab offset is recorded instead and the window is
+  // moved to follow the pointer.
+  if (Deno.build.os === "windows") return winBeginDrag(Math.round(x), Math.round(y));
   return false;
+}
+
+/**
+ * Continue a Windows drag. No-op on Linux, where the toolkit is already running the move loop.
+ *
+ * The cursor is read server-side, so the caller passes nothing: the frontend only has to say "the
+ * pointer moved". That keeps the coordinate space single (physical pixels, native) and makes the
+ * whole path drivable by a synthetic pointer move in a test.
+ */
+export function continueWindowDrag(): { x: number; y: number } | null {
+  if (Deno.build.os !== "windows") return null;
+  return winContinueDrag();
+}
+
+/** End a Windows drag, so a lost mouse-up cannot leave a stale grab offset. */
+export function endWindowDrag(): void {
+  if (Deno.build.os === "windows") winEndDrag();
 }
 
 /** Start resizing from one of the app's own edge handles. */

@@ -393,25 +393,79 @@ Deno.test("Linux gets the same window control surface as Windows", async () => {
  *      0x8C000000), so the log reported `measured style=0x8C000000` for a window that was actually
  *      0x140F0000 — and it cleared the caption off the OS's input-method windows as well.
  */
-Deno.test("the drag packs the press point into lParam, never 0", async () => {
+/**
+ * The Windows drag must FOLLOW THE POINTER, never hand the move to the OS move loop.
+ *
+ * This pins the mechanism, because the wrong one is the obvious one and it was shipped once. The
+ * Win32 caption handoff (`ReleaseCapture` + `SendMessage(WM_NCLBUTTONDOWN, HTCAPTION)`) needs the
+ * mouse-down to be owned by the window that will run the move loop; in a WebView2-hosted window the
+ * capture during a press belongs to WebView2's own process, so the handoff silently does nothing —
+ * measured, the call returns success and the window never moves. Another WebView2 app hit and fixed
+ * exactly this (gwdevhub/slopterm#77, which removed this code as "wrong mechanism for a webview").
+ *
+ * A regression to that idiom is undetectable at runtime from the app's side, which is why the
+ * mechanism itself is asserted here.
+ */
+Deno.test("the Windows drag follows the pointer instead of the OS caption loop", async () => {
+  const src = await Deno.readTextFile(
+    new URL("../adapters/outbound/platform/win-frame.ts", import.meta.url),
+  );
+  // The move must be driven by the real cursor and SetWindowPos.
+  assert(
+    src.includes("GetCursorPos") && src.includes("SetWindowPos"),
+    "the drag must read the cursor and move the window itself",
+  );
+  // Code, not prose: comments legitimately discuss the rejected idiom.
+  const code = src
+    .split("\n")
+    .filter((l) => !l.trimStart().startsWith("*") && !l.trimStart().startsWith("//"))
+    .join("\n");
+  assert(
+    !code.includes("WM_NCLBUTTONDOWN") && !code.includes("SendMessageW"),
+    "the OS caption handoff cannot work in a WebView2 window: it returns success and moves nothing",
+  );
+  assert(
+    !code.includes("ReleaseCapture"),
+    "ReleaseCapture is the other half of the handoff that cannot work here",
+  );
+});
+
+/**
+ * The drag must keep the grabbed point under the cursor, not jump the window's origin to it.
+ *
+ * A `SetWindowPos(cursor)` implementation (the natural first attempt) teleports the window so its
+ * top-left sits under the pointer, which snaps it by however far into the bar the press landed.
+ * The grab offset is what makes a drag feel attached.
+ */
+Deno.test("the drag moves by the grab offset, keeping the grabbed point under the cursor", async () => {
   const src = await Deno.readTextFile(
     new URL("../adapters/outbound/platform/win-frame.ts", import.meta.url),
   );
   assert(
-    src.includes("makeLParam"),
-    "the lParam must be built from the press point: a zero press point starts no move loop",
+    src.includes("dragGrabX") && src.includes("dragGrabY"),
+    "the press offset into the window must be recorded at drag start",
   );
-  // The message call must use it, not a literal. Comments also mention this message, so the match
-  // requires a line that actually CALLS it (an indented statement, not a `*` comment).
-  const call = src.split("\n").find((l) =>
-    l.includes("SendMessageW(") && l.includes("WM_NCLBUTTONDOWN") && !l.trimStart().startsWith("*")
-  );
-  assert(call, "the move-loop message must be sent");
   assert(
-    !/WM_NCLBUTTONDOWN,\s*BigInt\(HTCAPTION\),\s*0n\)/.test(call!),
-    "lParam 0 means (0,0) on the desktop: the press misses the caption and nothing moves",
+    /cur\.x\s*-\s*dragGrabX/.test(src) || /cur\.x-dragGrabX/.test(src),
+    "the window target must be cursor minus the grab offset",
   );
-  assert(call!.includes("lparam"), "the packed press point must be passed through");
+});
+
+/**
+ * The drag must be endable, and ending it twice must be safe.
+ *
+ * A lost pointer-up (the pointer leaves the window, the button is released off-window) must not
+ * leave a grab offset behind, or the next press drags from a stale origin.
+ */
+Deno.test("the Windows drag can be ended, and ending is idempotent", async () => {
+  const src = await Deno.readTextFile(
+    new URL("../adapters/outbound/platform/win-frame.ts", import.meta.url),
+  );
+  assert(src.includes("export function endDrag"), "a drag must be endable");
+  assert(
+    /export function endDrag\(\)[\s\S]{0,200}dragGrabX = null/.test(src),
+    "ending a drag must clear the grab offset",
+  );
 });
 
 Deno.test("the frame removal touches ONLY the chosen window, never the whole process", async () => {
