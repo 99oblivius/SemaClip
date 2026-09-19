@@ -16,6 +16,47 @@
 # Usage: repack-appimage.sh <in.AppImage> <out.AppImage> <icon.png>
 set -euo pipefail
 
+# `--offset-only <file>`: print the squashfs payload offset and exit.
+#
+# Exists so CI never needs an inline `python3 - <<'PY'` heredoc: a heredoc's terminator must sit at
+# column 0, which leaves a `run: |` YAML block and makes the workflow unparseable — a real failure
+# that stopped a release before any step ran. Keeping the Python in this file is the same reason the
+# workflow header says manifest surgery lives in scripts/ci/manifest.py.
+if [ "${1:-}" = "--offset-only" ]; then
+  TARGET="${2:?usage: repack-appimage.sh --offset-only <AppImage>}"
+  python3 - "$TARGET" <<'OFFSETPY'
+import sys
+
+d = open(sys.argv[1], "rb").read()
+KNOWN_COMP = {1, 2, 3, 4, 5, 6}
+
+
+def valid(off: int) -> bool:
+    if off + 30 > len(d):
+        return False
+    inodes = int.from_bytes(d[off + 4:off + 8], "little")
+    block = int.from_bytes(d[off + 12:off + 16], "little")
+    comp = int.from_bytes(d[off + 20:off + 22], "little")
+    return (
+        0 < inodes <= 50_000_000
+        and 4096 <= block <= 1048576
+        and (block & (block - 1)) == 0
+        and comp in KNOWN_COMP
+    )
+
+
+i = 8
+while True:
+    i = d.find(b"hsqs", i + 1)
+    if i < 0:
+        raise SystemExit("no squashfs payload found")
+    if valid(i):
+        print(i)
+        break
+OFFSETPY
+  exit 0
+fi
+
 IN="${1:?usage: repack-appimage.sh <in> <out> <icon.png>}"
 OUT="${2:?usage: repack-appimage.sh <in> <out> <icon.png>}"
 ICON="${3:?usage: repack-appimage.sh <in> <out> <icon.png>}"

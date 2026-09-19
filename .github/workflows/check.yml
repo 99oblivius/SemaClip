@@ -15,6 +15,48 @@ on:
   pull_request:
 
 jobs:
+  # Workflow files are CODE, and a YAML error there fails a RELEASE rather than a check.
+  #
+  # Measured: an `inline python3 - <<'PY'` heredoc inside a `run: |` block put its terminator at
+  # column 0, which ends the YAML block scalar — the whole release.yml became unparseable and the run
+  # failed before a single step executed ("This run likely failed because of a workflow file issue").
+  # Nothing in this repo validated workflow syntax, so the release pipeline was the first thing to
+  # find out. This job runs on PRs and pushes, before a release can be cut.
+  workflows:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Workflow YAML parses, and no heredoc terminator sits at column 0
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob
+          import sys
+
+          try:
+              import yaml
+          except ImportError:
+              sys.exit("pyyaml unavailable; cannot validate workflows")
+
+          bad = 0
+          for path in sorted(glob.glob(".github/workflows/*.yml")):
+              try:
+                  yaml.safe_load(open(path))
+                  print(f"ok      {path}")
+              except Exception as exc:
+                  print(f"INVALID {path}: {exc}")
+                  bad = 1
+
+              # A heredoc terminator (PY, EOF, ...) at column 0 inside a `run: |` block is the exact
+              # failure above, and YAML cannot catch it because the file may still parse in other
+              # tooling. Report it explicitly.
+              for n, line in enumerate(open(path), 1):
+                  if line.rstrip("\n") in ("PY", "EOF"):
+                      print(f"INVALID {path}:{n}: heredoc terminator at column 0 inside a run block")
+                      bad = 1
+          sys.exit(bad)
+          PY
+
 # Runner image: PINNED, not `ubuntu-latest`.
 #
 # `ubuntu-latest` resolves to 24.04 today (measured in this workflow's own run logs) and 26.04 is

@@ -308,26 +308,13 @@ jobs:
           # repack, so it reports "Can't find a valid SQUASHFS superblock" and the assertion would
           # fail on a perfectly good file. The offset is recomputed here the same way the repack
           # script does it (that script also prints it).
-          OFF=$(python3 - <<'PY'
-KNOWN = {1, 2, 3, 4, 5, 6}
-d = open("dist/SemaClip.AppImage", "rb").read()
-def valid(o):
-    if o + 30 > len(d):
-        return False
-    inodes = int.from_bytes(d[o+4:o+8], "little")
-    block = int.from_bytes(d[o+12:o+16], "little")
-    comp = int.from_bytes(d[o+20:o+22], "little")
-    return 0 < inodes <= 50_000_000 and 4096 <= block <= 1048576 and (block & (block-1)) == 0 and comp in KNOWN
-i = 8
-while True:
-    i = d.find(b"hsqs", i + 1)
-    if i < 0:
-        raise SystemExit("no squashfs payload found")
-    if valid(i):
-        print(i)
-        break
-PY
-)
+          # The offset comes from the repack script, which already computes and prints it. NOT an
+          # inline `python3 - <<'PY'` heredoc: a heredoc's terminator must sit at column 0, which
+          # leaves the `run: |` YAML block and makes the whole workflow unparseable — that is what
+          # happened, and the run failed before a single step executed. The repo's own release.yml
+          # header documents this trap.
+          OFF=$(bash scripts/repack-appimage.sh --offset-only dist/SemaClip.AppImage)
+          echo "payload offset: $OFF"
           echo "payload offset: $OFF"
           unsquashfs -o "$OFF" -l dist/SemaClip.AppImage | grep -q "\.DirIcon" \
             || { echo "::error::repacked AppImage has no .DirIcon — libappimage integration would fail"; exit 1; }
