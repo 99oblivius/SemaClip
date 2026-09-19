@@ -302,15 +302,40 @@ jobs:
           mv dist/SemaClip.repacked.AppImage dist/SemaClip.AppImage
           # Fail loudly: a silent omission ships an AppImage whose launcher entry has no icon, and
           # nothing else in the pipeline would notice.
-          if ! unsquashfs -l dist/SemaClip.AppImage | grep -q "squashfs-root/.DirIcon"; then
-            echo "::error::repacked AppImage has no .DirIcon — libappimage integration would fail"
-            exit 1
-          fi
-          unsquashfs -l dist/SemaClip.AppImage | grep -q "usr/share/icons/hicolor/512x512/apps/semaclip.png" \
+          #
+          # `-offset` is REQUIRED to read a repacked AppImage back. `unsquashfs` finds the payload via
+          # the ELF section table, which still describes the ORIGINAL squashfs position after a
+          # repack, so it reports "Can't find a valid SQUASHFS superblock" and the assertion would
+          # fail on a perfectly good file. The offset is recomputed here the same way the repack
+          # script does it (that script also prints it).
+          OFF=$(python3 - <<'PY'
+KNOWN = {1, 2, 3, 4, 5, 6}
+d = open("dist/SemaClip.AppImage", "rb").read()
+def valid(o):
+    if o + 30 > len(d):
+        return False
+    inodes = int.from_bytes(d[o+4:o+8], "little")
+    block = int.from_bytes(d[o+12:o+16], "little")
+    comp = int.from_bytes(d[o+20:o+22], "little")
+    return 0 < inodes <= 50_000_000 and 4096 <= block <= 1048576 and (block & (block-1)) == 0 and comp in KNOWN
+i = 8
+while True:
+    i = d.find(b"hsqs", i + 1)
+    if i < 0:
+        raise SystemExit("no squashfs payload found")
+    if valid(i):
+        print(i)
+        break
+PY
+)
+          echo "payload offset: $OFF"
+          unsquashfs -o "$OFF" -l dist/SemaClip.AppImage | grep -q "\.DirIcon" \
+            || { echo "::error::repacked AppImage has no .DirIcon — libappimage integration would fail"; exit 1; }
+          unsquashfs -o "$OFF" -l dist/SemaClip.AppImage | grep -q "usr/share/icons/hicolor/512x512/apps/semaclip.png" \
             || { echo "::error::repacked AppImage has no hicolor icon"; exit 1; }
           echo "AppImage carries .DirIcon and a hicolor icon (libappimage can integrate it)"
           # The runtime dylib is patched, not the container, so the repack must not have touched it.
-          unsquashfs -l dist/SemaClip.AppImage | grep -q "squashfs-root/SemaClip.so" \
+          unsquashfs -o "$OFF" -l dist/SemaClip.AppImage | grep -q "SemaClip.so" \
             || { echo "::error::repacked AppImage lost its runtime dylib"; exit 1; }
 
       - name: Collect the Windows installer + portable zip

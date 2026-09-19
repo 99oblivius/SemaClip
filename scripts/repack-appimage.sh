@@ -67,6 +67,12 @@ assert good, "no valid squashfs superblock found"
 off = good[0]
 open(f"{work}/runtime", "wb").write(d[:off])
 open(f"{work}/payload.squashfs", "wb").write(d[off:])
+# The offset is written out because READING the result back needs it: `unsquashfs` derives the
+# squashfs position from the ELF section table, which describes the ORIGINAL payload, so on a
+# repacked file it reports "Can't find a valid SQUASHFS superblock" unless given `-offset`. The file
+# itself is fine — the AppImage runtime locates its payload by its own means and runs it.
+with open(f"{work}/offset", "w") as fh:
+    fh.write(str(off))
 print(f"  runtime: {off} bytes; squashfs: {len(d)-off} bytes")
 PY
 
@@ -96,3 +102,30 @@ fakeroot -i "$WORK/fakeroot.state" -s "$WORK/fakeroot.state" --   mksquashfs "$W
 cat "$WORK/runtime" "$WORK/new.squashfs" > "$OUT"
 chmod +x "$OUT"
 echo "  repacked: $(stat -c%s "$OUT") bytes -> $OUT"
+
+# Print the payload offset so a caller can inspect the result with `unsquashfs -offset <n>`.
+python3 - "$OUT" <<'PY'
+import sys
+
+d = open(sys.argv[1], "rb").read()
+KNOWN_COMP = {1, 2, 3, 4, 5, 6}
+
+
+def valid(off: int) -> bool:
+    if off + 30 > len(d):
+        return False
+    inodes = int.from_bytes(d[off + 4:off + 8], "little")
+    block = int.from_bytes(d[off + 12:off + 16], "little")
+    comp = int.from_bytes(d[off + 20:off + 22], "little")
+    return 0 < inodes <= 50_000_000 and 4096 <= block <= 1048576 and (block & (block - 1)) == 0 and comp in KNOWN_COMP
+
+
+i = 8
+while True:
+    i = d.find(b"hsqs", i + 1)
+    if i < 0:
+        break
+    if valid(i):
+        print(f"  payload offset: {i}")
+        break
+PY
