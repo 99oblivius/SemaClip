@@ -353,8 +353,8 @@ func (u *Updater) ApplyStaged(payloadPath, sha, version string) error {
 	if err := os.MkdirAll(backup, 0o755); err != nil {
 		return err
 	}
-	if err := swapBundleSkipping(root, u.Dir, backup, u.selfName()); err != nil {
-		if rbErr := swapBundleSkipping(backup, u.Dir, "", u.selfName()); rbErr != nil {
+	if err := swapBundleSkipping(root, u.Dir, backup, u.selfName(), updateLogName); err != nil {
+		if rbErr := swapBundleSkipping(backup, u.Dir, "", u.selfName(), updateLogName); rbErr != nil {
 			return fmt.Errorf("swap failed AND rollback failed (%v then %v) — reinstall from the .msi", err, rbErr)
 		}
 		return fmt.Errorf("swap failed, rolled back: %w", err)
@@ -367,6 +367,60 @@ func (u *Updater) ApplyStaged(payloadPath, sha, version string) error {
 		return fmt.Errorf("updated files but could not record the version: %w", err)
 	}
 	u.log("updated to %s (from the payload the app downloaded)", version)
+	return nil
+}
+
+// Preflight validates everything the install will need, WITHOUT changing anything.
+//
+// ── WHY THIS EXISTS ─────────────────────────────────────────────────────────────────────────────
+// The app quits, THEN the sidecar discovers a problem (the app directory is not writable, the payload
+// is unreadable, the archive does not contain a bundle). By then the window is gone and the user's
+// only evidence is that the app closed and nothing happened. Running this first turns that into a
+// refusal the banner can show while the app is still running.
+//
+// It deliberately CANNOT check the one thing that usually blocks a Windows swap — whether a loaded
+// image is locked — because that is only knowable once the app exits. It checks what is knowable
+// beforehand, so the remaining failures are the ones the wait exists for.
+func (u *Updater) Preflight(payloadPath, sha string) error {
+	if payloadPath == "" {
+		return fmt.Errorf("-preflight needs -payload: there is nothing to validate")
+	}
+	if sha == "" {
+		return fmt.Errorf("-payload-sha256 is required with -payload")
+	}
+	if _, err := os.Stat(payloadPath); err != nil {
+		return fmt.Errorf("the downloaded payload is not readable at %s: %w", payloadPath, err)
+	}
+	if _, err := os.Stat(u.Dir); err != nil {
+		return fmt.Errorf("the app directory %s is not reachable: %w", u.Dir, err)
+	}
+	// WRITABILITY IS THE CHECK THAT MATTERS MOST. A bundle under Program Files, or one the user has
+	// moved somewhere read-only, can be read but never swapped — and finding that out after the app
+	// has quit is the failure being prevented here.
+	probe := filepath.Join(u.Dir, ".semaclip-write-probe")
+	if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil {
+		return fmt.Errorf(
+			"the app directory %s is not writable, so the update cannot be applied in place: %w\n"+
+				"Move SemaClip to a folder you own (for example under your user profile) and try again.",
+			u.Dir, err,
+		)
+	}
+	os.Remove(probe)
+	// The archive must be a bundle, or the swap has nothing to lay down.
+	stage := filepath.Join(u.Dir, ".preflight")
+	os.RemoveAll(stage)
+	defer os.RemoveAll(stage)
+	if err := extractZip(payloadPath, stage); err != nil {
+		return fmt.Errorf("the downloaded update could not be read as an archive: %w", err)
+	}
+	root, err := findBundleRoot(stage)
+	if err != nil {
+		return fmt.Errorf("the downloaded update does not contain a SemaClip bundle: %w", err)
+	}
+	if !looksLikeBundle(root) {
+		return fmt.Errorf("the downloaded update does not look like a SemaClip bundle (no app launcher inside)")
+	}
+	u.log("preflight ok: %s is writable and the payload contains a bundle", u.Dir)
 	return nil
 }
 
@@ -440,9 +494,9 @@ func (u *Updater) Apply(force bool) error {
 	if err := os.MkdirAll(backup, 0o755); err != nil {
 		return err
 	}
-	if err := swapBundleSkipping(root, u.Dir, backup, u.selfName()); err != nil {
+	if err := swapBundleSkipping(root, u.Dir, backup, u.selfName(), updateLogName); err != nil {
 		// Put the old files back before reporting, so the app is left runnable.
-		if rbErr := swapBundleSkipping(backup, u.Dir, "", u.selfName()); rbErr != nil {
+		if rbErr := swapBundleSkipping(backup, u.Dir, "", u.selfName(), updateLogName); rbErr != nil {
 			return fmt.Errorf("swap failed AND rollback failed (%v then %v) — reinstall from the .msi", err, rbErr)
 		}
 		return fmt.Errorf("swap failed, rolled back: %w", err)
@@ -755,13 +809,24 @@ func swapBundle(src, dst, backup string) error {
 	return swapBundleSkipping(src, dst, backup, "")
 }
 
-func swapBundleSkipping(src, dst, backup, skip string) error {
+func swapBundleSkipping(src, dst, backup string, skip ...string) error {
 	entries, err := os.ReadDir(src)
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
-		if skip != "" && strings.EqualFold(e.Name(), skip) {
+		// A SKIP MATCHES BY NAME, case-insensitively, and there can be more than one: this program's
+		// own image (it cannot replace itself while running) and its log file (which it holds open
+		// and is still writing to — replacing it mid-run would either lose the account of the update
+		// or leave the process writing into a file the new bundle owns).
+		skipped := false
+		for _, name := range skip {
+			if name != "" && strings.EqualFold(e.Name(), name) {
+				skipped = true
+				break
+			}
+		}
+		if skipped {
 			continue
 		}
 		s := filepath.Join(src, e.Name())
@@ -772,7 +837,7 @@ func swapBundleSkipping(src, dst, backup, skip string) error {
 			// directory-over-file replacement is real (a file became a folder)
 			// and is handled by moving the old entry aside.
 			if info, err := os.Stat(d); err == nil && info.IsDir() {
-				if err := swapBundleSkipping(s, d, backup, skip); err != nil {
+				if err := swapBundleSkipping(s, d, backup, skip...); err != nil {
 					return err
 				}
 				os.Remove(s)

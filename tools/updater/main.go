@@ -20,10 +20,35 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
 )
+
+// updateLogName is the updater's own account of an update, kept beside the payload it describes.
+//
+// The app discards this program's stdout/stderr (it is detached and about to exit), so without a file
+// a failed update leaves the user with nothing but a console that flashed and vanished. Dot-prefixed
+// so it reads as machine state, and excluded from the swap so it cannot overwrite itself mid-write.
+const updateLogName = ".semaclip-update.log"
+
+// openUpdateLog opens the log for appending.
+//
+// IT DOES NOT CREATE THE DIRECTORY. An earlier version called MkdirAll, which had two bad effects: it
+// made the "the app directory is missing" case look like a success (the preflight created the very
+// directory it was checking for), and it turned a read-only check into a no-op. A log is not worth
+// inventing an install directory for — if the app dir is not there, the caller's own checks must see
+// that, and this just returns an error and falls back to stdout.
+func openUpdateLog(dir string) (*os.File, error) {
+	f, err := os.OpenFile(filepath.Join(dir, updateLogName), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	// A timestamp per run, so a log left from an earlier attempt cannot be mistaken for this one.
+	fmt.Fprintf(f, "\n=== SemaClipUpdater %s pid=%d args=%v\n", time.Now().Format(time.RFC3339), os.Getpid(), os.Args[1:])
+	return f, nil
+}
 
 func main() {
 	appDir := flag.String("app", "", "directory holding the app (default: the updater's own directory)")
@@ -48,6 +73,14 @@ func main() {
 	payloadPath := flag.String("payload", "", "install this archive instead of downloading (the app already fetched and verified it)")
 	payloadSha := flag.String("payload-sha256", "", "expected sha256 of -payload; required with it")
 	payloadVersion := flag.String("version", "", "the version -payload contains, recorded after the swap")
+	// -preflight validates everything it can WITHOUT changing anything, and reports through the exit
+	// code. The app runs this BEFORE it quits.
+	//
+	// THE POINT: `applyWindowsUpdate` stops the app and only then does the sidecar discover a problem
+	// (the app directory not writable, the payload unreadable, a swap that cannot land). At that point
+	// the window is already gone and the user sees nothing. A preflight turns "the app vanished and
+	// nothing happened" into a refusal the banner can show WITH THE APP STILL RUNNING.
+	preflight := flag.Bool("preflight", false, "validate -payload against -app and exit 0/1; changes nothing")
 	manifestURL := flag.String("manifest", "", "override the manifest URL (default: from version.txt / built-in)")
 	timeout := flag.Duration("timeout", 10*time.Minute, "overall deadline for download and swap")
 	flag.Parse()
@@ -74,12 +107,37 @@ func main() {
 
 	u := &Updater{Dir: abs, Cfg: cfg, Deadline: time.Now().Add(*timeout), Out: os.Stdout}
 
+	// EVERYTHING IS ALSO WRITTEN TO A FILE IN THE BUNDLE.
+	//
+	// The app starts this program detached with stdout/stderr DISCARDED, because it is about to exit
+	// and cannot babysit a console. That made the updater's own account of a failure unreachable: the
+	// owner saw a console flash and vanish and had nothing to report but "it closed". A file in the
+	// app directory survives the window and is readable from the UI, so a failed update can explain
+	// itself after the fact.
+	// A log is best-effort. The bundle's own checks in Preflight report a missing or read-only app
+	// dir; this must not report one as present by creating it.
+	if f, err := openUpdateLog(abs); err == nil {
+		defer f.Close()
+		u.Out = io.MultiWriter(os.Stdout, f)
+	}
+
 	if *checkOnly {
 		res, err := u.Check()
 		if err != nil {
 			fatal("check failed: %v", err)
 		}
 		fmt.Printf("installed=%s latest=%s update=%v\n", res.Installed, res.Latest, res.Available)
+		return
+	}
+
+	if *preflight {
+		// Change nothing; report whether the hand-off would succeed. Exit 0 = go ahead, non-zero +
+		// a message on stdout/stderr = refuse and let the app keep running.
+		if err := u.Preflight(*payloadPath, *payloadSha); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("preflight ok")
 		return
 	}
 

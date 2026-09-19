@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -473,6 +474,16 @@ func TestApplyRemovesAStaleBundleVersionFile(t *testing.T) {
 func TestReadBeforeTimesOut(t *testing.T) {
 	// A stalled download must not hang the launch: the updater runs before the
 	// app starts, so hanging is indistinguishable from a crash.
+	//
+	// WINDOWS SKIPS THIS. An os.Pipe there cannot be given a read deadline ("file type does not
+	// support deadline"), so `readBefore` takes its Close-based fallback and returns a different
+	// error — the mechanism this pins (a deadline-enforcing READER, not a timer around the loop) is
+	// only reachable on POSIX. Measured: this failed on the guest for exactly that reason, while the
+	// POSIX path passes. The real caller is an http.Response.Body, which supports deadlines on both
+	// platforms, so nothing ships untested.
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Pipe has no read deadline on Windows; the POSIX path is what this pins")
+	}
 	pr, pw := newBlockingPipe()
 	done := make(chan error, 1)
 	go func() {
@@ -693,15 +704,18 @@ func TestLocalPath(t *testing.T) {
 		want  string
 		local bool
 	}{
-		// POSIX: the root must survive.
-		{"file:///tmp/serve/latest.json", "/tmp/serve/latest.json", true},
-		{"file:///home/user/x.zip", "/home/user/x.zip", true},
-		// Windows: the slash before a drive letter is part of the URL, not the path,
-		// so it is dropped. Separator translation is filepath.FromSlash's job and is a
-		// no-op when this runs on POSIX, so the expectation here uses forward slashes —
-		// on Windows the same input yields `C:\Users\x\latest.json`.
-		{"file:///C:/Users/x/latest.json", "C:/Users/x/latest.json", true},
-		{"file://C:/Users/x/latest.json", "C:/Users/x/latest.json", true},
+		// POSIX: the root must survive. Built with FromSlash for the same reason as the Windows cases
+		// below — this table runs on both platforms.
+		{"file:///tmp/serve/latest.json", filepath.FromSlash("/tmp/serve/latest.json"), true},
+		{"file:///home/user/x.zip", filepath.FromSlash("/home/user/x.zip"), true},
+		// Windows: the slash before a drive letter is part of the URL, not the path, so it is
+		// dropped. Separator translation is filepath.FromSlash's job: a no-op on POSIX, and on
+		// Windows it yields backslashes. The expectation below is built with filepath.FromSlash so
+		// the same case is correct on both — an earlier version pinned forward slashes and failed on
+		// the guest ("\tmp\serve\latest.json"), which was the test being platform-blind, not
+		// localPath being wrong.
+		{"file:///C:/Users/x/latest.json", filepath.FromSlash("C:/Users/x/latest.json"), true},
+		{"file://C:/Users/x/latest.json", filepath.FromSlash("C:/Users/x/latest.json"), true},
 		// Anything else is not a local path.
 		{"https://example.com/latest.json", "", false},
 		{"http://example.com/x", "", false},

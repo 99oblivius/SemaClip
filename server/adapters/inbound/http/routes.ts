@@ -55,6 +55,7 @@ import {
 import type { ResizeEdge } from "@/adapters/outbound/platform/gtk-frame.ts";
 import { logFilePath, readLogTail } from "@/adapters/outbound/platform/log-file.ts";
 import { retryUpdateCheck, updateStatus } from "@/adapters/outbound/platform/auto-update.ts";
+import { updateLogPath } from "@/adapters/outbound/platform/sidecar.ts";
 import { emitAppEvent, subscribeAppEvents, sseFrame } from "@/application/events.ts";
 import { fetchWithTimeout, MEDIA_TIMEOUT_MS } from "@/adapters/outbound/net/fetch-timeout.ts";
 
@@ -1001,6 +1002,23 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
       os: Deno.build.os,
       serveAddress: Deno.env.get("DENO_SERVE_ADDRESS") ?? null,
     }));
+
+  // The UPDATER's own log, which is written by a separate process the app cannot read through the
+  // normal log path.
+  //
+  // The app starts the updater detached with its output discarded, so when an update failed the user
+  // had nothing to report but "a console flashed and closed". This is that process's account of what
+  // it did, and it is the difference between a diagnosable failure and a guess.
+  app.get("/api/update/log", async (c) => {
+    const path = updateLogPath();
+    try {
+      const text = await Deno.readTextFile(path);
+      // Bounded like the app log: this file is appended to on every attempt.
+      return c.text(text.slice(-40_000), 200, { "Content-Type": "text/plain; charset=utf-8" });
+    } catch {
+      return c.text(`no updater log at ${path}`, 200, { "Content-Type": "text/plain; charset=utf-8" });
+    }
+  });
 
   // Real update state, so Settings reports what is true instead of describing the
   // mechanism. A packaged build answers with its baked version; a dev run answers with

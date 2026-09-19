@@ -33,6 +33,21 @@ export const SIDECAR_NAME = "SemaClipUpdater.exe";
 const EMBEDDED_DIR = new URL("../../../appfiles/", import.meta.url);
 
 /**
+ * The updater's own log, written inside the bundle by `tools/updater`.
+ *
+ * The app runs the updater detached with its output discarded (it is about to exit and cannot babysit
+ * a console), so this file is the only account of what actually happened. Kept in sync with
+ * `updateLogName` in tools/updater/main.go — the two must name the same file or the log is written
+ * somewhere nothing reads.
+ */
+export const UPDATE_LOG_NAME = ".semaclip-update.log";
+
+/** Absolute path of the updater's log, for the app to read back. */
+export function updateLogPath(env?: (k: string) => string | undefined): string {
+  return `${sidecarDir(env)}\\${UPDATE_LOG_NAME}`;
+}
+
+/**
  * The launcher an OLDER build wrote, kept as a name only so it can be deleted.
  *
  * Do not reintroduce this file. It existed so a user could apply an update by hand, because the app

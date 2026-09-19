@@ -623,7 +623,18 @@ export async function restartApp(): Promise<{ restarting: boolean; error: string
     if (Deno.build.os === "windows" && updateStatus().pendingVersion) {
       const res = applyWindowsUpdate();
       if (res.restarting) return res;
-      // Fall through to a plain restart so a failed hand-off still restarts the app the user has.
+      // ── A REFUSED HAND-OFF MUST NOT CLOSE THE WINDOW ───────────────────────────────────────────
+      // Falling through here was WRONG and is a large part of the reported failure. The fall-through
+      // restarts the app for a reason that has nothing to do with restarting: the hand-off failed, so
+      // the update definitely did not happen — and the restart then ran the startup check, found the
+      // same update, and failed again. The user watched the window close and reopen on the same
+      // version with no explanation, which is exactly "a terminal flashed and it stayed on the old
+      // version".
+      //
+      // A refusal now KEEPS THE APP RUNNING and returns the reason, so the banner can show it while
+      // the user still has a window. That is the whole point of the preflight: an update that cannot
+      // be applied is a message, not a crash.
+      return res;
     }
 
     const exe = Deno.execPath();

@@ -523,6 +523,20 @@ export function applyWindowsUpdate(): { restarting: boolean; error: string | nul
   if (!status.stagedPath || !status.stagedSha256) {
     return { restarting: false, error: "the downloaded update is missing, so it cannot be applied" };
   }
+
+  // ── PREFLIGHT, BEFORE ANYTHING IS STOPPED ────────────────────────────────────────────────────
+  // This runs the updater in a mode that changes nothing and reports through the exit code. Without
+  // it, a problem the sidecar can only discover AFTER the app exits (an app directory that is not
+  // writable, a payload that cannot be read as an archive) closed the window and left the user with
+  // nothing but a console that flashed and vanished — exactly the reported failure.
+  //
+  // Synchronous on purpose: it must finish while the window still exists, because its refusal is what
+  // keeps the app running and the message on screen.
+  const pre = preflight(sidecar, appDirPath(), status.stagedPath, status.stagedSha256);
+  if (!pre.ok) {
+    return { restarting: false, error: pre.error };
+  }
+
   try {
     // Detached: the helper must outlive this process, because this process is what it waits for.
     const cmd = new Deno.Command(sidecar, {
@@ -553,6 +567,38 @@ export function applyWindowsUpdate(): { restarting: boolean; error: string | nul
   // Quit so the sidecar can take the payload. Deferred slightly so this response is flushed first.
   setTimeout(() => Deno.exit(0), 250);
   return { restarting: true, error: null };
+}
+
+/**
+ * Run the updater's no-op validation and report what it says.
+ *
+ * A TIMEOUT IS A REFUSAL, not a pass. If the preflight cannot answer within a few seconds, the app
+ * must keep running: a swap that then fails would take the window with it, which is the outcome this
+ * exists to avoid.
+ */
+function preflight(sidecar: string, appDir: string, payload: string, sha: string): { ok: boolean; error: string | null } {
+  try {
+    const cmd = new Deno.Command(sidecar, {
+      args: ["-preflight", "-app", appDir, "-payload", payload, "-payload-sha256", sha],
+      stdin: "null",
+      stdout: "piped",
+      stderr: "piped",
+    });
+    const out = cmd.outputSync();
+    if (out.success) return { ok: true, error: null };
+    const text = (new TextDecoder().decode(out.stderr) + new TextDecoder().decode(out.stdout)).trim();
+    return {
+      ok: false,
+      error: text.length > 0
+        ? `the update cannot be applied: ${text}`
+        : `the update cannot be applied (the updater exited ${out.code} with no message)`,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: `could not validate the update before installing: ${err instanceof Error ? err.message : err}`,
+    };
+  }
 }
 
 /**
