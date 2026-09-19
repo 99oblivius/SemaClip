@@ -52,6 +52,7 @@
  * so development keeps working: under `deno run` there is no window to manage.
  */
 
+import { applyAppImageUpdate, updateStatus } from "@/adapters/outbound/platform/auto-update.ts";
 import {
   beginDrag as winBeginDrag,
   continueDrag as winContinueDrag,
@@ -604,6 +605,17 @@ export function setWindowTitle(title: string): boolean {
  */
 export async function restartApp(): Promise<{ restarting: boolean; error: string | null }> {
   try {
+    // LINUX APPIMAGES FIRST. `Deno.execPath()` inside an AppImage is the binary in the EXTRACTED
+    // tree (`/tmp/.mount_XXXX/SemaClip`), not the AppImage file, so relaunching it would start a
+    // stray process from a mount that is about to disappear — and would not install anything. When a
+    // staged AppImage update exists, the swap helper does all three jobs: wait for this process to
+    // exit, replace the file, relaunch. See appimage-update.ts.
+    if (Deno.build.os === "linux" && updateStatus().pendingVersion) {
+      const res = applyAppImageUpdate();
+      if (res.restarting) return res;
+      // Fall through to a plain restart so a failed swap still restarts the app the user has.
+    }
+
     const exe = Deno.execPath();
     const dir = exe.includes("/") ? exe.slice(0, exe.lastIndexOf("/"))
       : exe.includes("\\") ? exe.slice(0, exe.lastIndexOf("\\"))

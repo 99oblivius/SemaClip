@@ -44,7 +44,13 @@ function withFakeAutoUpdate(
   };
 }
 
-Deno.test("a packaged build with NO explicit url still starts the updater", async () => {
+Deno.test("a packaged build with NO explicit url still starts the runtime updater (non-Linux)", async () => {
+  // LINUX IS EXCLUDED ON PURPOSE, not for convenience. On Linux `startAutoUpdate` never calls the
+  // runtime's `autoUpdate`: its staging path is `<dylib>.update` beside the dylib, which inside an
+  // AppImage is a read-only squashfs mount, so it fails on every launch and changes nothing
+  // (measured: "Read-only file system (os error 30)"). Linux does its own check and download
+  // instead — see the Linux tests below. The runtime call this test pins is still the WINDOWS path.
+  if (Deno.build.os === "linux") return;
   const run = withFakeAutoUpdate("26.178-nightly.18", async (captured) => {
     // Fresh import so the module re-reads Deno.desktopVersion at load.
     const mod = await import(
@@ -84,7 +90,9 @@ Deno.test("a packaged build with NO explicit url still starts the updater", asyn
   await run();
 });
 
-Deno.test("an explicit url OVERRIDES the baked one", async () => {
+Deno.test("an explicit url OVERRIDES the baked one (non-Linux)", async () => {
+  // See the note above: Linux does not go through the runtime updater.
+  if (Deno.build.os === "linux") return;
   const run = withFakeAutoUpdate("26.178-nightly.18", async (captured) => {
     const mod = await import(
       `@/adapters/outbound/platform/auto-update.ts?t=${Date.now()}b`
@@ -133,4 +141,82 @@ Deno.test("startAutoUpdate must not THROW when the runtime returns undefined", a
     }
   });
   await run();
+});
+
+/**
+ * LINUX: the AppImage update path.
+ *
+ * These pin the decisions that make Linux work at all, because the runtime's own updater cannot
+ * (its staging path is inside the read-only mount). The values here are what the swap depends on:
+ * the location to replace comes from the runtime's `APPIMAGE` variable, and the helper must wait for
+ * this process to exit before moving the file.
+ */
+Deno.test("the AppImage path comes from APPIMAGE, and is null elsewhere", async () => {
+  const mod = await import(`@/adapters/outbound/platform/appimage-update.ts?t=${Date.now()}a`);
+  const env = (k: string) => (k === "APPIMAGE" ? "/home/user/SemaClip.AppImage" : undefined);
+
+  if (Deno.build.os === "linux") {
+    assertEquals(
+      mod.appImagePath(env),
+      "/home/user/SemaClip.AppImage",
+      "the runtime exports APPIMAGE as the file to replace",
+    );
+    // An empty value must not be treated as a path.
+    assertEquals(mod.appImagePath(() => ""), null);
+    assertEquals(mod.appImagePath(() => undefined), null);
+  } else {
+    assertEquals(
+      mod.appImagePath(env),
+      null,
+      "only Linux replaces an AppImage; Windows updates through the sidecar",
+    );
+  }
+});
+
+Deno.test("the swap script waits for THIS pid, renames atomically, and relaunches", async () => {
+  const mod = await import(`@/adapters/outbound/platform/appimage-update.ts?t=${Date.now()}b`);
+  const plan = mod.swapPlan("/home/user/Applications/SemaClip.AppImage", () => "/home/user/.local/share");
+  const body = mod.swapScriptBody(plan, 4242);
+
+  // The pid is what prevents racing the running process: the file cannot be replaced while the
+  // AppImage is still mounted, and the mount is released only when the process exits.
+  assert(body.includes("PID=4242"), "the helper must wait for the app's own pid");
+  assert(body.includes("kill -0 \"$PID\""), "it must poll for that process to disappear");
+  // Same-directory rename: atomic, and no window where the target file is missing.
+  assert(body.includes('mv -f "$STAGED" "$TARGET"'), "the swap must be a rename onto the target");
+  assert(body.includes("chmod +x"), "a swapped file must stay executable");
+  assert(body.includes('nohup "$TARGET"'), "the app must be relaunched after the swap");
+  // Both paths must be the same directory for the rename to be atomic.
+  assertEquals(
+    plan.staged.replace(/\/[^/]*$/, ""),
+    plan.target.replace(/\/[^/]*$/, ""),
+    "the staged file must live beside the target so `mv` is a rename, not a copy",
+  );
+});
+
+Deno.test("a checksum mismatch is refused rather than installed", async () => {
+  // The manifest's sha256 is the only thing between a user and a corrupted 108MB binary replacing a
+  // working one, so a mismatch must abort and leave the installed file alone.
+  const mod = await import(`@/adapters/outbound/platform/appimage-update.ts?t=${Date.now()}c`);
+  const bytes = new TextEncoder().encode("not a real appimage");
+  const server = Deno.serve({ port: 0, hostname: "127.0.0.1", onListen: () => {} }, () =>
+    new Response(bytes, { status: 200 }));
+  const port = (server.addr as Deno.NetAddr).port;
+
+  const prev = Deno.env.get("APPIMAGE");
+  Deno.env.set("APPIMAGE", "/tmp/SemaClip-test.AppImage");
+  try {
+    const res = await mod.downloadAndStageAppImage(
+      "http://127.0.0.1/x/latest.json",
+      "26.999",
+      { name: "x.AppImage", sha256: "0".repeat(64), url: `http://127.0.0.1:${port}/x.AppImage` },
+      () => {},
+    );
+    assertEquals(res.staged, false, "a bad hash must not stage anything");
+    assert(res.error?.includes("sha256 mismatch"), `expected a mismatch error, got ${res.error}`);
+  } finally {
+    if (prev !== undefined) Deno.env.set("APPIMAGE", prev);
+    else Deno.env.delete("APPIMAGE");
+    await server.shutdown();
+  }
 });

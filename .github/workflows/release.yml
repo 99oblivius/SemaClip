@@ -281,6 +281,38 @@ jobs:
           # outright. versions are now v{yy}.{patch} (26.148), which fits.
           deno run --allow-all scripts/build-desktop.ts
 
+      - name: Repack the AppImage with the icon bits libappimage needs
+        if: matrix.platform == 'linux-x64'
+        run: |
+          set -euo pipefail
+          # AppImageLauncher's "integrate" fails without these. Its own stderr says exactly why:
+          #   WARNING: No icons found at "usr/share/icons"
+          #   WARNING: Using .DirIcon as default app icon
+          #   ERROR: Entry doesn't exists: .DirIcon
+          #   ERROR: appimage_register_in_system : Entry doesn't exists: .DirIcon
+          # libappimage resolves an icon from usr/share/icons/<theme>/…, falls back to .DirIcon at the
+          # AppImage root, and `deno desktop` ships NEITHER — only AppIcon.png/SemaClip.png referenced
+          # by Icon=AppIcon in the .desktop. So integration failed and the launcher showed no icon.
+          #
+          # `fakeroot` rather than sudo: the payload's files are root-owned, which makes a plain
+          # unsquashfs tree unwritable, and fakeroot handles that without elevation.
+          # mksquashfs/unsquashfs come from squashfs-tools.
+          sudo -S -p '' apt-get install -y --no-install-recommends squashfs-tools fakeroot >/dev/null
+          bash scripts/repack-appimage.sh dist/SemaClip.AppImage dist/SemaClip.repacked.AppImage assets/icon.png
+          mv dist/SemaClip.repacked.AppImage dist/SemaClip.AppImage
+          # Fail loudly: a silent omission ships an AppImage whose launcher entry has no icon, and
+          # nothing else in the pipeline would notice.
+          if ! unsquashfs -l dist/SemaClip.AppImage | grep -q "squashfs-root/.DirIcon"; then
+            echo "::error::repacked AppImage has no .DirIcon — libappimage integration would fail"
+            exit 1
+          fi
+          unsquashfs -l dist/SemaClip.AppImage | grep -q "usr/share/icons/hicolor/512x512/apps/semaclip.png" \
+            || { echo "::error::repacked AppImage has no hicolor icon"; exit 1; }
+          echo "AppImage carries .DirIcon and a hicolor icon (libappimage can integrate it)"
+          # The runtime dylib is patched, not the container, so the repack must not have touched it.
+          unsquashfs -l dist/SemaClip.AppImage | grep -q "squashfs-root/SemaClip.so" \
+            || { echo "::error::repacked AppImage lost its runtime dylib"; exit 1; }
+
       - name: Collect the Windows installer + portable zip
         if: matrix.platform == 'win-x64'
         run: |
@@ -537,6 +569,25 @@ jobs:
               "https://github.com/${{ github.repository }}/releases/download/${{ needs.version.outputs.tag }}/$ZIP"
           else
             echo "::warning::no portable zip in dist; the Windows artifact entry is omitted (Windows clients stay put)"
+          fi
+
+          # The Linux whole-payload artifact: the AppImage ITSELF, which is what a Linux client
+          # downloads and swaps over its installed file. The manifest previously carried only
+          # win-x64, so a Linux updater had nothing to resolve — the AppImage path did not exist at
+          # all until now.
+          #
+          # The AppImage is not a bsdiff patch target: the runtime cannot stage one from inside a
+          # read-only squashfs mount (measured: EROFS on <dylib>.update), so Linux uses the whole-file
+          # mechanism and the patches map stays what it is.
+          APPIMAGE="SemaClip.AppImage"
+          if [ -f "dist/$APPIMAGE" ] && [ -f "dist/$APPIMAGE.sha256" ]; then
+            python3 scripts/ci/manifest.py artifact \
+              "dist/latest.json" \
+              "$V" linux-x64 "$APPIMAGE" "$(awk '{print $1}' "dist/$APPIMAGE.sha256")" \
+              "https://github.com/${{ github.repository }}/releases/download/${{ needs.version.outputs.tag }}/$APPIMAGE"
+          else
+            echo "::error::no AppImage in dist — Linux clients could never update; the manifest would have no linux-x64 entry"
+            exit 1
           fi
 
       - name: Generate the landing page

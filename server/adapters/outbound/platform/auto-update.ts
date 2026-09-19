@@ -22,6 +22,11 @@
  * "update ready" forever with nothing happening.
  */
 import { ensureSidecar } from "@/adapters/outbound/platform/sidecar.ts";
+import {
+  appImagePath,
+  downloadAndStageAppImage,
+  launchSwapHelper,
+} from "@/adapters/outbound/platform/appimage-update.ts";
 import { emitAppEvent } from "@/application/events.ts";
 
 /**
@@ -47,12 +52,20 @@ const UPDATE_PUBLIC_KEY = "";
 export interface UpdateStatus {
   /** Version baked into THIS binary, or null in a dev run. */
   current: string | null;
-  /** Set once a patch is staged and waiting for the next launch. */
+  /** Set once an update is downloaded and waiting for the next launch to install it. */
   pendingVersion: string | null;
   /** Set when the PREVIOUS launch failed and the launcher rolled it back. */
   lastRollback: string | null;
-  /** Applying updates is macOS/Linux only — Windows stages but never swaps. */
+  /**
+   * Whether a staged update installs itself. Linux AppImages DO: the artifact is downloaded and
+   * swapped over the file by a helper on exit (this app's own mechanism). Windows does NOT: the
+   * bundled sidecar has to be run while the app is closed.
+   */
   canApply: boolean;
+  /** Linux: the AppImage being updated, when running from one. */
+  appImagePath: string | null;
+  /** Why the AppImage update could not be done, when it could not. */
+  appImageError: string | null;
   /**
    * Windows: the updater that can apply a staged update, and the launcher that runs it.
    * Null elsewhere, and null here when extraction failed (then `sidecarError` says why).
@@ -69,7 +82,10 @@ const status: UpdateStatus = {
   current: (Deno as { desktopVersion?: string | null }).desktopVersion ?? null,
   pendingVersion: null,
   lastRollback: null,
+  // Linux AppImages apply their own update on exit; Windows cannot (the sidecar does it).
   canApply: Deno.build.os !== "windows",
+  appImagePath: appImagePath(),
+  appImageError: null,
   sidecarPath: null,
   sidecarLauncherPath: null,
   sidecarError: null,
@@ -77,6 +93,77 @@ const status: UpdateStatus = {
 
 export function updateStatus(): UpdateStatus {
   return { ...status };
+}
+
+
+/**
+ * Base URL used when neither an argument nor an env override is supplied.
+ *
+ * Duplicated from `deno.json`'s `desktop.release.baseUrl` rather than read at runtime: the env is not
+ * carried into a compiled binary, and on Linux the runtime's own URL handling is bypassed entirely.
+ */
+const DEFAULT_MANIFEST_URL = "https://99oblivius.github.io/SemaClip/latest.json";
+
+/**
+ * Check the manifest ONCE at startup and, if a newer version is published, download and stage it.
+ *
+ * This is the whole Linux policy: "on opening the app the releases are polled for an update", with
+ * no further checks until the next launch. A failure is reported, never swallowed — the previous
+ * behaviour was a silent no-op, which is why the owner saw nothing on Linux.
+ */
+async function checkAndStageAppImage(
+  manifestUrl: string,
+): Promise<{ staged: boolean; reason?: string; error?: string }> {
+  const appImage = appImagePath();
+  if (!appImage) {
+    return { staged: false, reason: "not running from an AppImage; nothing to update" };
+  }
+  if (!status.current) {
+    return { staged: false, reason: "no version baked in (dev run)" };
+  }
+
+  let manifest: { version?: string; artifacts?: Record<string, { name: string; sha256: string; url?: string }> };
+  try {
+    const res = await fetch(manifestUrl, { signal: AbortSignal.timeout(30_000) });
+    if (!res.ok) return { staged: false, error: `manifest fetch failed: HTTP ${res.status}` };
+    manifest = await res.json();
+  } catch (err) {
+    return { staged: false, error: `manifest fetch failed: ${err instanceof Error ? err.message : err}` };
+  }
+
+  const latest = manifest.version;
+  if (!latest) return { staged: false, error: "manifest has no version" };
+  if (latest === status.current) {
+    return { staged: false, reason: `up to date (${status.current})` };
+  }
+
+  const entry = manifest.artifacts?.["linux-x64"];
+  if (!entry) {
+    return { staged: false, error: `manifest has no linux-x64 artifact (published ${latest})` };
+  }
+
+  console.log(`Updates: ${status.current} -> ${latest}, downloading the AppImage`);
+  const result = await downloadAndStageAppImage(manifestUrl, latest, entry);
+  if (!result.staged) {
+    return { staged: false, error: result.error ?? "download failed" };
+  }
+  status.pendingVersion = latest;
+  emitAppEvent({ type: "update-staged", version: latest, canApplyByRestart: true });
+  return { staged: true };
+}
+
+/**
+ * Install a staged AppImage update and restart, from the UI.
+ *
+ * The helper waits for THIS process to exit before replacing the file, so the sequence is: start the
+ * helper, then quit. Reported as started rather than done, because the process ends immediately.
+ */
+export function applyAppImageUpdate(): { restarting: boolean; error: string | null } {
+  if (!status.pendingVersion) return { restarting: false, error: "no update is staged" };
+  if (!launchSwapHelper()) return { restarting: false, error: "could not start the swap helper" };
+  // Quit so the helper can take the file. Deferred slightly so this response is flushed first.
+  setTimeout(() => Deno.exit(0), 250);
+  return { restarting: true, error: null };
 }
 
 /**
@@ -110,6 +197,25 @@ export async function startAutoUpdate(baseUrl?: string): Promise<void> {
       );
     }
   }
+  // LINUX: the runtime's own updater CANNOT work from an AppImage, so this does the check and the
+  // download itself. See appimage-update.ts for the mechanism and the measurement.
+  if (Deno.build.os === "linux") {
+    // Same override the runtime's own call honours, resolved here because the Linux path does not
+    // go through that call at all.
+    const manifestUrl = baseUrl ?? Deno.env.get("SEMACLIP_UPDATE_URL") ?? DEFAULT_MANIFEST_URL;
+    const res = await checkAndStageAppImage(manifestUrl);
+    if (res.error) {
+      status.appImageError = res.error;
+      console.warn(`Updates: ${res.error}`);
+    } else if (!res.staged && res.reason) {
+      console.log(`Updates: ${res.reason}`);
+    }
+    // The runtime's own updater is deliberately NOT started here: it stages beside the dylib, which
+    // is a read-only mount inside an AppImage, so every launch would log a failure and change
+    // nothing. Doing the check ourselves is what makes "check at open" true on Linux.
+    return;
+  }
+
   // deno.json's desktop.release.baseUrl is baked into the binary and
   // Deno.autoUpdate() DEFAULTS to it ("This is the only server URL the runtime
   // polls automatically ... defaults to this URL, but can override it per call").
