@@ -110,7 +110,7 @@ Six jobs:
 |---|---|
 | `version` | writes the version, asserts tag/version agreement and that both version files carry it, rejects any suffix |
 | `build (linux-x64)` | frontend build, native fetch, `build-desktop.ts` → AppImage + runtime dylib, `sha256` sidecars |
-| `build (win-x64)` | same for Windows → `.msi` + portable `.zip` + runtime dll, with the sidecar updater and launcher asserted present in the zip |
+| `build (win-x64)` | same for Windows → `.msi` + portable `.zip` + runtime dll, with the sidecar updater and launcher asserted present in the zip and a version stamp asserted ABSENT (the payload is version-idempotent) |
 | `publish` | verifies hashes, creates the release (serially, one asset at a time), writes `latest.json`, pushes Pages |
 | `patch` | qbsdiff delta from the previous release, merges the entry, republishes manifest + patch in one commit |
 | `verify` | downloads the assets back over the PUBLIC urls, hashes them, polls the live manifest, applies every listed patch and compares the result to the target dylib byte-for-byte |
@@ -193,7 +193,9 @@ pending detail.
   portable payload and written out beside the app at launch
   (`adapters/outbound/platform/sidecar.ts`), which performs the swap on a fresh
   process and relaunches. The portable zip therefore updates itself when started
-  through the bundled `Update and launch SemaClip.cmd`.
+  through the bundled `Update and launch SemaClip.cmd` — MEASURED end to end on
+  Windows: a 26.225 bundle applied 26.226 and its dylib came out byte-identical to
+  the published one.
 - **There is no installer offered for Windows, and that is deliberate.** `deno
   desktop` authors a per-machine `.msi` under `%ProgramFiles%`, where the WebView2
   runtime cannot write its profile, so the window comes up blank
@@ -205,6 +207,15 @@ pending detail.
   version scheme above still holds, since the MSI is still built.
 - **`deno desktop` is experimental.** That is why release jobs pin Deno exactly
   (`v2.9.6`) while `check.yml` deliberately floats on `v2.9.x` as early warning.
+- **The payload carries no version stamp.** The archive holds exactly the same files for every
+  release: the manifest names the target version and the updater records what it applied in a
+  per-user state file (`%LOCALAPPDATA%\SemaClip\state.txt`), so there is nothing per-release to
+  embed. A bundle with no `version.txt` updates normally, and an update does not write one back —
+  both measured. This is why the portable zip can be unpacked over any version.
+- **The AppImage cannot update itself.** Deno stages a patch as `<dylib>.update` — NEXT TO THE
+  DYLIB — and inside an AppImage that directory is a read-only squashfs mount, so staging fails with
+  `os error 30` (EROFS). Measured on a real read-only mount against the live manifest. The `.AppImage`
+  is therefore a fresh-download artifact until the dylib can live somewhere writable.
 - **The payload is huge.** ~277MB `.AppImage` and a ~577MB runtime dylib. That is
   the bundled whisper models and whisper binaries, not the app. ffmpeg is NOT
   bundled (it resolves PATH → managed dir → offered download), which is why the
@@ -269,6 +280,9 @@ manifest) rather than left in place.
 5. Confirm the rollback path by staging a deliberately broken patch on a test
    install, or at minimum confirm `<dylib>.backup` appears and is replaced.
 6. On Windows, run the portable zip and update through `Update and launch
-   SemaClip.cmd`. Report what happened rather than assuming: the sidecar path is
-   verified on Linux against the real helpers but has never run on Windows
-   hardware.
+   SemaClip.cmd`. DONE for the updater itself (a 26.225 bundle applied 26.226, dylib
+   byte-identical to the published one, and the launcher's `-app` targeting was fixed
+   after it was found to fail on every run). Still to report from real hardware: the
+   RELAUNCH — the updater starts the app again once the swap is done, and that step
+   needs a desktop session, so it is not exercised by the `-no-launch` runs that
+   proved the swap.

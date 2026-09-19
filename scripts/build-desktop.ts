@@ -83,14 +83,18 @@ const output = platform === "win-x64"
 // `deno desktop` runs — a post-step only reaches the app directory it leaves
 // beside the .msi, never the .msi's own cabinet (measured: the installer carried
 // exactly the payload and the launcher, with no updater and no version.txt).
+//
+// NO version.txt IS STAGED, deliberately. A version stamp in the archive makes the payload
+// version-SPECIFIC when it is not: the same files serve any version, and the manifest already
+// publishes the target. The updater reads its own per-user record of what it applied, so the file
+// bought nothing and cost the archive its idempotence. `server/appfiles/version.txt` is also
+// actively REMOVED here — a stale one left in the tree would be embedded into the payload by the
+// next build and then shadow the per-user state on the user's machine, making an applied update
+// look unapplied and re-apply on every launch.
 const stage = join(REPO, "server", "appfiles");
 if (platform === "win-x64") {
   await Deno.mkdir(stage, { recursive: true });
-  await Deno.writeTextFile(
-    join(stage, "version.txt"),
-    `version=${await readVersion()}\nmanifest=${manifestUrl()}\n`,
-  );
-  console.log(`version.txt: ${await readVersion()}`);
+  await Deno.remove(join(stage, "version.txt")).catch(() => {});
   await buildSidecar(stage);
   await buildHideConsoleRelay(stage);
 }
@@ -176,29 +180,26 @@ if (status.code !== 0) Deno.exit(status.code);
 //
 // `--include appfiles` does NOT do this: measured, --include embeds a file into
 // the compiled executable's virtual filesystem and never emits it as a real file
-// beside the payload. The app can read an embedded version.txt (verified), but a
+// beside the payload. The app can read its own embedded files (verified), but a
 // SEPARATE process — the Windows sidecar — cannot, and the portable zip that the
-// sidecar downloads is built from this directory, so an embedded-only
-// version.txt left the published payload with no version record at all.
+// sidecar downloads is built from this directory.
 //
 // The MSI is authored before this point and so cannot carry these (deno desktop
-// limitation); the sidecar therefore falls back to a per-user state file, which
+// limitation); the sidecar records what it applied in a per-user state file, which
 // is also the only location that stays writable in Program Files.
 if (platform === "win-x64") {
   const appDir = output.endsWith(".msi") ? output.slice(0, -4) : output;
-  await Deno.writeTextFile(
-    join(appDir, "version.txt"),
-    `version=${await readVersion()}\nmanifest=${manifestUrl()}\n`,
-  );
+  await Deno.remove(join(appDir, "version.txt")).catch(() => {});
   await buildSidecar(appDir);
   await buildHideConsoleRelay(appDir);
 
   // The PORTABLE bundle is meant to be a self-contained SemaClip directory the user can
   // update by hand, so it gets a launcher of its own. The MSI cannot (below), but this
   // one needs no runtime extraction: the updater is already a real file beside the app,
-  // so the launcher points at `%~dp0` and the whole thing works when unpacked anywhere,
+  // so the launcher points at `%~dp0.` and the whole thing works when unpacked anywhere,
   // including a non-writable location — the swap happens in the app dir, and the
-  // updater's version STATE falls back to a per-user file when that dir is read-only.
+  // updater records the applied version in a per-user file, which is also the only
+  // location guaranteed writable when the app dir is not.
   await Deno.writeTextFile(
     join(appDir, "Update and launch SemaClip.cmd"),
     bundleLauncherContent(),
@@ -208,7 +209,7 @@ if (platform === "win-x64") {
   await Deno.remove(stage, { recursive: true }).catch(() => {});
 // `.env` is a build input generated here, and server/.gitignore excludes it.
 await Deno.remove(envFile).catch(() => {});
-  console.log(`app files: version.txt + sidecar written into ${appDir}`);
+  console.log(`app files: sidecar written into ${appDir} (no version stamp: the payload is version-idempotent)`);
 }
 
 if (platform === "win-x64" && !Deno.env.get("SEMACLIP_SKIP_ICON")) {

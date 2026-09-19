@@ -50,6 +50,18 @@ const EMBEDDED_DIR = new URL("../../../appfiles/", import.meta.url);
  * the updater targets its OWN directory unless told otherwise, so a portable bundle (app
  * and updater side by side) can use `%~dp0`, while an MSI install must name the real app
  * directory because the updater was extracted to a per-user one.
+ *
+ * ── THE TRAILING BACKSLASH, WHICH BROKE THE WHOLE PORTABLE PATH ──────────────────────────
+ * `%~dp0` ALWAYS ends in a backslash, so `-app "%APPDIR%"` expanded to `-app "C:\dir\"`. In
+ * Windows argument parsing a backslash immediately before a closing quote ESCAPES that quote,
+ * so the quote did not close the argument: the updater received
+ *
+ *     C:\dir" -no-launch
+ *
+ * as a single path (measured — it reported `no version.txt in C:\dir" -no-launch — is this a
+ * SemaClip bundle?`), and every update started through the shipped launcher failed instantly.
+ * The fix is `%~dp0.`, the standard idiom: the `.` terminates the path so the backslash is no
+ * longer adjacent to the quote, and `C:\dir\.` resolves to the same directory.
  */
 export function launcherBody(appDirExpr: string): string {
   return `@echo off
@@ -63,6 +75,10 @@ REM
 REM -app IS LOAD-BEARING. Left to itself the updater targets its OWN directory; it would
 REM look for version.txt beside itself, find none, and refuse to run. The app directory is
 REM the one carrying version.txt and the payload.
+REM
+REM NOTE %~dp0. WITH THE TRAILING DOT. %~dp0 ends in a backslash, and a backslash before a
+REM closing quote escapes that quote, so -app "C:\\dir\\" reached the updater as one glued
+REM argument and every launcher-started update failed. Removing the dot reintroduces that.
 setlocal
 set "DIR=%~dp0"
 set "APPDIR=${appDirExpr}"
@@ -72,7 +88,7 @@ set "APPDIR=${appDirExpr}"
 
 /** The portable bundle's launcher: the updater is unpacked beside the app. */
 export function bundleLauncherContent(): string {
-  return launcherBody("%~dp0");
+  return launcherBody("%~dp0.");
 }
 
 /** The launcher written at runtime for an install whose updater was extracted. */

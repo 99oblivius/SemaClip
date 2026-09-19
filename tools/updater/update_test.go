@@ -116,10 +116,7 @@ func TestInstalledReadsVersionFile(t *testing.T) {
 	dir := t.TempDir()
 	mkBundle(t, dir, "v26.1-nightly.4")
 	u := &Updater{Dir: dir, Out: os.Stdout}
-	got, err := u.Installed()
-	if err != nil {
-		t.Fatal(err)
-	}
+	got := u.Installed()
 	if got != "v26.1-nightly.4" {
 		t.Fatalf("got %q", got)
 	}
@@ -197,10 +194,7 @@ func TestApplySwapsBundleAndWritesVersion(t *testing.T) {
 	if got := read(t, filepath.Join(dir, "SemaClip.exe")); got != "launcher v26.2" {
 		t.Fatalf("launcher not replaced: %q", got)
 	}
-	installed, err := u.Installed()
-	if err != nil {
-		t.Fatal(err)
-	}
+	installed := u.Installed()
 	if installed != "v26.2" {
 		t.Fatalf("version file says %q", installed)
 	}
@@ -253,7 +247,7 @@ func TestApplyRejectsCorruptDownload(t *testing.T) {
 	if got := read(t, filepath.Join(dir, "SemaClip.dll")); got != "payload v26.1" {
 		t.Fatalf("a refused download must leave the bundle untouched, got %q", got)
 	}
-	if got, _ := u.Installed(); got != "v26.1" {
+	if got := u.Installed(); got != "v26.1" {
 		t.Fatalf("version must not advance on a refused download, got %q", got)
 	}
 }
@@ -419,9 +413,62 @@ func TestLoadConfigDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
-func TestLoadConfigRequiresAVersionFile(t *testing.T) {
-	if _, err := LoadConfig(t.TempDir()); err == nil {
-		t.Fatal("a directory with no version file is not a bundle and must be refused")
+func TestLoadConfigToleratesNoVersionFile(t *testing.T) {
+	// INVERTED ON PURPOSE. This used to require the file, which made it load-bearing: the archive
+	// could not be version-idempotent while its absence stopped the updater from running at all. A
+	// bundle without a version record is now the NORMAL state — the manifest names the target and
+	// the per-user state records what was applied.
+	cfg, err := LoadConfig(t.TempDir())
+	if err != nil {
+		t.Fatalf("a bundle without a version file must still be usable: %v", err)
+	}
+	if cfg.ManifestURL != DefaultManifestURL {
+		t.Fatalf("got manifest %q, want the built-in default", cfg.ManifestURL)
+	}
+}
+
+func TestInstalledIsEmptyWithoutAnyRecord(t *testing.T) {
+	// "No version recorded" is a legitimate answer, not an error, and it is what makes a
+	// version-idempotent payload possible.
+	stateDir := t.TempDir()
+	prev := os.Getenv("LOCALAPPDATA")
+	t.Cleanup(func() { os.Setenv("LOCALAPPDATA", prev) })
+	os.Setenv("LOCALAPPDATA", stateDir)
+
+	u := &Updater{Dir: t.TempDir(), Out: os.Stdout}
+	if got := u.Installed(); got != "" {
+		t.Fatalf("got %q, want an empty version", got)
+	}
+}
+
+func TestApplyRemovesAStaleBundleVersionFile(t *testing.T) {
+	// An updated bundle must not keep a version stamp: Installed() reads the bundle first, so a
+	// stale stamp would shadow the new per-user state and the same update would be re-applied on
+	// every launch.
+	dir := t.TempDir()
+	mkBundle(t, dir, "v26.1")
+	zipPath := filepath.Join(t.TempDir(), "payload.zip")
+	mkZip(t, zipPath, "SemaClip", "v26.2")
+	stateDir := t.TempDir()
+	prev := os.Getenv("LOCALAPPDATA")
+	t.Cleanup(func() { os.Setenv("LOCALAPPDATA", prev) })
+	os.Setenv("LOCALAPPDATA", stateDir)
+
+	u, _ := newTestUpdater(t, dir, map[string]any{
+		"version": "v26.2",
+		"artifacts": map[string]any{"win-x64": map[string]string{
+			"name": "payload.zip", "sha256": sha256File(t, zipPath),
+		}},
+	}, zipPath)
+
+	if err := u.Apply(false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, versionFile)); err == nil {
+		t.Fatal("the bundle still carries a version stamp after an update")
+	}
+	if got := read(t, filepath.Join(stateDir, "SemaClip", "state.txt")); !strings.Contains(got, "version=v26.2") {
+		t.Fatalf("per-user state did not record the applied version: %q", got)
 	}
 }
 
@@ -570,10 +617,7 @@ func TestInstalledFallsBackToPerUserState(t *testing.T) {
 	os.Setenv("LOCALAPPDATA", stateDir)
 
 	u := &Updater{Dir: dir, Out: os.Stdout}
-	got, err := u.Installed()
-	if err != nil {
-		t.Fatalf("no version resolvable from either source: %v", err)
-	}
+	got := u.Installed()
 	if got != "v26.5" {
 		t.Fatalf("got %q, want v26.5", got)
 	}
@@ -592,7 +636,7 @@ func TestBundleVersionWinsOverState(t *testing.T) {
 	os.Setenv("LOCALAPPDATA", stateDir)
 
 	u := &Updater{Dir: dir, Out: os.Stdout}
-	if got, _ := u.Installed(); got != "v26.7" {
+	if got := u.Installed(); got != "v26.7" {
 		t.Fatalf("got %q, want the bundle's v26.7", got)
 	}
 }

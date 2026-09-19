@@ -20,10 +20,15 @@ import (
 // different path, which is why the URL is also read from version.txt.
 const DefaultManifestURL = "https://99oblivius.github.io/SemaClip/latest.json"
 
-// versionFile is written into the bundle by the build so the updater can learn
-// what is installed WITHOUT guessing from the payload. The app cannot report its
-// own version to a process that is about to replace it, and parsing a version out
-// of a PE resource would be a second source of truth.
+// versionFile is a TOMBSTONE: nothing writes it any more, and it is only READ so a bundle laid
+// down by an older build still reports its version. The file is deliberately not deleted on sight
+// (an older copy of the app reads it), and a bundle without it is fully supported.
+//
+// WHY IT WENT AWAY: it encoded the version, so the archive carried a per-release byte string for a
+// payload that is otherwise version-IDEMPOTENT — the same files serve any version. The manifest
+// already publishes the target version, so comparing against a local copy was never necessary; the
+// updater now installs the published payload unless the per-user record says this exact version is
+// already installed there.
 const versionFile = "version.txt"
 
 // stateFile is the per-user record of what is installed. The install directory is
@@ -70,11 +75,16 @@ type ManifestEntry struct {
 // LoadConfig reads the bundle's version file for its channel, falling back to the
 // manifest. The version itself is NOT kept here — Installed() reads it on
 // demand so there is one reader of that value.
+//
+// A MISSING FILE IS NOT AN ERROR. It used to be fatal ("is this a SemaClip bundle?"), which made
+// the file load-bearing: the archive could not be version-idempotent while its absence stopped the
+// updater from running at all. Absence now just means "no manifest override recorded here", and the
+// built-in URL is used.
 func LoadConfig(appDir string) (Config, error) {
 	cfg := Config{ManifestURL: DefaultManifestURL}
 	raw, err := os.ReadFile(filepath.Join(appDir, versionFile))
 	if err != nil {
-		return cfg, fmt.Errorf("no %s in %s — is this a SemaClip bundle?", versionFile, appDir)
+		return cfg, nil
 	}
 	for _, line := range strings.Split(string(raw), "\n") {
 		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
@@ -95,23 +105,28 @@ func LoadConfig(appDir string) (Config, error) {
 	return cfg, nil
 }
 
-// Installed answers "what version is on disk".
+// Installed answers "what version is on disk", or "" when nothing records one.
 //
-// The bundle's own version.txt is authoritative when readable, because that file
-// travels with the payload. The per-user state file is the fallback for an install
-// whose directory cannot be read (or was laid down by an installer that could not
-// carry one), so the updater still knows its version instead of re-downloading a
-// payload it already has.
-func (u *Updater) Installed() (string, error) {
+// The bundle's own version.txt is used when readable (a bundle from an older build), and the
+// per-user state file otherwise. The per-user state is the source that matters now: it is what the
+// updater itself writes after applying an update, and it survives the payload being replaced.
+//
+// AN EMPTY ANSWER IS NOT AN ERROR. It genuinely means "this bundle does not claim a version", which
+// is the normal state of a version-idempotent payload. Callers decide what that implies: Check()
+// treats it as needing the published payload, because installing files that are already correct
+// costs a download but cannot leave the bundle wrong, whereas skipping when the on-disk version is
+// genuinely older would strand the user. The old code returned an error here, which — combined
+// with LoadConfig's fatal read — meant a bundle without version.txt could not update at all.
+func (u *Updater) Installed() string {
 	if v, err := readVersionFrom(filepath.Join(u.Dir, versionFile)); err == nil {
-		return v, nil
+		return v
 	}
 	if p := stateFilePath(); p != "" {
 		if v, err := readVersionFrom(p); err == nil {
-			return v, nil
+			return v
 		}
 	}
-	return "", fmt.Errorf("no readable %s in %s and no per-user state — cannot determine the installed version", versionFile, u.Dir)
+	return ""
 }
 
 // readVersionFrom parses `version=` out of one of our key/value files.
@@ -182,11 +197,7 @@ type CheckResult struct {
 // numerically would silently skip builds.
 func (u *Updater) Check() (CheckResult, error) {
 	res := CheckResult{}
-	installed, err := u.Installed()
-	if err != nil {
-		return res, err
-	}
-	res.Installed = installed
+	res.Installed = u.Installed()
 
 	body, err := u.fetch(u.Cfg.ManifestURL)
 	if err != nil {
@@ -213,7 +224,23 @@ func (u *Updater) Check() (CheckResult, error) {
 		return res, fmt.Errorf("manifest entry for win-x64 has no sha256 — refusing to install unverified bytes")
 	}
 	res.Entry = entry
-	res.Available = m.Version != installed
+	// RECONCILE, do not compare against a local claim.
+	//
+	// The published version is the target; "is it already installed here" is answered by the
+	// updater's OWN record of what it applied. That removes the payload's dependency on a version
+	// file while keeping the one case that matters: a bundle already at the published version must
+	// not re-download 100MB on every launch.
+	//
+	// An UNKNOWN installed version means the published payload is installed, because re-applying
+	// correct files cannot leave the bundle wrong, whereas the opposite choice — treating unknown
+	// as "older" and skipping — would strand a bundle that genuinely is out of date. The cost is
+	// one download on a bundle that never recorded anything, i.e. first run or a hand-unpacked zip.
+	if res.Installed == "" {
+		u.log("no version recorded here; installing the published %s", m.Version)
+		res.Available = true
+		return res, nil
+	}
+	res.Available = m.Version != res.Installed
 	return res, nil
 }
 
@@ -424,10 +451,26 @@ func resolveArtifactURL(manifestURL, name string) string {
 	return strings.TrimSuffix(manifestURL, "latest.json") + name
 }
 
-// writeVersion records the applied version, preferring the bundle (so it travels
-// with a re-zip) and falling back to the per-user state file when the install
-// directory is not writable — the normal case for a Program Files install.
+// writeVersion records the applied version in the PER-USER state file.
+//
+// It deliberately no longer writes into the bundle. The version is a fact about THIS MACHINE's
+// installation, not about the payload, and writing it beside the payload made every updated bundle
+// carry a per-machine byte string — which is exactly the version-stamped archive the packaging is
+// being changed to avoid. A state file also survives the payload being replaced wholesale, whereas
+// a bundle copy is destroyed by the very swap that gives it its new value.
+//
+// A STALE version.txt IN THE BUNDLE IS REMOVED HERE. Older bundles carry one, and leaving it would
+// make the bundle shadow the state file on the next run (Installed() reads the bundle first), so an
+// update would appear not to have happened and would be re-applied on every launch. Removal is
+// best-effort: a read-only install directory is normal (Program Files) and the state file is the
+// authority anyway.
 func writeVersion(dir, version, manifest string) error {
+	if versionFile != "" {
+		if err := os.Remove(filepath.Join(dir, versionFile)); err == nil {
+			// Removed a stale stamp — the bundle is now version-idempotent.
+		}
+	}
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "version=%s\n", version)
 	if manifest != "" {
@@ -435,14 +478,9 @@ func writeVersion(dir, version, manifest string) error {
 	}
 	body := []byte(b.String())
 
-	bundlePath := filepath.Join(dir, versionFile)
-	if err := writeFileAtomic(bundlePath, body); err == nil {
-		return nil
-	}
-
 	statePath := stateFilePath()
 	if statePath == "" {
-		return fmt.Errorf("cannot write %s and no per-user state location is known", bundlePath)
+		return fmt.Errorf("no per-user state location is known; cannot record that %s is installed", version)
 	}
 	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
 		return fmt.Errorf("cannot create the state directory: %w", err)
