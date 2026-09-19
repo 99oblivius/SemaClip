@@ -570,6 +570,42 @@ async function checkWindowsUpdate(
 }
 
 /**
+ * The command that starts the updater so it OUTLIVES this process.
+ *
+ * ── WHY NOT A DIRECT SPAWN ──────────────────────────────────────────────────────────────────────
+ * It was `new Deno.Command(sidecar, …).spawn().unref()`, and that is not detachment on Windows: the
+ * app is still the child's parent, and a parent that exits takes its console process with it. The
+ * updater died before it did anything, which is exactly what the owner's log shows — it ends after
+ * the preflight, with no `-relaunch` header, and the header is the first thing the updater writes.
+ *
+ * `cmd /c start` is the standard Windows hand-off: it asks the SHELL to start the program, so the new
+ * process's parent is the shell rather than the app, and it keeps running when the app exits. The
+ * same tool the app already uses for its plain restart.
+ *
+ * The `""` after `start` is load-bearing: `start` treats a quoted first argument as the WINDOW TITLE,
+ * so without it the path would be swallowed as a title and nothing would run.
+ *
+ * ── WHY THE ARGUMENT IS QUOTED ──────────────────────────────────────────────────────────────────
+ * `start` performs its own parsing, so a path with a space (the owner's install is under
+ * `C:\Users\light\Downloads\SemaClip-26.245-win-x64-portable\…`) must be quoted or it is read as
+ * several arguments. Measured against this exact path.
+ *
+ * ── THE ONE THING DENO'S OWN DETACH DOES BETTER ─────────────────────────────────────────────────
+ * `Deno.Command` with every std handle `"null"` cannot hold this process's pipes open and delay its
+ * exit; `cmd /c start` inherits the console instead. That is why the app still EXITS rather than
+ * waiting: the updater is told to wait for our pid, and it must not be our child for that wait to
+ * mean anything.
+ */
+export function updaterLaunchCommand(sidecar: string, args: string[]): Deno.Command {
+  return new Deno.Command("cmd", {
+    args: ["/c", "start", "", `"${sidecar}"`, ...args],
+    stdin: "null",
+    stdout: "null",
+    stderr: "null",
+  });
+}
+
+/**
  * Apply a downloaded Windows update by handing the STAGED PAYLOAD to the sidecar, then quitting.
  *
  * The sidecar waits for THIS pid to exit (it cannot swap a loaded DLL, and this process is the
@@ -580,6 +616,7 @@ async function checkWindowsUpdate(
  * `-payload` is what keeps the sidecar from re-downloading: without it the sidecar would fetch the
  * same archive again, and the progress the user just watched would have been theatre.
  */
+
 export function applyWindowsUpdate(): { restarting: boolean; error: string | null } {
   if (!status.pendingVersion) return { restarting: false, error: "no update is downloaded" };
   const sidecar = status.sidecarPath;
@@ -604,25 +641,21 @@ export function applyWindowsUpdate(): { restarting: boolean; error: string | nul
   }
 
   try {
-    // Detached: the helper must outlive this process, because this process is what it waits for.
-    const cmd = new Deno.Command(sidecar, {
-      args: [
-        "-relaunch",
-        "-wait-pid",
-        String(Deno.pid),
-        "-app",
-        appDirPath(),
-        "-payload",
-        status.stagedPath,
-        "-payload-sha256",
-        status.stagedSha256,
-        "-version",
-        status.pendingVersion,
-      ],
-      stdin: "null",
-      stdout: "null",
-      stderr: "null",
-    });
+    // STARTED THROUGH THE SHELL, so it is not our child and survives our exit. See
+    // updaterLaunchCommand for the mechanism and the measurements.
+    const cmd = updaterLaunchCommand(sidecar, [
+      "-relaunch",
+      "-wait-pid",
+      String(Deno.pid),
+      "-app",
+      appDirPath(),
+      "-payload",
+      status.stagedPath,
+      "-payload-sha256",
+      status.stagedSha256,
+      "-version",
+      status.pendingVersion,
+    ]);
     cmd.spawn().unref();
   } catch (err) {
     return {
@@ -630,7 +663,7 @@ export function applyWindowsUpdate(): { restarting: boolean; error: string | nul
       error: `could not start the updater: ${err instanceof Error ? err.message : err}`,
     };
   }
-  // Quit so the sidecar can take the payload. Deferred slightly so this response is flushed first.
+  // Quit so the updater can take the payload. Deferred slightly so this response is flushed first.
   setTimeout(() => Deno.exit(0), 250);
   return { restarting: true, error: null };
 }

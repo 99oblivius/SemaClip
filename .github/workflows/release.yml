@@ -544,8 +544,8 @@ jobs:
             echo "\`webkit2gtk\` installed."
             echo
             echo "Windows: \`SemaClip-$V-win-x64-portable.zip\` needs no install — unzip it"
-            echo "somewhere you can write, then run \`SemaClip.exe\`. To let it update"
-            echo "itself, start it through \`Update and launch SemaClip.cmd\` instead."
+            echo "somewhere you can write, then run \`SemaClip.exe\`. It updates itself:"
+            echo "the update downloads while you work, and the app restarts into it."
             echo
             echo "There is no installer for now: the .msi installs per-machine under"
             echo "Program Files, where the WebView2 runtime it depends on cannot write its"

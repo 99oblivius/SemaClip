@@ -187,15 +187,21 @@ pending detail.
 - **Windows auto-update does not work in-process.** Applying an update works on
   Linux only. On Windows the patch downloads and stages, and the runtime never
   swaps the DLL in (a loaded DLL cannot be replaced in place); Deno's docs say to
-  treat Windows auto-update as unsupported. The in-app status reports
-  `canApply: false` rather than showing "update ready" forever. The accepted
-  workaround is a **Go sidecar updater** (`tools/updater/`), shipped inside the
-  portable payload and written out beside the app at launch
-  (`adapters/outbound/platform/sidecar.ts`), which performs the swap on a fresh
-  process and relaunches. The portable zip therefore updates itself when started
-  through the bundled `Update and launch SemaClip.cmd` — MEASURED end to end on
-  Windows: a 26.225 bundle applied 26.226 and its dylib came out byte-identical to
-  the published one.
+  treat Windows auto-update as unsupported. The app reports its own state instead
+  of `canApply: false`, and hands off to a **Go sidecar updater**
+  (`tools/updater/`), shipped inside the portable payload and written out beside
+  the app at launch (`adapters/outbound/platform/sidecar.ts`), which performs the
+  swap on a fresh process and relaunches. The portable zip updates itself with no
+  manual step: the download happens while the app is open, and the app restarts
+  into it. MEASURED end to end on Windows: a 26.225 bundle applied 26.226 and its
+  dylib came out byte-identical to the published one.
+  - **The hand-off must go through `cmd /c start`, not a direct `Deno.Command`
+    spawn.** A spawned child is still the app's child, and the app exiting takes
+    it down before it can swap anything — which is what produced "a terminal
+    opens, the app closes, and it stays on the old version". `start` hands the
+    program to the shell so its parent is not the app. See
+    `updaterLaunchCommand` in `auto-update.ts` for the required `""` title
+    argument and why the path must be quoted.
 - **There is no installer offered for Windows, and that is deliberate.** `deno
   desktop` authors a per-machine `.msi` under `%ProgramFiles%`, where the WebView2
   runtime cannot write its profile, so the window comes up blank
