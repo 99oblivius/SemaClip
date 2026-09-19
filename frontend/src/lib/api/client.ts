@@ -288,6 +288,19 @@ export async function retryUpdateCheck(): Promise<{ started: boolean; error: str
   return await r.json();
 }
 
+/**
+ * The updater's own log, as text.
+ *
+ * The updater is a SEPARATE process started detached with its output discarded, so this file is the
+ * only account of what it did. It returns plain text rather than JSON because that is what the file
+ * is, and the point is to show it verbatim.
+ */
+export async function getUpdateLog(): Promise<string> {
+  const r = await fetch('/api/update/log');
+  if (!r.ok) throw new Error(`update log: ${r.status}`);
+  return await r.text();
+}
+
 export async function getWindowChrome(): Promise<WindowChrome> {
   const r = await fetch('/api/window');
   if (!r.ok) throw new Error(`window chrome: ${r.status}`);

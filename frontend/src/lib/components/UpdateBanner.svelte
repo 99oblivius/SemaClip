@@ -23,7 +23,7 @@
    * miss a stage that already happened.
    */
   import Icon from '$lib/components/Icon.svelte';
-  import { apiClient, getUpdateStatus, restartApp, retryUpdateCheck } from '$lib/api/client';
+  import { apiClient, getUpdateLog, getUpdateStatus, restartApp, retryUpdateCheck } from '$lib/api/client';
   import { onMount } from 'svelte';
   import { browser } from '$app/environment';
 
@@ -104,6 +104,8 @@
     } catch (err) {
       restarting = false;
       error = err instanceof Error ? err.message : 'Restart failed';
+      // A refused hand-off means the updater ran and recorded why, so offer its account.
+      failedBefore = true;
       void opts;
     }
   }
@@ -152,6 +154,8 @@
           // The check already failed before this webview connected. Without this the failure would
           // only ever be visible in the server log.
           updateError = s.updateError;
+          // A recorded failure means an attempt happened, so the updater's log has content.
+          failedBefore = true;
         }
       })
       .catch(() => {
@@ -257,6 +261,37 @@
       retrying = false;
     }
   }
+
+  /**
+   * The updater's own log, fetched on demand.
+   *
+   * NOT loaded with the status: the file is written by another process and re-reading it on every
+   * render would be pointless work for the common case where nothing has failed. It is fetched when
+   * the user asks for it, which is the only moment it matters.
+   */
+  let showLog = $state(false);
+  let logText = $state<string | null>(null);
+  /**
+   * True once an update attempt has been made, so the log button only appears when there is
+   * plausibly something in the file. Derived from the failure itself: a first-time failure with no
+   * prior attempt would otherwise offer an empty log.
+   */
+  let failedBefore = $state(false);
+
+  async function toggleLog() {
+    if (showLog) {
+      showLog = false;
+      return;
+    }
+    showLog = true;
+    if (logText === null) {
+      try {
+        logText = await getUpdateLog();
+      } catch (err) {
+        logText = `could not read the update log: ${err instanceof Error ? err.message : err}`;
+      }
+    }
+  }
 </script>
 
 {#if updateError && !progress && !staged}
@@ -284,6 +319,29 @@
     >
       {retrying ? 'Trying…' : 'Try again'}
     </button>
+    {#if failedBefore}
+      <!-- THE UPDATER'S OWN ACCOUNT. The sidecar runs detached with its output discarded, so when an
+           update fails this file is the ONLY evidence of what it did — and a previous attempt is
+           exactly what a user needs when a retry is also failing. Shown only when an attempt has
+           already happened, so a first failure is not cluttered with an empty log. -->
+      <button
+        class="shrink-0 rounded border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent"
+        onclick={toggleLog}
+        title="What the updater did on the last attempt"
+      >
+        {showLog ? 'Hide log' : 'Update log'}
+      </button>
+    {/if}
+  </div>
+{/if}
+
+{#if showLog}
+  <!-- Verbatim, in a scrollable block. A truncated or prettified view would defeat the purpose: the
+       file exists so a failure can be reported accurately, and every line of it is evidence. -->
+  <div class="border-b border-border bg-surface px-3 py-2" role="region" aria-label="Update log">
+    <pre
+      class="max-h-48 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] leading-relaxed text-ash-dim"
+>{logText ?? 'loading…'}</pre>
   </div>
 {/if}
 
