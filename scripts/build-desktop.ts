@@ -30,7 +30,6 @@ import { dirname, join, resolve } from "node:path";
 // scripts/ has no import map, so this is a RELATIVE import into server/ (measured:
 // `@/...` does not resolve outside server/). The launcher body must have exactly one
 // definition — a second copy here would drift from the one the app writes at runtime.
-import { bundleLauncherContent } from "../server/adapters/outbound/platform/sidecar.ts";
 import { fileURLToPath } from "node:url";
 
 const SELF = fileURLToPath(import.meta.url);
@@ -202,18 +201,11 @@ if (platform === "win-x64") {
   await buildSidecar(appDir);
   await buildHideConsoleRelay(appDir);
 
-  // The PORTABLE bundle is meant to be a self-contained SemaClip directory the user can
-  // update by hand, so it gets a launcher of its own. The MSI cannot (below), but this
-  // one needs no runtime extraction: the updater is already a real file beside the app,
-  // so the launcher points at `%~dp0.` and the whole thing works when unpacked anywhere,
-  // including a non-writable location — the swap happens in the app dir, and the
-  // updater records the applied version in a per-user file, which is also the only
-  // location guaranteed writable when the app dir is not.
-  await Deno.writeTextFile(
-    join(appDir, "Update and launch SemaClip.cmd"),
-    bundleLauncherContent(),
-  );
-  console.log("portable bundle: SemaClipUpdater.exe + its launcher");
+  // NO LAUNCHER IS SHIPPED. It existed so a user could apply an update by hand, because the app
+  // could not start the updater itself. It can now: it spawns the updater detached with its own pid
+  // and quits, and the updater swaps the payload and relaunches. A second way to do the same thing
+  // is a second thing to keep correct, and this one was never reached any more.
+  console.log("portable bundle: SemaClipUpdater.exe (the app starts it itself)");
 
   await Deno.remove(stage, { recursive: true }).catch(() => {});
 // `.env` is a build input generated here, and server/.gitignore excludes it.

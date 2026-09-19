@@ -15,11 +15,25 @@
 export interface AppEvent {
   /** Monotonic, so a client can tell a replayed frame from a new one. */
   id: number;
-  type: "update-staged" | "update-rollback";
+  type: "update-staged" | "update-rollback" | "update-progress";
   /** Human-facing version, or the rollback reason. */
   version: string;
-  /** True when restarting this app actually applies it (false on Windows). */
-  canApplyByRestart: boolean;
+  /**
+   * True when restarting this app actually applies it.
+   *
+   * Optional so a progress frame does not have to assert something about applying — it is not a
+   * statement about the update being ready, and making it required pushed callers into writing a
+   * misleading value to satisfy the type.
+   */
+  canApplyByRestart?: boolean;
+  /**
+   * Download progress. Present only on `update-progress`.
+   *
+   * `fraction` is null when the server did not declare a length, and the UI must not invent one.
+   */
+  received?: number;
+  total?: number;
+  fraction?: number | null;
 }
 
 type Listener = (e: AppEvent) => void;

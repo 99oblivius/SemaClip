@@ -812,3 +812,163 @@ func TestTwoBundlesDoNotShareAVersion(t *testing.T) {
 		t.Fatal("a bundle with no history must not have written a record")
 	}
 }
+
+// ── ApplyStaged: installing an archive the APP downloaded ───────────────────────────────────────
+
+func TestApplyStagedInstallsTheDownloadedPayload(t *testing.T) {
+	// ── THE OWNER'S FLOW, END TO END ────────────────────────────────────────────────────────────
+	// The app downloads while it is open (so the user sees progress and is told to keep the window
+	// open), quits, and hands the archive to the sidecar. The sidecar must INSTALL THAT ARCHIVE —
+	// not re-download, and not ignore it.
+	dir := t.TempDir()
+	mkBundle(t, dir, "v26.1")
+	u := &Updater{Dir: dir, Out: os.Stdout, SelfPath: filepath.Join(dir, "SemaClipUpdater.exe")}
+
+	// The payload the app already fetched and verified.
+	payload := filepath.Join(t.TempDir(), "update-v26.2.zip")
+	mkZip(t, payload, "SemaClip", "v26.2")
+	sum := sha256File(t, payload)
+
+	if err := u.ApplyStaged(payload, sum, "v26.2"); err != nil {
+		t.Fatalf("ApplyStaged: %v", err)
+	}
+
+	// The bundle really is the new one.
+	if got := read(t, filepath.Join(dir, "SemaClip.dll")); !strings.Contains(got, "v26.2") {
+		t.Fatalf("payload not replaced: %q", got)
+	}
+	// And it RECORDS that version, describing its own files.
+	if got := read(t, filepath.Join(dir, stateFile)); !strings.Contains(got, "version=v26.2") {
+		t.Fatalf("version not recorded in the bundle: %q", got)
+	}
+	// No staging or backup left behind.
+	for _, leftover := range []string{".staging", ".backup"} {
+		if _, err := os.Stat(filepath.Join(dir, leftover)); err == nil {
+			t.Fatalf("%s left behind", leftover)
+		}
+	}
+}
+
+func TestApplyStagedRefusesAMismatchedHash(t *testing.T) {
+	// The app verified the bytes, but its claim travels as an ARGUMENT — and an argument is not
+	// evidence. The file could have been replaced between the hand-off and this call, and this is
+	// the last moment before those bytes become the running program.
+	dir := t.TempDir()
+	mkBundle(t, dir, "v26.1")
+	u := &Updater{Dir: dir, Out: os.Stdout, SelfPath: filepath.Join(dir, "SemaClipUpdater.exe")}
+
+	payload := filepath.Join(t.TempDir(), "update-v26.2.zip")
+	mkZip(t, payload, "SemaClip", "v26.2")
+
+	err := u.ApplyStaged(payload, strings.Repeat("b", 64), "v26.2")
+	if err == nil {
+		t.Fatal("a wrong sha256 must be refused")
+	}
+	// Refused means UNCHANGED: a half-applied bundle would be worse than a refused update.
+	if got := read(t, filepath.Join(dir, "SemaClip.dll")); !strings.Contains(got, "v26.1") {
+		t.Fatalf("the bundle was modified despite a hash mismatch: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, stateFile)); err == nil {
+		t.Fatal("no version may be recorded for an install that did not happen")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "SemaClipUpdater.exe")); err == nil {
+		t.Fatal("nothing should have been written")
+	}
+}
+
+func TestApplyStagedRequiresAHashAndAVersion(t *testing.T) {
+	// An empty hash must REFUSE, not silently skip verification: the empty string is what a caller
+	// passes by mistake, and treating it as "no check requested" would turn the only integrity gate
+	// into an opt-in.
+	dir := t.TempDir()
+	mkBundle(t, dir, "v26.1")
+	u := &Updater{Dir: dir, Out: os.Stdout, SelfPath: filepath.Join(dir, "SemaClipUpdater.exe")}
+	payload := filepath.Join(t.TempDir(), "update-v26.2.zip")
+	mkZip(t, payload, "SemaClip", "v26.2")
+
+	err := u.ApplyStaged(payload, "", "v26.2")
+	if err == nil {
+		t.Fatal("an empty sha256 must be refused")
+	}
+	// It must name the ACTUAL problem. The copy is independently hash-checked, so an empty sha is
+	// refused either way; only the message says which mistake was made, and "sha256 mismatch:
+	// expected , got 3f2a…" would send a reader looking for a corrupt download.
+	if !strings.Contains(err.Error(), "payload-sha256 is required") {
+		t.Fatalf("empty sha should be reported as missing, got: %v", err)
+	}
+	if err := u.ApplyStaged(payload, sha256File(t, payload), ""); err == nil {
+		t.Fatal("an empty version must be refused: the applied version has to be recorded")
+	}
+}
+
+func TestApplyStagedSkipsItsOwnExecutable(t *testing.T) {
+	// The sidecar cannot replace itself while it is the running program. It must skip its own name
+	// and still land everything else — the alternative is a failed update or a half-swapped bundle.
+	dir := t.TempDir()
+	mkBundle(t, dir, "v26.1")
+	self := filepath.Join(dir, "SemaClipUpdater.exe")
+	write(t, self, "the-running-updater")
+	u := &Updater{Dir: dir, Out: os.Stdout, SelfPath: self}
+
+	// The archive carries the updater too, which is the case that matters: the release ships one.
+	payload := filepath.Join(t.TempDir(), "update-v26.2.zip")
+	zf, err := os.Create(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(zf)
+	for name, content := range map[string]string{
+		"SemaClip.exe":        "launcher v26.2",
+		"SemaClip.dll":        "payload v26.2",
+		"SemaClipUpdater.exe": "the NEW updater",
+		versionFile:           "version=v26.2\nchannel=nightly\n",
+	} {
+		w, _ := zw.Create("SemaClip/" + name)
+		w.Write([]byte(content))
+	}
+	zw.Close()
+	zf.Close()
+
+	if err := u.ApplyStaged(payload, sha256File(t, payload), "v26.2"); err != nil {
+		t.Fatalf("ApplyStaged: %v", err)
+	}
+
+	if got := read(t, self); got != "the-running-updater" {
+		t.Fatalf("the updater replaced its own running executable: %q", got)
+	}
+	if got := read(t, filepath.Join(dir, "SemaClip.dll")); !strings.Contains(got, "v26.2") {
+		t.Fatalf("the rest of the bundle was not updated: %q", got)
+	}
+}
+
+func TestApplyStagedVerifiesAPayloadAlreadyInsideTheBundle(t *testing.T) {
+	// There are TWO hash checks — one in copyVerified (the cross-filesystem hand-off) and one in
+	// verifyFile (when the payload is already inside the bundle). Both are real, and this covers the
+	// second: deleting either one leaves the other refusing a corrupt archive, which is correct
+	// defence in depth, but it means each needs its own path to be exercised at all.
+	dir := t.TempDir()
+	mkBundle(t, dir, "v26.1")
+	u := &Updater{Dir: dir, Out: os.Stdout, SelfPath: filepath.Join(dir, "SemaClipUpdater.exe")}
+
+	// ApplyingStaged copies a payload from elsewhere to `.<name>` inside the bundle. Placing it
+	// there in advance is exactly the state where the paths are equal and verifyFile runs.
+	payload := filepath.Join(t.TempDir(), "update-v26.2.zip")
+	mkZip(t, payload, "SemaClip", "v26.2")
+	inBundle := filepath.Join(dir, "."+filepath.Base(payload))
+	write(t, inBundle, read(t, payload))
+
+	if err := u.ApplyStaged(inBundle, strings.Repeat("c", 64), "v26.2"); err == nil {
+		t.Fatal("the in-bundle path must verify too")
+	}
+	if got := read(t, filepath.Join(dir, "SemaClip.dll")); !strings.Contains(got, "v26.1") {
+		t.Fatalf("bundle modified despite a mismatch: %q", got)
+	}
+
+	// And it installs for real with the right hash.
+	if err := u.ApplyStaged(inBundle, sha256File(t, inBundle), "v26.2"); err != nil {
+		t.Fatalf("ApplyStaged: %v", err)
+	}
+	if got := read(t, filepath.Join(dir, "SemaClip.dll")); !strings.Contains(got, "v26.2") {
+		t.Fatalf("not updated: %q", got)
+	}
+}

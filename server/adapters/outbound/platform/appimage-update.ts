@@ -25,6 +25,7 @@
  * AppImage's FUSE mount must be released first. The helper waits for this process to exit, renames
  * the staged file onto the target (same directory, so it is atomic), and relaunches.
  */
+import { downloadVerified } from "@/adapters/outbound/platform/update-download.ts";
 
 /** Where the swap helper and the downloaded artifact are staged. */
 export function stateDir(env: (k: string) => string | undefined = (k) => Deno.env.get(k)): string {
@@ -144,6 +145,7 @@ export async function downloadAndStageAppImage(
   version: string,
   entry: { name: string; sha256: string; url?: string },
   log: (msg: string) => void = (m) => console.log(m),
+  onProgress?: (p: { received: number; total: number; fraction: number | null }) => void,
 ): Promise<AppImageUpdateResult> {
   const appImage = appImagePath();
   if (!appImage) {
@@ -157,34 +159,23 @@ export async function downloadAndStageAppImage(
   const url = entry.url ?? `${base}/${entry.name}`;
 
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(30 * 60 * 1000) });
-    if (!res.ok) {
-      return { staged: false, version: null, error: `download failed: HTTP ${res.status}` };
-    }
-    const bytes = new Uint8Array(await res.arrayBuffer());
-
-    const digest = await crypto.subtle.digest("SHA-256", bytes);
-    const got = Array.from(new Uint8Array(digest))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
-    if (got !== entry.sha256.toLowerCase()) {
-      return {
-        staged: false,
-        version: null,
-        error: `sha256 mismatch (manifest ${entry.sha256.slice(0, 12)}…, got ${got.slice(0, 12)}…) — refusing to install`,
-      };
-    }
-
     // The target's own directory, which exists by definition: the AppImage is running from it.
     const parent = plan.staged.replace(/\/[^/]*$/, "");
     await Deno.mkdir(parent, { recursive: true }).catch(() => {});
-    // Write through a temp file so an interrupted download cannot leave a truncated artifact that a
-    // later swap would install.
-    const tmp = `${plan.staged}.part`;
-    await Deno.writeFile(tmp, bytes);
-    await Deno.rename(tmp, plan.staged);
+
+    // STREAMED, not buffered. This used to be `new Uint8Array(await res.arrayBuffer())`, which held
+    // the entire 100MB payload in memory and reported nothing while it did — the UI looked hung for
+    // exactly as long as the download took. The writer is the same one Windows uses now, so both
+    // platforms have one download path, one progress signal and one verification point.
+    const res = await downloadVerified(url, plan.staged, entry.sha256, {
+      log,
+      ...(onProgress ? { onProgress } : {}),
+    });
+    if (!res.ok) {
+      return { staged: false, version: null, error: res.error ?? "download failed" };
+    }
     await Deno.chmod(plan.staged, 0o755);
-    log(`Updates: staged ${version} (${(bytes.byteLength / 1e6).toFixed(0)}MB, sha256 verified)`);
+    log(`Updates: staged ${version} (${(res.bytes / 1e6).toFixed(0)}MB, sha256 verified)`);
 
     await Deno.writeTextFile(plan.helper, swapScriptBody(plan, Deno.pid));
     await Deno.chmod(plan.helper, 0o755);

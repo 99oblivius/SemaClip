@@ -44,21 +44,6 @@ const DefaultManifestURL = "https://99oblivius.github.io/SemaClip/latest.json"
 // The name is dot-prefixed so it reads as machine state rather than part of the payload.
 const stateFile = ".semaclip-version"
 
-// legacyStatePath is the OLD per-user location. It is READ once, only to migrate a bundle that
-// recorded its version there, and never written. See Installed().
-func legacyStatePath() string {
-	base := os.Getenv("LOCALAPPDATA")
-	if base == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			base = filepath.Join(home, "AppData", "Local")
-		}
-	}
-	if base == "" {
-		return ""
-	}
-	return filepath.Join(base, "SemaClip", "state.txt")
-}
-
 // versionFile is a TOMBSTONE: nothing writes it any more, and it is only READ so a bundle laid
 // down by an older build still reports its version. The file is deliberately not deleted on sight
 // (an older copy of the app reads it), and a bundle without it is fully supported.
@@ -69,25 +54,6 @@ func legacyStatePath() string {
 // updater now installs the published payload unless the per-user record says this exact version is
 // already installed there.
 const versionFile = "version.txt"
-
-// stateFile is the per-user record of what is installed. The install directory is
-// %ProgramFiles%\SemaClip (the MSI is per-machine: ALLUSERS=1 in its own tables),
-// where a non-elevated process cannot write — so the updater records the version
-// it applied somewhere it can actually own. It is a cache, not the source of
-// truth: the bundle's version.txt still wins when it is readable, and a stale or
-// missing cache just means one extra download.
-func stateFilePath() string {
-	base := os.Getenv("LOCALAPPDATA")
-	if base == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			base = filepath.Join(home, "AppData", "Local")
-		}
-	}
-	if base == "" {
-		return ""
-	}
-	return filepath.Join(base, "SemaClip", "state.txt")
-}
 
 type Config struct {
 	ManifestURL string
@@ -323,6 +289,103 @@ func (u *Updater) fetch(url string) ([]byte, error) {
 		return io.ReadAll(resp.Body)
 	}
 	return readBefore(resp.Body, u.Deadline)
+}
+
+// ApplyStaged installs an archive the APP ALREADY DOWNLOADED AND VERIFIED, instead of fetching one.
+//
+// It exists because the app cannot replace its own loaded payload and the sidecar must not re-fetch:
+// the app downloads while it is still open so the user can see progress and be told to keep the
+// window open, and re-downloading after it quits would discard that work and make the restart slow.
+//
+// The hash is checked AGAIN here even though the app verified it. The app's claim travels as an
+// argument, and an argument is not evidence: the file may have been replaced, truncated or edited
+// between the hand-off and this call, and this is the last moment before bytes become the running
+// program. `sha` is therefore required — an empty one is refused rather than skipped.
+//
+// There are two checks below (this guard, and the one inside copyVerified/verifyFile). They are not
+// redundant in a way that makes either decorative: the copying check is the SAFETY (it runs on
+// whatever bytes actually arrived), and this guard is the DIAGNOSIS. Without it, an empty sha is
+// still refused, but as "sha256 mismatch: expected , got 3f2a…" — which names the wrong problem.
+func (u *Updater) ApplyStaged(payloadPath, sha, version string) error {
+	if sha == "" {
+		return fmt.Errorf("-payload-sha256 is required with -payload: refusing to install unverified bytes")
+	}
+	if version == "" {
+		return fmt.Errorf("-version is required with -payload: the applied version must be recorded")
+	}
+
+	// The app is the caller that is gone by now; a stale download is not a reason to skip a launch,
+	// but it IS a reason not to install anything.
+	if _, err := os.Stat(payloadPath); err != nil {
+		return fmt.Errorf("the downloaded payload is not readable at %s: %w", payloadPath, err)
+	}
+	if running, _ := isRunning(u.Dir); running {
+		return fmt.Errorf("SemaClip is still running — close it before updating")
+	}
+
+	// Copy into the bundle's own directory first, so the extract and the swap stay on one filesystem
+	// (the app stages the archive beside the payload already, but a caller may not have).
+	local := filepath.Join(u.Dir, "."+filepath.Base(payloadPath))
+	if filepath.Clean(payloadPath) != filepath.Clean(local) {
+		if err := copyVerified(payloadPath, local, sha); err != nil {
+			return err
+		}
+		defer os.Remove(local)
+	} else if err := verifyFile(local, sha); err != nil {
+		return err
+	}
+
+	stage := filepath.Join(u.Dir, ".staging")
+	if err := os.RemoveAll(stage); err != nil {
+		return fmt.Errorf("cannot clear %s: %w", stage, err)
+	}
+	defer os.RemoveAll(stage)
+	if err := extractZip(local, stage); err != nil {
+		return fmt.Errorf("extract: %w", err)
+	}
+	root, err := findBundleRoot(stage)
+	if err != nil {
+		return err
+	}
+
+	backup := filepath.Join(u.Dir, ".backup")
+	os.RemoveAll(backup)
+	if err := os.MkdirAll(backup, 0o755); err != nil {
+		return err
+	}
+	if err := swapBundleSkipping(root, u.Dir, backup, u.selfName()); err != nil {
+		if rbErr := swapBundleSkipping(backup, u.Dir, "", u.selfName()); rbErr != nil {
+			return fmt.Errorf("swap failed AND rollback failed (%v then %v) — reinstall from the .msi", err, rbErr)
+		}
+		return fmt.Errorf("swap failed, rolled back: %w", err)
+	}
+	if err := os.RemoveAll(backup); err != nil {
+		return fmt.Errorf("updated, but could not remove %s: %w", backup, err)
+	}
+	// The version the app says it downloaded, recorded in the bundle it now describes.
+	if err := writeVersion(u.Dir, version, u.Cfg.ManifestURL); err != nil {
+		return fmt.Errorf("updated files but could not record the version: %w", err)
+	}
+	u.log("updated to %s (from the payload the app downloaded)", version)
+	return nil
+}
+
+// verifyFile checks a file's sha256 without copying it.
+func verifyFile(path, want string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(got, want) {
+		return fmt.Errorf("sha256 mismatch: expected %s, got %s", want, got)
+	}
+	return nil
 }
 
 // Apply downloads the published payload and swaps it in, rolling back on failure.

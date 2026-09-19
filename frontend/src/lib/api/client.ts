@@ -234,7 +234,7 @@ export interface WindowChrome {
  *
  * `current` is the version baked into the binary (null under `deno run`);
  * `pendingVersion` is set once a patch is staged; on Windows `sidecarPath` /
- * `sidecarLauncherPath` name the updater that applies it, and `sidecarError` explains
+ * `sidecarPath` names the updater that applies it, and `sidecarError` explains
  * why they are missing when they are.
  */
 export interface UpdateStatus {
@@ -242,8 +242,11 @@ export interface UpdateStatus {
   pendingVersion: string | null;
   lastRollback: string | null;
   canApply: boolean;
+  /** "downloading" means a payload is being fetched right now — keep the window open. */
+  phase: 'idle' | 'downloading' | 'ready';
+  downloading: boolean;
+  download: { version: string; received: number; total: number; fraction: number | null } | null;
   sidecarPath: string | null;
-  sidecarLauncherPath: string | null;
   sidecarError: string | null;
 }
 

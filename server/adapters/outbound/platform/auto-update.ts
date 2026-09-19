@@ -11,13 +11,13 @@
  * verifies it against the manifest's mandatory sha256, applies it to the runtime dylib
  * and stages the result. It does NOT poll: no `interval` is passed, so there is exactly
  * one check per launch, which is the requested policy. The RUNNING process is untouched;
- * the launcher swaps the update in on the next start, and rolls back automatically if
+ * the app swaps the update in on the next start, and rolls back automatically if
  * the new version fails to launch.
  *
  * WHAT IT DOES NOT DO BY ITSELF: apply on Windows. Deno's launcher cannot swap a
  * loaded DLL, so there the runtime only stages the patch and the BUNDLED SIDECAR
  * (tools/updater) installs it while the app is closed — that is the shipped
- * workaround, and `canApply: false` is what tells the UI to explain it. The
+ * workaround, and `canApply` is what would tell the UI to explain it. The
  * status is surfaced in-app rather than hidden, so a Windows user is not shown
  * "update ready" forever with nothing happening.
  */
@@ -28,6 +28,8 @@ import {
   downloadAndStageAppImage,
   launchSwapHelper,
 } from "@/adapters/outbound/platform/appimage-update.ts";
+import { sidecarDir } from "@/adapters/outbound/platform/sidecar.ts";
+import { downloadVerified } from "@/adapters/outbound/platform/update-download.ts";
 import { emitAppEvent } from "@/application/events.ts";
 
 /**
@@ -53,30 +55,55 @@ const UPDATE_PUBLIC_KEY = "";
 export interface UpdateStatus {
   /** Version baked into THIS binary, or null in a dev run. */
   current: string | null;
-  /** Set once an update is downloaded and waiting for the next launch to install it. */
+  /** Set once an update is DOWNLOADED and waiting for the next launch to install it. */
   pendingVersion: string | null;
   /** Set when the PREVIOUS launch failed and the launcher rolled it back. */
   lastRollback: string | null;
   /**
-   * Whether a staged update installs itself. Linux AppImages DO: the artifact is downloaded and
-   * swapped over the file by a helper on exit (this app's own mechanism). Windows does NOT: the
-   * bundled sidecar has to be run while the app is closed.
+   * Whether a staged update installs itself. True on both platforms: Linux replaces the AppImage
+   * from a helper, Windows hands the downloaded archive to the sidecar.
    */
   canApply: boolean;
+  /**
+   * True while the payload is being fetched, so the UI can say "do not close this window".
+   *
+   * A download that is in progress is NOT a pending update: `pendingVersion` stays null until the
+   * bytes are on disk and verified, which is what keeps "an update is ready" honest.
+   */
+  downloading: boolean;
+  /** Bytes received / total for the in-flight download, when one is running. */
+  download: { version: string; received: number; total: number; fraction: number | null } | null;
+  /**
+   * Where the update currently is, for the UI to key its message on.
+   *
+   * "idle"        nothing happening
+   * "downloading" the payload is being fetched NOW — keep the window open
+   * "ready"       downloaded and verified, a restart installs it
+   *
+   * A single explicit field rather than the client inferring from `downloading`/`pendingVersion`:
+   * a UI that has to reconstruct a state machine from two booleans gets the intermediate states
+   * wrong, and this one has to say something different in each.
+   */
+  phase: "idle" | "downloading" | "ready";
   /** Linux: the AppImage being updated, when running from one. */
   appImagePath: string | null;
   /** Why the AppImage update could not be done, when it could not. */
   appImageError: string | null;
   /**
-   * Windows: the updater that can apply a staged update, and the launcher that runs it.
-   * Null elsewhere, and null here when extraction failed (then `sidecarError` says why).
-   * The UI names these so a user is told what to run rather than shown a promise the
-   * platform cannot keep.
+   * Windows: the updater that applies the downloaded payload. Null elsewhere, and null here when
+   * extraction failed (then `sidecarError` says why).
    */
   sidecarPath: string | null;
-  sidecarLauncherPath: string | null;
   /** Why the sidecar could not be placed, when it could not. Never swallowed. */
   sidecarError: string | null;
+  /**
+   * The version whose payload is staged on disk, and its verified hash. Windows only.
+   *
+   * Kept in the status rather than re-derived at apply time: the sidecar is handed this exact path
+   * and hash, so what it installs is provably what was downloaded and verified in this session.
+   */
+  stagedPath: string | null;
+  stagedSha256: string | null;
 }
 
 const baked = bakedVersion();
@@ -90,11 +117,15 @@ const status: UpdateStatus = {
   // closed. The previous `Deno.build.os !== "windows"` was true when Windows could only be told to
   // run a .cmd by hand, which is the manual step the sidecar exists to remove.
   canApply: true,
+  downloading: false,
+  download: null,
+  phase: "idle",
   appImagePath: appImagePath(),
   appImageError: null,
   sidecarPath: null,
-  sidecarLauncherPath: null,
   sidecarError: null,
+  stagedPath: null,
+  stagedSha256: null,
 };
 
 export function updateStatus(): UpdateStatus {
@@ -149,11 +180,30 @@ async function checkAndStageAppImage(
   }
 
   console.log(`Updates: ${status.current} -> ${latest}, downloading the AppImage`);
-  const result = await downloadAndStageAppImage(manifestUrl, latest, entry);
+  status.downloading = true;
+  status.phase = "downloading";
+  status.download = { version: latest, received: 0, total: 0, fraction: null };
+  emitAppEvent({ type: "update-progress", version: latest, received: 0, total: 0, fraction: null });
+  const result = await downloadAndStageAppImage(manifestUrl, latest, entry, undefined, (p) => {
+    status.download = { version: latest, received: p.received, total: p.total, fraction: p.fraction };
+    emitAppEvent({
+      type: "update-progress",
+      version: latest,
+      received: p.received,
+      total: p.total,
+      fraction: p.fraction,
+    });
+  });
+  // Reset the progress face BEFORE reporting the outcome, so a failed download cannot leave the UI
+  // claiming one is still running and telling the user to keep the window open.
+  status.downloading = false;
+  status.phase = "idle";
+  status.download = null;
   if (!result.staged) {
     return { staged: false, error: result.error ?? "download failed" };
   }
   status.pendingVersion = latest;
+  status.phase = "ready";
   emitAppEvent({ type: "update-staged", version: latest, canApplyByRestart: true });
   return { staged: true };
 }
@@ -173,7 +223,7 @@ export function applyAppImageUpdate(): { restarting: boolean; error: string | nu
 }
 
 /**
- * Windows: check the manifest OURSELVES and, when a newer version exists, offer a RESTART.
+ * Windows: check the manifest, then DOWNLOAD THE PAYLOAD WHILE THE APP IS STILL OPEN.
  *
  * ── WHY THE RUNTIME'S OWN CHECK CANNOT DO THIS ──────────────────────────────────────────────
  * `Deno.autoUpdate()` compares `manifest.version` against `Deno.desktopVersion`... which is NULL on
@@ -182,21 +232,19 @@ export function applyAppImageUpdate(): { restarting: boolean; error: string | nu
  * null side of the comparison the runtime never stages, so the banner could never appear.
  *
  * MEASURED on a 26.232 win-x64 build with a working version channel, against a published 26.233
- * whose patch downloads fine (HTTP 200, patch-26.232-to-26.233.bin):
+ * whose patch downloads fine (HTTP 200): the runtime staged nothing. Its check is inert here.
  *
- *     Updates: version 26.232 (from env)
- *     Updates: current 26.232, polling the baseUrl baked into this build
- *     -> no patch staged, no banner. The runtime's check is inert here.
+ * ── THE SEQUENCE, AND WHY ───────────────────────────────────────────────────────────────────
+ * Download now, install on restart. The app must NOT quit to fetch 100MB: there is nothing to show
+ * progress in and no moment at which the user can be told what is happening. So the payload is
+ * fetched to a staged file on disk while the app stays open and usable, progress is pushed to the
+ * UI, and only once the bytes are verified does a restart become an option.
  *
- * ── WHY THIS IS A RESTART AND NOT "RUN THE LAUNCHER" ────────────────────────────────────────
- * The sidecar exists so the user does NOT have to do the swap by hand, and the first version of this
- * told them to run a .cmd from a hidden per-user directory — which is exactly the manual step the
- * sidecar was built to remove. It now does what every other desktop app does: the app relaunches
- * itself through the sidecar, and the sidecar waits for this process to exit, applies the update in
- * place and starts the new version. `canApplyByRestart: true` is therefore the truth on Windows now.
+ * `pendingVersion` is therefore set ONLY when the payload is complete and verified, which is what
+ * makes every consumer's meaning stay true: a pending update is one that can actually be applied.
  *
- * The version comparison is numeric, not string equality: the scheme advances by commit count, so
- * "26.9" vs "26.10" must order numerically or a release would look OLDER than the one before it.
+ * The comparison is numeric, not string equality: the scheme advances by commit count, so "26.9" vs
+ * "26.10" must order numerically or a release would look OLDER than the one before it.
  */
 async function checkWindowsUpdate(
   manifestUrl: string,
@@ -205,7 +253,10 @@ async function checkWindowsUpdate(
     return { available: false, reason: "no version baked in (dev run)" };
   }
 
-  let manifest: { version?: string };
+  let manifest: {
+    version?: string;
+    artifacts?: Record<string, { name: string; sha256: string; url?: string }>;
+  };
   try {
     const res = await fetch(manifestUrl, { signal: AbortSignal.timeout(30_000) });
     if (!res.ok) return { available: false, error: `manifest fetch failed: HTTP ${res.status}` };
@@ -233,29 +284,98 @@ async function checkWindowsUpdate(
     };
   }
 
+  const entry = manifest.artifacts?.["win-x64"];
+  if (!entry) {
+    return { available: false, error: `manifest has no win-x64 artifact (published ${latest})` };
+  }
+
+  // ── The download, while the app runs ──────────────────────────────────────────────────────
+  status.phase = "downloading";
+  status.download = { version: latest, received: 0, total: 0, fraction: null };
+  emitAppEvent({
+    type: "update-progress",
+    version: latest,
+    received: 0,
+    total: 0,
+    fraction: null,
+  });
+
+  const base = manifestUrl.replace(/\/[^/]*$/, "");
+  const url = entry.url ?? `${base}/${entry.name}`;
+  // STAGED OUTSIDE THE INSTALL DIRECTORY. The swap only renames entries that are IN the extracted
+  // archive, so a 100MB zip left beside the payload would never be replaced or removed by an
+  // update — it would just accumulate in the install directory forever. `%LOCALAPPDATA%\SemaClip`
+  // is the per-user directory the sidecar already lives in.
+  const stageDir = sidecarDir();
+  await Deno.mkdir(stageDir, { recursive: true }).catch(() => {});
+  // A payload for a version that was superseded before the user restarted would otherwise sit here
+  // for good; only the newest download is ever installable, so the others are dead weight.
+  // `Deno.readDir` is an async ITERABLE, not a promise, so it cannot be `.catch()`ed — an absent
+  // directory is caught around the loop instead.
+  try {
+    for await (const e of Deno.readDir(stageDir)) {
+      const superseded = e.name.startsWith("update-") && e.name.endsWith(".zip") &&
+        e.name !== `update-${latest}.zip`;
+      if (e.isFile && superseded) await Deno.remove(`${stageDir}\\${e.name}`).catch(() => {});
+    }
+  } catch {
+    // No staging directory yet: nothing to prune.
+  }
+  const staged = `${stageDir}\\update-${latest}.zip`;
+
+  const res = await downloadVerified(url, staged, entry.sha256, {
+    log: (m) => console.log(m),
+    onProgress: (p) => {
+      status.download = { version: latest, received: p.received, total: p.total, fraction: p.fraction };
+      // PUSHED, not polled: a progress bar that waits for the query cache looks stalled.
+      emitAppEvent({
+        type: "update-progress",
+        version: latest,
+        received: p.received,
+        total: p.total,
+        fraction: p.fraction,
+      });
+    },
+  });
+
+  if (!res.ok) {
+    status.phase = "idle";
+    status.download = null;
+    return { available: false, error: res.error ?? "download failed" };
+  }
+
+  status.stagedPath = staged;
+  status.stagedSha256 = res.sha256;
   status.pendingVersion = latest;
-  console.log(`Updates: ${latest} available (running ${status.current}) — restart to install`);
-  // `canApplyByRestart: true` — the app can now start the sidecar itself and quit, which is what
-  // makes the banner's Restart button honest instead of a pointer to a .cmd file.
+  status.phase = "ready";
+  console.log(
+    `Updates: ${latest} downloaded and verified (${(res.bytes / 1e6).toFixed(0)}MB) — ` +
+      `restart to install`,
+  );
+  // `canApplyByRestart: true` — the payload is on disk, so a restart genuinely installs it now.
   emitAppEvent({ type: "update-staged", version: latest, canApplyByRestart: true });
   return { available: true };
 }
 
 /**
- * Apply a staged Windows update by handing off to the sidecar, then quitting.
+ * Apply a downloaded Windows update by handing the STAGED PAYLOAD to the sidecar, then quitting.
  *
- * The sidecar waits for THIS pid to exit (it cannot swap a loaded DLL), replaces the payload in
- * place and relaunches. So the sequence is: start it detached, then quit — the same shape as the
- * Linux AppImage helper, for the same reason.
+ * The sidecar waits for THIS pid to exit (it cannot swap a loaded DLL, and this process is the
+ * loader), installs the archive it was given, and relaunches. Because the download already
+ * happened, the window between quitting and being back is a file swap rather than a 100MB fetch —
+ * which is the difference between a restart that feels instant and one that looks like a crash.
  *
- * `-wait-pid` is passed explicitly rather than letting the sidecar use its parent, because the
- * sidecar is started detached and its parent would not be this process.
+ * `-payload` is what keeps the sidecar from re-downloading: without it the sidecar would fetch the
+ * same archive again, and the progress the user just watched would have been theatre.
  */
 export function applyWindowsUpdate(): { restarting: boolean; error: string | null } {
-  if (!status.pendingVersion) return { restarting: false, error: "no update is staged" };
+  if (!status.pendingVersion) return { restarting: false, error: "no update is downloaded" };
   const sidecar = status.sidecarPath;
   if (!sidecar) {
     return { restarting: false, error: "the updater is not available, so the update cannot be applied" };
+  }
+  if (!status.stagedPath || !status.stagedSha256) {
+    return { restarting: false, error: "the downloaded update is missing, so it cannot be applied" };
   }
   try {
     // Detached: the helper must outlive this process, because this process is what it waits for.
@@ -266,6 +386,12 @@ export function applyWindowsUpdate(): { restarting: boolean; error: string | nul
         String(Deno.pid),
         "-app",
         appDirPath(),
+        "-payload",
+        status.stagedPath,
+        "-payload-sha256",
+        status.stagedSha256,
+        "-version",
+        status.pendingVersion,
       ],
       stdin: "null",
       stdout: "null",
@@ -317,13 +443,11 @@ export async function startAutoUpdate(baseUrl?: string): Promise<void> {
   if (Deno.build.os === "windows") {
     const sc = await ensureSidecar();
     status.sidecarPath = sc.path;
-    status.sidecarLauncherPath = sc.launcherPath;
     status.sidecarError = sc.error;
     if (sc.path) {
-      console.log(
-        `Updates: sidecar ${sc.extracted ? "placed" : "present"} at ${sc.path}` +
-          (sc.launcherPath ? ` (run ${sc.launcherPath} to apply updates)` : ""),
-      );
+      // The launcher is NOT part of the update flow any more: the app starts the sidecar itself and
+      // quits. It is only mentioned when the app has no OTHER way to apply an update.
+      console.log(`Updates: sidecar ${sc.extracted ? "placed" : "present"} at ${sc.path}`);
     } else {
       // The one combination that cannot self-update. Say so plainly.
       console.warn(
@@ -335,14 +459,22 @@ export async function startAutoUpdate(baseUrl?: string): Promise<void> {
     // the user is never told. Returning here also means the runtime's call below is never reached
     // on Windows — a call that provably does nothing (measured: no patch staged with a valid
     // version channel and a downloadable patch).
+    //
+    // NOT AWAITED. The payload is ~100MB: awaiting here would hold up the server's own startup for
+    // as long as the download takes, so the window would not appear until it finished — the exact
+    // opposite of downloading while the app is usable. The download reports progress over the event
+    // stream, and a failure arrives as a status error rather than as a stalled boot.
     const manifestUrl = baseUrl ?? Deno.env.get("SEMACLIP_UPDATE_URL") ?? DEFAULT_MANIFEST_URL;
-    const res = await checkWindowsUpdate(manifestUrl);
-    if (res.error) {
-      status.sidecarError = res.error;
-      console.warn(`Updates: ${res.error}`);
-    } else if (!res.available && res.reason) {
-      console.log(`Updates: ${res.reason}`);
-    }
+    checkWindowsUpdate(manifestUrl).then((res) => {
+      if (res.error) {
+        status.sidecarError = res.error;
+        console.warn(`Updates: ${res.error}`);
+      } else if (!res.available && res.reason) {
+        console.log(`Updates: ${res.reason}`);
+      }
+    }).catch((err) => {
+      console.warn(`Updates: check failed: ${err instanceof Error ? err.message : err}`);
+    });
     return;
   }
   // LINUX: the runtime's own updater CANNOT work from an AppImage, so this does the check and the
@@ -393,10 +525,6 @@ export async function startAutoUpdate(baseUrl?: string): Promise<void> {
     `Updates: current ${status.current}, polling ` +
       `${override ?? "the baseUrl baked into this build"}`,
   );
-  if (!status.canApply) {
-    console.warn("Updates: Windows cannot apply staged updates (launcher swap unsupported)");
-  }
-
   // Manifest signing: when a public key is configured the manifest must be a
   // signed envelope. Read from a COMPILE-TIME constant, never Deno.env —
   // measured: an env var set during `deno desktop` is NOT baked into the binary,
@@ -424,9 +552,8 @@ export async function startAutoUpdate(baseUrl?: string): Promise<void> {
       status.pendingVersion = version;
       console.log(`Updates: ${version} staged, applies on next launch`);
       // PUSHED, not polled: the user should be told the moment this happens so they can
-      // choose to restart into it. `canApplyByRestart` is false on Windows, where the
-      // runtime stages but cannot swap a loaded DLL — the UI must not offer a restart
-      // that would silently do nothing.
+      // choose to restart into it. This path is not reached on Windows or Linux (both do their own
+      // check and return above), so it describes what the runtime's own staging can offer.
       emitAppEvent({ type: "update-staged", version, canApplyByRestart: status.canApply });
     },
     onRollback(reason) {

@@ -60,6 +60,43 @@ Deno.test("the hand-off waits for THIS pid and passes the app directory", () => 
   assert(/-app/.test(SRC), "the app directory must be named");
 });
 
+Deno.test("the hand-off passes the DOWNLOADED PAYLOAD instead of re-downloading", () => {
+  // ── WHY THIS IS THE POINT OF THE WHOLE FEATURE ──────────────────────────────────────────────
+  // The app downloads while it is still open so the user can see progress and keep working. If the
+  // sidecar then fetched the archive itself after the app quit, that work would be discarded: the
+  // progress would be theatre and the restart would be as slow as the original download. So the
+  // staged path, its hash and its version must all be handed over.
+  // Each flag is matched as its own QUOTED literal. A bare /-payload/ also matches "-payload-sha256",
+  // so removing the payload flag alone left the assertion green — the test proved nothing about the
+  // flag it named.
+  assert(SRC.includes('"-payload",'), "the downloaded archive must be handed to the sidecar");
+  assert(/status\.stagedPath/.test(SRC), "the path handed over must be the staged one");
+  assert(SRC.includes('"-payload-sha256",'), "the hash must travel with it, verified at install time");
+  assert(/status\.stagedSha256/.test(SRC), "the hash handed over must be the verified one");
+  assert(SRC.includes('"-version",'), "the version must be recorded by whoever performs the swap");
+  assert(/status\.pendingVersion/.test(SRC), "the recorded version must be the one that was downloaded");
+});
+
+Deno.test("a download in flight is not offered as installable", () => {
+  // `pendingVersion` is set ONLY after the bytes are on disk and verified. Setting it when the
+  // download STARTS would let the banner offer a restart that installs nothing.
+  //
+  // Scoped to the WINDOWS function: an unscoped search finds the Linux path's assignment first, and
+  // the test then compares against the wrong line and passes for no reason (it did).
+  const winStart = SRC.indexOf("async function checkWindowsUpdate");
+  const winEnd = SRC.indexOf("export function applyWindowsUpdate");
+  assert(winStart > 0 && winEnd > winStart, "the Windows check function must exist");
+  const win = SRC.slice(winStart, winEnd);
+
+  const setPending = win.indexOf("status.pendingVersion = latest;");
+  const downloadCall = win.indexOf("await downloadVerified(url, staged");
+  assert(downloadCall > 0 && setPending > 0, "both the download and the assignment must exist");
+  assert(
+    setPending > downloadCall,
+    "the pending version must be assigned AFTER the download, not before it",
+  );
+});
+
 Deno.test("the hand-off is DETACHED, because it must outlive the process it waits for", () => {
   // A helper that dies with its parent can never perform the swap: the parent IS the thing that has
   // to exit first. `unref()` is what detaches it.

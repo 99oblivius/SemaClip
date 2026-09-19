@@ -39,6 +39,15 @@ func main() {
 	// does not have to do that.
 	relaunch := flag.Bool("relaunch", false, "wait for the app to exit, apply the update in place, then relaunch it")
 	waitPid := flag.Int("wait-pid", 0, "with -relaunch: the process to wait for before updating (0 = this process's parent)")
+	// -payload is an ALREADY-DOWNLOADED archive, so the sidecar does not fetch it again.
+	//
+	// The app downloads while it is still open — that is the only way to show progress and to tell
+	// the user to keep the window open. Without this flag the sidecar would ignore that work and
+	// re-download the same 100MB after the app quit, which would make the progress the user watched
+	// pure theatre and the restart as slow as the original download.
+	payloadPath := flag.String("payload", "", "install this archive instead of downloading (the app already fetched and verified it)")
+	payloadSha := flag.String("payload-sha256", "", "expected sha256 of -payload; required with it")
+	payloadVersion := flag.String("version", "", "the version -payload contains, recorded after the swap")
 	manifestURL := flag.String("manifest", "", "override the manifest URL (default: from version.txt / built-in)")
 	timeout := flag.Duration("timeout", 10*time.Minute, "overall deadline for download and swap")
 	flag.Parse()
@@ -86,15 +95,28 @@ func main() {
 		u.log("waiting for the app (pid %d) to exit before updating %s", pid, abs)
 		waitForPIDExit(pid, 5*time.Minute)
 
-		if err := u.Apply(*force); err != nil {
-			// A failed update must not leave the user with no app: report it and continue to the
-			// relaunch below, which starts whatever is on disk now.
+		// THE APP ALREADY DOWNLOADED IT. Installing that archive is what makes the restart quick
+		// and the progress the user watched meaningful; re-fetching would do neither.
+		if *payloadPath != "" {
+			u.log("installing the payload the app downloaded: %s", *payloadPath)
+			if err := u.ApplyStaged(*payloadPath, *payloadSha, *payloadVersion); err != nil {
+				// A failed update must not leave the user with no app, so fall through to the
+				// relaunch, which starts whatever is on disk now.
+				fmt.Fprintf(os.Stderr, "update skipped: %v\n", err)
+			}
+		} else if err := u.Apply(*force); err != nil {
 			fmt.Fprintf(os.Stderr, "update skipped: %v\n", err)
 		}
 		if err := u.LaunchAndWait(); err != nil {
 			fatal("%v", err)
 		}
 		return
+	}
+
+	if *payloadPath != "" {
+		// -payload only makes sense with -relaunch (it exists so a running app can hand off what it
+		// downloaded). Refusing is better than silently ignoring the app's work.
+		fatal("-payload requires -relaunch: it installs an archive the running app downloaded")
 	}
 
 	// A failed update must never prevent the app from starting: a user with a
