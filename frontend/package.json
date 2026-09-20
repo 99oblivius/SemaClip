@@ -10,7 +10,7 @@
     "prepare": "svelte-kit sync || echo ''",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-    "test": "npx vite-node tests/player-reload.test.mjs && npx vite-node tests/ui-scale-store.test.mjs && npx vite-node tests/download-mutation-invalidates.test.mjs && npx vite-node tests/chat-window.test.mjs && npx vite-node tests/update-autorestart.test.mjs && npx vite-node tests/update-error-surface.test.mjs && npx vite-node tests/update-log-surface.test.mjs"
+    "test": "npx vite-node tests/player-reload.test.mjs && npx vite-node tests/ui-scale-store.test.mjs && npx vite-node tests/download-mutation-invalidates.test.mjs && npx vite-node tests/chat-window.test.mjs && npx vite-node tests/update-autorestart.test.mjs && npx vite-node tests/update-error-surface.test.mjs && npx vite-node tests/update-log-surface.test.mjs && npx vite-node tests/settings-form.test.mjs && npx vite-node tests/settings-save-adopts.test.mjs"
   },
   "devDependencies": {
     "@sveltejs/adapter-auto": "^7.0.1",

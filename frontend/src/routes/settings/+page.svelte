@@ -5,6 +5,13 @@
   import Icon from '$lib/components/Icon.svelte';
   import { fadeIn } from '$lib/actions/gsap';
   import { selectUiScale, confirmUiScaleSaved, revertUiScaleIfPending } from '$lib/stores/ui-scale';
+  import {
+    DEFAULT_FORM,
+    formFromSettings,
+    formToSettings,
+    isDirty,
+    type SettingsForm,
+  } from '$lib/components/settings-form';
   import { UI_SCALE_FACTOR, type AppSettings, type AspectRatio, type CaptionStyle, type UiScale } from '$shared/types';
 
   const settingsQuery = createQuery(() => ({
@@ -45,86 +52,95 @@
 
   const updateMutation = createMutation(() => ({
     mutationFn: (settings: Partial<AppSettings>) => apiClient.updateSettings(settings),
-    onSuccess: () => {
+    onSuccess: (saved: AppSettings) => {
       // The pending choice is the persisted one now; let server values win again.
       confirmUiScaleSaved();
+      // ADOPT THE RESPONSE into the form. This is the fix for "saving the VOD directory did
+      // not make the page accept the save": a refetch alone writes the resolved path into the
+      // QUERY CACHE while the form keeps the text the user typed, and `~`-vs-expanded can never
+      // compare equal — so the form stayed dirty for ever (Save armed, no saved mark, no
+      // toast). The response is the one value guaranteed to be in the same spelling the dirty
+      // rule compares against.
+      adoptForm(saved);
       settingsQuery.refetch();
     },
   }));
 
-  let gpuDevice = $state<string>('auto');
-  let cpuUsage = $state<AppSettings['cpuUsage']>('medium');
-  let defaultMaxQualityHeight = $state<number | null>(1080);
-  let uiScale = $state<UiScale>('medium');
-  let exportDir = $state('');
-  let vodDir = $state('');
-  let defaultAspectRatio = $state<AspectRatio>('16:9');
-  let captionsEnabled = $state(false);
-  let captionPreset = $state<CaptionStyle['preset']>('bold-white');
-  let captionPosition = $state<CaptionStyle['position']>('bottom');
-  let captionFontSize = $state(48);
-  let captionBgOpacity = $state(0.8);
-  let engineBinaryPath = $state('');
+  /**
+   * The editable settings, as one object.
+   *
+   * The fields keep their own names because the template binds them directly (`bind:value={f
+   * .vodDir}`); what is new is that they move together. `dirty` and the revert both need the
+   * WHOLE form, and a `let` per field would mean building that unit in two more places — which
+   * is exactly the drift that produced the bug being fixed here.
+   */
+  let form = $state<SettingsForm>({ ...DEFAULT_FORM });
   let loaded = $state(false);
 
+  // Destructured so the script and the template share ONE owner: `vodDir` below IS
+  // `form.vodDir`, not a copy of it.
+  let {
+    gpuDevice, cpuUsage, defaultMaxQualityHeight, uiScale, exportDir, vodDir,
+    defaultAspectRatio, captionsEnabled, captionPreset, captionPosition,
+    captionFontSize, captionBgOpacity, engineBinaryPath,
+  } = $derived(form);
+
+  /**
+   * Take server values as the form's own.
+   *
+   * The single writer of every field: the initial load, the adopt-on-save, and the revert all
+   * come through here, so none of them can normalize a field differently from the dirty rule
+   * that judges it.
+   */
+  function adoptForm(s: AppSettings) {
+    form = formFromSettings(s);
+    loaded = true;
+  }
+
+  // Seed once. Re-seeding on every cache event would clobber edits in progress — the cache also
+  // fires for unrelated queries (the 1 Hz download poller among them).
   $effect(() => {
     const s = settingsQuery.data;
-    if (s && !loaded) {
-      gpuDevice = s.gpuDevice === null ? 'auto' : String(s.gpuDevice);
-      cpuUsage = s.cpuUsage ?? 'medium';
-      defaultMaxQualityHeight = s.defaultMaxQualityHeight ?? null;
-      uiScale = s.uiScale ?? 'medium';
-      exportDir = s.exportDir;
-      vodDir = s.vodDir ?? '';
-      defaultAspectRatio = s.defaultAspectRatio;
-      captionsEnabled = s.defaultCaptions.enabled;
-      captionPreset = s.defaultCaptions.preset;
-      captionPosition = s.defaultCaptions.position;
-      captionFontSize = s.defaultCaptions.fontSize;
-      captionBgOpacity = s.defaultCaptions.backgroundOpacity;
-      engineBinaryPath = s.engineBinaryPath ?? '';
-      loaded = true;
-    }
+    if (s && !loaded) adoptForm(s);
   });
 
   function save() {
-    updateMutation.mutate({
-      gpuDevice: gpuDevice === 'auto' ? null : parseInt(gpuDevice, 10),
-      cpuUsage,
-      defaultMaxQualityHeight,
-      exportDir,
-      vodDir,
-      defaultAspectRatio,
-      defaultCaptions: {
-        enabled: captionsEnabled,
-        preset: captionPreset,
-        position: captionPosition,
-        fontSize: captionFontSize,
-        backgroundOpacity: captionBgOpacity,
-      },
-      engineBinaryPath: engineBinaryPath.trim() || null,
-      uiScale,
-    });
+    updateMutation.mutate(formToSettings(form));
   }
 
-  const dirty = $derived(
-    loaded && (
-      updateMutation.isPending ||
-      (gpuDevice === 'auto' ? null : parseInt(gpuDevice, 10)) !== settingsQuery.data?.gpuDevice ||
-      cpuUsage !== (settingsQuery.data?.cpuUsage ?? 'medium') ||
-      defaultMaxQualityHeight !== (settingsQuery.data?.defaultMaxQualityHeight ?? null) ||
-      uiScale !== (settingsQuery.data?.uiScale ?? 'medium') ||
-      exportDir !== settingsQuery.data?.exportDir ||
-      (vodDir || settingsQuery.data?.vodDir || '') !== (settingsQuery.data?.vodDir ?? '') ||
-      defaultAspectRatio !== settingsQuery.data?.defaultAspectRatio ||
-      captionsEnabled !== settingsQuery.data?.defaultCaptions.enabled ||
-      captionPreset !== settingsQuery.data?.defaultCaptions.preset ||
-      captionPosition !== settingsQuery.data?.defaultCaptions.position ||
-      captionFontSize !== settingsQuery.data?.defaultCaptions.fontSize ||
-      captionBgOpacity !== settingsQuery.data?.defaultCaptions.backgroundOpacity ||
-      (engineBinaryPath.trim() || null) !== settingsQuery.data?.engineBinaryPath
-    )
-  );
+  /**
+   * Discard every edit, restoring the last saved settings.
+   *
+   * Backed by the SERVER's value (via the query cache), never by a snapshot taken locally: the
+   * server resolves paths and may refuse a value outright, so a local snapshot can describe a
+   * state the server never held. Same rule the UI-scale store follows — an unsaved change must
+   * not survive, and what it reverts TO must be something the server actually confirmed.
+   */
+  function revert() {
+    const server = settingsQuery.data;
+    if (server) adoptForm(server);
+    // The scale preview lives in a shared store the layout reads on every route, so undoing it
+    // is not optional: reverting the form must also take back the previewed zoom.
+    revertUiScaleIfPending();
+  }
+
+  const dirty = $derived(isDirty(form, settingsQuery.data));
+
+  /**
+   * Whether the save confirmation should be showing.
+   *
+   * Its own flag rather than `updateMutation.isSuccess`, because that stays true for the rest of
+   * the page's life: edit anything after a save and the "✓ Saved" mark would still be sitting
+   * there claiming the current values were saved. This is the same 2s confirmation the project
+   * settings panel uses.
+   */
+  let justSaved = $state(false);
+  $effect(() => {
+    if (!updateMutation.isSuccess) return;
+    justSaved = true;
+    const t = setTimeout(() => (justSaved = false), 2000);
+    return () => clearTimeout(t);
+  });
 
   const ratios: { value: AspectRatio; label: string }[] = [
     { value: '16:9', label: '16:9' },
@@ -172,7 +188,7 @@
         <div class="flex flex-col gap-4 rounded-md border border-border bg-surface p-4">
           <label class="flex flex-col gap-1">
             <span class="font-mono text-xs text-ash">Compute Device</span>
-            <select bind:value={gpuDevice} class="rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none">
+            <select bind:value={form.gpuDevice} class="rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none">
               <option value="auto">Auto (first available GPU)</option>
               {#each devicesQuery.data ?? [] as device}
                 <option value={String(device.index)}>
@@ -198,7 +214,7 @@
                 <button
                   class="rounded-md border px-3 py-1.5 text-sm transition-colors
                   {cpuUsage === tier.value ? 'border-accent text-accent' : 'border-border text-ash hover:text-ink'}"
-                  onclick={() => cpuUsage = tier.value}
+                  onclick={() => form.cpuUsage = tier.value}
                   title={tier.hint}
                 >
                   {tier.label}
@@ -213,7 +229,7 @@
           <label class="flex flex-col gap-1">
             <span class="font-mono text-xs text-ash">Default Max Download Quality</span>
             <select
-              bind:value={defaultMaxQualityHeight}
+              bind:value={form.defaultMaxQualityHeight}
               class="self-start rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
               aria-label="Default max download quality"
             >
@@ -233,7 +249,7 @@
             <span class="font-mono text-xs text-ash">Engine Binary Path</span>
             <input
               type="text"
-              bind:value={engineBinaryPath}
+              bind:value={form.engineBinaryPath}
               placeholder="Auto-detect (leave empty)"
               class="rounded-md border border-border bg-surface-2 px-3 py-2 font-mono text-sm text-ink placeholder:text-ash-dim focus:border-accent focus:outline-none"
             />
@@ -250,7 +266,7 @@
             <span class="font-mono text-xs text-ash">VOD Directory</span>
             <input
               type="text"
-              bind:value={vodDir}
+              bind:value={form.vodDir}
               placeholder="/path/to/VODs"
               class="rounded-md border border-border bg-surface-2 px-3 py-2 font-mono text-sm text-ink placeholder:text-ash-dim focus:border-accent focus:outline-none"
             />
@@ -272,7 +288,7 @@
             <span class="font-mono text-xs text-ash">Export Directory</span>
             <input
               type="text"
-              bind:value={exportDir}
+              bind:value={form.exportDir}
               placeholder="~/Videos/SemaClip"
               class="rounded-md border border-border bg-surface-2 px-3 py-2 font-mono text-sm text-ink placeholder:text-ash-dim focus:border-accent focus:outline-none"
             />
@@ -286,7 +302,7 @@
                 <button
                   class="rounded-md border px-3 py-1.5 text-sm transition-colors
                   {defaultAspectRatio === r.value ? 'border-accent text-accent' : 'border-border text-ash hover:text-ink'}"
-                  onclick={() => defaultAspectRatio = r.value}
+                  onclick={() => form.defaultAspectRatio = r.value}
                 >
                   {r.label}
                 </button>
@@ -305,7 +321,7 @@
         <h2 class="font-display text-sm font-medium text-ash uppercase tracking-wider">Captions</h2>
         <div class="flex flex-col gap-4 rounded-md border border-border bg-surface p-4">
           <span class="flex items-center gap-2 font-mono text-xs text-ash uppercase">
-            <input type="checkbox" bind:checked={captionsEnabled} class="accent-accent" />
+            <input type="checkbox" bind:checked={form.captionsEnabled} class="accent-accent" />
             Burn in captions by default
           </span>
           {#if captionsEnabled}
@@ -316,7 +332,7 @@
                   <button
                     class="rounded px-2 py-1 font-mono text-xs transition-colors
                     {captionPreset === style ? 'text-accent' : 'text-ash-dim hover:text-ash'}"
-                    onclick={() => captionPreset = style as CaptionStyle['preset']}
+                    onclick={() => form.captionPreset = style as CaptionStyle['preset']}
                   >
                     {style}
                   </button>
@@ -328,7 +344,7 @@
                   <button
                     class="rounded px-2 py-1 font-mono text-xs transition-colors
                     {captionPosition === pos ? 'text-accent' : 'text-ash-dim hover:text-ash'}"
-                    onclick={() => captionPosition = pos as CaptionStyle['position']}
+                    onclick={() => form.captionPosition = pos as CaptionStyle['position']}
                   >
                     {pos}
                   </button>
@@ -336,12 +352,12 @@
               </div>
               <div class="flex items-center gap-3">
                 <span class="font-mono text-xs text-ash-dim">Font size:</span>
-                <input type="range" min="24" max="96" bind:value={captionFontSize} class="accent-accent" />
+                <input type="range" min="24" max="96" bind:value={form.captionFontSize} class="accent-accent" />
                 <span class="font-mono text-xs text-ash">{captionFontSize}px</span>
               </div>
               <div class="flex items-center gap-3">
                 <span class="font-mono text-xs text-ash-dim">BG opacity:</span>
-                <input type="range" min="0" max="1" step="0.1" bind:value={captionBgOpacity} class="accent-accent" />
+                <input type="range" min="0" max="1" step="0.1" bind:value={form.captionBgOpacity} class="accent-accent" />
                 <span class="font-mono text-xs text-ash">{Math.round(captionBgOpacity * 100)}%</span>
               </div>
             </div>
@@ -401,11 +417,13 @@
       </section>
 
 
-        <!-- Save status -->
+      <!-- Save status. Gated on having SAVED, not on !dirty: the two agreed by accident
+           before, and when they disagreed (a resolved path never equalling the typed one)
+           the confirmation could never appear at all. -->
       <div class="flex items-center justify-end gap-3 pb-4">
         {#if updateMutation.isError}
           <span class="font-mono text-xs text-error">{updateMutation.error?.message ?? 'Save failed'}</span>
-        {:else if updateMutation.isSuccess && !dirty}
+        {:else if justSaved}
           <span class="font-mono text-xs text-success">✓ Saved</span>
         {/if}
       </div>
@@ -415,8 +433,9 @@
   <!-- ── UNSAVED-CHANGES FOOTER ────────────────────────────────────────────────
        Floating, so it is reachable from anywhere in a long settings page rather than
        only at the top where the header's Save lives. It states the consequence of
-       leaving (the previewed scale reverts) and carries the Save action itself, so the
-       reminder and the fix are the same control. -->
+       leaving (the previewed scale reverts) and carries BOTH ways out of it: Save,
+       and a Revert that discards the edits back to the last saved settings — so the
+       reminder and the two fixes are the same control. -->
   {#if dirty}
     <div
       class="sticky bottom-0 z-10 mx-auto mt-2 flex w-full max-w-2xl items-center justify-between gap-4 rounded-md border border-warning/50 bg-surface-2 px-4 py-2.5 shadow-lg"
@@ -429,14 +448,24 @@
           ? 'Saving your changes...'
           : 'You have unsaved changes. Leaving this page reverts them.'}
       </span>
-      <button
-        class="flex shrink-0 items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
-        onclick={save}
-        disabled={updateMutation.isPending}
-      >
-        <Icon name="check" size={13} />
-        {updateMutation.isPending ? 'Saving...' : 'Save changes'}
-      </button>
+      <div class="flex shrink-0 items-center gap-2">
+        <button
+          class="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-ash transition-colors hover:border-ink hover:text-ink disabled:opacity-50"
+          onclick={revert}
+          disabled={updateMutation.isPending}
+        >
+          <Icon name="back" size={13} />
+          Revert
+        </button>
+        <button
+          class="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
+          onclick={save}
+          disabled={updateMutation.isPending}
+        >
+          <Icon name="check" size={13} />
+          {updateMutation.isPending ? 'Saving...' : 'Save changes'}
+        </button>
+      </div>
     </div>
   {/if}
 </div>
