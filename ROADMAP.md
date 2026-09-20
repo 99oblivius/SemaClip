@@ -91,6 +91,15 @@ Four changes requested together, each shipped with its own test and a live check
    come back (`video: true`, `renderPath` set). Empty projects are correctly NOT flagged.
 4. **VOD directory setting**, above Export Defaults, with `~` expansion and relative paths refused.
 
+**Follow-up fix (26.253)**: change 4's own save path was broken from the owner's side — pressing Save
+on the VOD directory saved correctly but the page never accepted it (Save stayed armed, no saved mark,
+the unsaved footer stayed). The form compared the typed `~/VODs` against the stored `/home/livia/VODs`,
+two spellings of one value, so it was dirty for ever; refetching could not help because the refetched
+value lands in the query cache, not the form. The save response is now adopted into the form, the dirty
+rule is a pure tested module, and the unsaved footer gained a **Revert** that discards edits back to the
+last saved settings. Verified by driving the real page in headless Chromium and asserting control state,
+then falsified by removing the single adopt statement (which reproduces the reported symptom exactly).
+
 **Exit gate met**: 335 server tests green, `deno check` clean, svelte-check 0 errors / 0 warnings,
 frontend build + tests green, and every mechanism exercised once through the real HTTP path on the
 owner's own projects (never on the live database — copies, restored afterwards).

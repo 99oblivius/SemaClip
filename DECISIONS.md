@@ -149,3 +149,32 @@
 - **The VOD directory defaults to the app's cache** (`{cacheDir}/vods`, injected at container
   construction) with an empty stored value, so an untouched install writes nothing and keeps resolving
   the old location. Changing it never moves an existing project: each records its own path.
+
+### Resolving a path on save required the form to ADOPT the response
+
+- Follow-on defect from the decision above, reported by the owner: changing the VOD directory and
+  pressing Save "doesn't make it accept the save even though it did save." The write was fine. The
+  page held the value the user TYPED (`~/VODs`) and compared it against the value the server STORES
+  (`/home/livia/VODs`), so the two spellings of one value never compared equal and the form was dirty
+  for ever: Save stayed armed, the "✓ Saved" mark never appeared, and the unsaved-changes footer
+  never went away. It also made the saved confirmation unreachable by construction, since that mark
+  was gated on `!dirty`.
+- **Refetching is not enough, and that is the whole trap.** A refetch writes the resolved value into
+  the QUERY CACHE while the form keeps the text the user typed — the two still disagree. The fix has
+  to feed the mutation's RESPONSE back into the form (`adoptForm(saved)`), because the response is the
+  one value guaranteed to be in the spelling the dirty rule compares against. The client cannot
+  reproduce resolution itself: `~` expansion needs the home directory, which is the server's to know.
+- The dirty rule moved to `frontend/src/lib/components/settings-form.ts` as a pure module
+  (`formFromSettings`/`formToSettings`/`isDirty`) rather than an inline comparison in the page — an
+  inline one cannot be tested, which is how a whole class of this went unnoticed. One builder means
+  the initial load, the adopt-on-save and the revert cannot normalize a field differently from the
+  rule that judges it.
+- The unsaved footer gained **Revert**: discard every edit back to the SERVER's last value (read from
+  the query cache, never a local snapshot — the server resolves and may refuse, so a local snapshot
+  can describe a state the server never held). It also takes back a previewed interface scale, which
+  lives in a store the layout reads on every route and would otherwise outlive the form.
+- Verified through the real page in headless Chromium by asserting control STATE: type `~/VODs-test`
+  → Save arms → save → Save DISARMS, the field shows the resolved path, the footer goes, the mark
+  appears; then edit → Revert restores the saved value and writes nothing. Falsified by commenting
+  out the single `adoptForm(saved)` statement, which reproduces the owner's exact symptom.
+
