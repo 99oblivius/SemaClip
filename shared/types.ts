@@ -260,6 +260,15 @@ export type WsEvent =
 export interface AppSettings {
   gpuDevice: number | null; // CUDA device index, null = auto
   exportDir: string;
+  /**
+   * Where a new VOD download creates its project folder.
+   *
+   * Existing projects keep their OWN location (each records its own path), so changing this
+   * never relocates anything already downloaded — it only decides where the next download
+   * lands. Empty means "the app's cache, as before", which the server resolves to a concrete
+   * path when it reads the setting.
+   */
+  vodDir: string;
   defaultAspectRatio: AspectRatio;
   defaultCaptions: CaptionStyle;
   engineBinaryPath: string | null;

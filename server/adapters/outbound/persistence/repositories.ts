@@ -1,4 +1,4 @@
-import { eq, and, asc } from "drizzle-orm";
+import { eq, and, asc, desc } from "drizzle-orm";
 import type { Db } from "./db.ts";
 import { schema } from "./db.ts";
 import type {
@@ -95,9 +95,13 @@ export class SqliteStreamRepository implements StreamRepository {
   }
 
   async list(status?: StreamStatus): Promise<Stream[]> {
+    // NEWEST FIRST. The Library lists projects under a "Recent" heading, so the most
+    // recently created project belongs at the top; ascending order put the newest at the
+    // bottom of the list. `created_at` is a fixed-width ISO-8601 UTC string, so a lexical
+    // ORDER BY is a chronological one — no cast, and no chance of a timezone-dependent sort.
     const q = status
-      ? this.db.select().from(schema.streams).where(eq(schema.streams.status, status)).orderBy(asc(schema.streams.created_at))
-      : this.db.select().from(schema.streams).orderBy(asc(schema.streams.created_at));
+      ? this.db.select().from(schema.streams).where(eq(schema.streams.status, status)).orderBy(desc(schema.streams.created_at))
+      : this.db.select().from(schema.streams).orderBy(desc(schema.streams.created_at));
     return (await q.all()).map(rowToStream);
   }
 

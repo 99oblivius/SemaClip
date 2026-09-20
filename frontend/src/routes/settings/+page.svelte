@@ -57,6 +57,7 @@
   let defaultMaxQualityHeight = $state<number | null>(1080);
   let uiScale = $state<UiScale>('medium');
   let exportDir = $state('');
+  let vodDir = $state('');
   let defaultAspectRatio = $state<AspectRatio>('16:9');
   let captionsEnabled = $state(false);
   let captionPreset = $state<CaptionStyle['preset']>('bold-white');
@@ -74,6 +75,7 @@
       defaultMaxQualityHeight = s.defaultMaxQualityHeight ?? null;
       uiScale = s.uiScale ?? 'medium';
       exportDir = s.exportDir;
+      vodDir = s.vodDir ?? '';
       defaultAspectRatio = s.defaultAspectRatio;
       captionsEnabled = s.defaultCaptions.enabled;
       captionPreset = s.defaultCaptions.preset;
@@ -91,6 +93,7 @@
       cpuUsage,
       defaultMaxQualityHeight,
       exportDir,
+      vodDir,
       defaultAspectRatio,
       defaultCaptions: {
         enabled: captionsEnabled,
@@ -112,6 +115,7 @@
       defaultMaxQualityHeight !== (settingsQuery.data?.defaultMaxQualityHeight ?? null) ||
       uiScale !== (settingsQuery.data?.uiScale ?? 'medium') ||
       exportDir !== settingsQuery.data?.exportDir ||
+      (vodDir || settingsQuery.data?.vodDir || '') !== (settingsQuery.data?.vodDir ?? '') ||
       defaultAspectRatio !== settingsQuery.data?.defaultAspectRatio ||
       captionsEnabled !== settingsQuery.data?.defaultCaptions.enabled ||
       captionPreset !== settingsQuery.data?.defaultCaptions.preset ||
@@ -234,6 +238,28 @@
               class="rounded-md border border-border bg-surface-2 px-3 py-2 font-mono text-sm text-ink placeholder:text-ash-dim focus:border-accent focus:outline-none"
             />
             <span class="font-mono text-xs text-ash-dim">Path to the semaclip-engine binary. Leave empty for auto-detection.</span>
+          </label>
+        </div>
+      </section>
+
+      <!-- Download locations -->
+      <section class="flex flex-col gap-3">
+        <h2 class="font-display text-sm font-medium text-ash uppercase tracking-wider">VOD Downloads</h2>
+        <div class="flex flex-col gap-4 rounded-md border border-border bg-surface p-4">
+          <label class="flex flex-col gap-1">
+            <span class="font-mono text-xs text-ash">VOD Directory</span>
+            <input
+              type="text"
+              bind:value={vodDir}
+              placeholder="/path/to/VODs"
+              class="rounded-md border border-border bg-surface-2 px-3 py-2 font-mono text-sm text-ink placeholder:text-ash-dim focus:border-accent focus:outline-none"
+            />
+            <span class="font-mono text-xs text-ash-dim">
+              Where new downloads create their project folder, as
+              <span class="text-ash">streamer-game-date</span>. Each project records its own path, so
+              changing this only affects downloads started from now on — and any project can be
+              pointed elsewhere on its own with <span class="text-ash">Change Location</span>.
+            </span>
           </label>
         </div>
       </section>

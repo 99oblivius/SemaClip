@@ -1,11 +1,22 @@
 import type { EventBus, SettingsRepository } from "@/application/ports/outbound.ts";
 import type { AppSettings } from "shared/types";
+import { resolveUserPath } from "@/application/use-cases/paths.ts";
 
 const SETTINGS_KEY = "app";
 
 export const DEFAULT_SETTINGS: AppSettings = {
   gpuDevice: null,
   exportDir: "~/Videos/SemaClip",
+  /**
+   * Where new VOD downloads create their project folder.
+   *
+   * Empty means "the app's own cache, as before" — the concrete default is injected at
+   * construction (see `SettingsUseCase`), because it depends on the runtime's cache dir,
+   * which a compile-time constant cannot know. Keeping the stored value empty until the
+   * user chooses means an untouched install writes nothing and keeps resolving the old
+   * location, so this setting cannot change where an existing install downloads.
+   */
+  vodDir: "",
   defaultAspectRatio: "16:9",
   defaultCaptions: {
     enabled: false,
@@ -80,6 +91,9 @@ function coerce(raw: unknown): AppSettings {
   if (o.engineBinaryPath === null || typeof o.engineBinaryPath === "string") {
     base.engineBinaryPath = o.engineBinaryPath as string | null;
   }
+  if (typeof o.vodDir === "string") {
+    base.vodDir = o.vodDir;
+  }
   if (o.cpuUsage === "slow" || o.cpuUsage === "medium" || o.cpuUsage === "fast") {
     base.cpuUsage = o.cpuUsage;
   }
@@ -102,11 +116,26 @@ function coerce(raw: unknown): AppSettings {
  * applies to already-running processes is each consumer's contract.
  */
 export class SettingsUseCase {
-  constructor(private readonly repo: SettingsRepository, private readonly bus: EventBus) {}
+  /**
+   * @param defaultVodDir Concrete location new downloads use when the user has not chosen
+   *   one. Injected because it derives from the runtime's cache dir, and an empty stored
+   *   value must still answer with a REAL path — the UI shows where downloads will land,
+   *   so "unknown" is not an acceptable answer.
+   */
+  constructor(
+    private readonly repo: SettingsRepository,
+    private readonly bus: EventBus,
+    private readonly defaultVodDir = "",
+  ) {}
 
   async get(): Promise<AppSettings> {
     const raw = await this.repo.get(SETTINGS_KEY);
-    if (raw === null) return structuredClone(DEFAULT_SETTINGS);
+    const settings = raw === null ? structuredClone(DEFAULT_SETTINGS) : this.parse(raw);
+    if (!settings.vodDir) settings.vodDir = this.defaultVodDir;
+    return settings;
+  }
+
+  private parse(raw: string): AppSettings {
     try {
       return coerce(JSON.parse(raw));
     } catch {
@@ -114,9 +143,26 @@ export class SettingsUseCase {
     }
   }
 
+  /**
+   * Persist a partial update.
+   *
+   * The two user-entered paths are RESOLVED here rather than stored verbatim: a literal
+   * `~` or a relative path in the database is a path the OS cannot use, and the setting
+   * would appear to work while writing somewhere relative to however the app happened to
+   * be launched. A refused value throws before anything is written, so the setting cannot
+   * end up in a state the app cannot honour.
+   */
   async update(partial: Record<string, unknown>): Promise<AppSettings> {
     const current = await this.get();
-    const next = coerce({ ...current, ...partial });
+    const resolved = { ...partial };
+    if (typeof resolved.exportDir === "string") {
+      resolved.exportDir = resolveUserPath(resolved.exportDir);
+    }
+    if (typeof resolved.vodDir === "string" && resolved.vodDir.trim().length > 0) {
+      resolved.vodDir = resolveUserPath(resolved.vodDir);
+    }
+    const next = coerce({ ...current, ...resolved });
+    if (!next.vodDir) next.vodDir = this.defaultVodDir;
     await this.repo.set(SETTINGS_KEY, JSON.stringify(next));
     this.bus.publish("settings:changed", next);
     return next;
