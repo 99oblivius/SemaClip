@@ -36,16 +36,48 @@ export class StreamReconciler {
   /**
    * The directory that actually holds this stream's media.
    *
-   * A URL import downloads into `{cacheDir}/vods/{id}`; a FOLDER import
-   * references the user's own folder (which may be anywhere). Scanning the
-   * canonical layout for a folder import looks in the wrong place and would
-   * drop perfectly valid paths, so the recorded paths come first and the
-   * cache layout is only the fallback.
+   * Order, and each step earns its place:
+   *   1. `projectDir` — the RECORDED location. A project lives wherever its own path says:
+   *      the user's VOD directory, or any drive they moved it to. It is the only source that
+   *      survives a rename or a move.
+   *   2. the directories of the recorded media paths — for projects created before
+   *      `projectDir` existed, and for one whose folder was renamed: the files themselves
+   *      still say where the media is.
+   *   3. `{cacheDir}/vods/{id}` — the pre-0.5.0 layout, last because it is a guess.
+   *
+   * Returns null when none of them exist, which is the "this project is unreachable" case
+   * the UI reports — NOT an error, and not a reason to drop the recorded path.
    */
   private async artifactDir(stream: Stream): Promise<string | null> {
+    if (stream.projectDir && await this.fs.exists(stream.projectDir)) return stream.projectDir;
     for (const p of [stream.vodPath, stream.chatPath]) {
       if (!p) continue;
-      const dir = p.replace(/\/[^/]+$/, "");
+      const dir = p.replace(/[\\/][^\\/]+$/, "");
+      if (await this.fs.exists(dir)) return dir;
+    }
+    const canonical = `${this.cacheDir}/vods/${stream.id}`;
+    return (await this.fs.exists(canonical)) ? canonical : null;
+  }
+
+  /**
+   * The recorded location to persist, or null when there is nothing to record.
+   *
+   * Only a directory that EXISTS is adopted. Recording a path that is currently missing
+   * would turn "the drive is not mounted right now" into "this project lives here" — and
+   * once recorded, a later move would look like the project was deleted rather than
+   * relocated. Absence is already reported by the view; it must not overwrite the record.
+   */
+  private async adoptableDir(stream: Stream): Promise<string | null> {
+    if (stream.projectDir) return null; // already recorded — never overwritten here
+    const resolved = await this.resolvedDir(stream);
+    return resolved;
+  }
+
+  /** Where this project's media is, per the recorded paths, else the pre-0.5.0 layout. */
+  private async resolvedDir(stream: Stream): Promise<string | null> {
+    for (const p of [stream.vodPath, stream.chatPath]) {
+      if (!p) continue;
+      const dir = p.replace(/[\\/][^\\/]+$/, "");
       if (await this.fs.exists(dir)) return dir;
     }
     const canonical = `${this.cacheDir}/vods/${stream.id}`;
@@ -79,11 +111,20 @@ export class StreamReconciler {
       cache.set(p, await this.fs.exists(p).catch(() => false));
     }
     const result = reconcileStreamRecord(stream, scan, (p) => cache.get(p) ?? false);
-    if (!result.stream) return stream;
-    // The rule is deliberately narrower than the row (it only ever repairs these two fields),
-    // so narrow the patch back to what it can actually contain.
-    const patch: Partial<Stream> = { vodPath: result.stream.vodPath };
-    if (result.stream.chatPath !== undefined) patch.chatPath = result.stream.chatPath;
+    // The project's OWN folder is adopted on first read (a project created before the field
+    // existed, or a first read of a fresh one) and persisted, so the location becomes a
+    // recorded fact instead of something re-derived on every request. Only a directory that
+    // actually exists is adopted — see adoptableDir.
+    const adoptedDir = await this.adoptableDir(stream);
+    const patch: Partial<Stream> = {};
+    if (result.stream) {
+      // The rule is deliberately narrower than the row (it only ever repairs these two
+      // fields), so narrow the patch back to what it can actually contain.
+      patch.vodPath = result.stream.vodPath;
+      if (result.stream.chatPath !== undefined) patch.chatPath = result.stream.chatPath;
+    }
+    if (adoptedDir) patch.projectDir = adoptedDir;
+    if (Object.keys(patch).length === 0) return stream;
     const updated = await this.streams.update({ ...stream, ...patch });
     return updated ?? { ...stream, ...patch };
   }

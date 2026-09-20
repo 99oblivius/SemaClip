@@ -22,7 +22,7 @@ export interface Artifact {
 }
 
 export interface DownloadState {
-  phase: 'idle' | 'running' | 'done' | 'failed';
+  phase: 'queued' | 'starting' | 'idle' | 'running' | 'done' | 'failed';
   parts: DownloadPart[];
   overall: { percent: number; etaSec: number | null };
   proxyFrontierSec: number;
@@ -89,9 +89,21 @@ export interface ArtifactView {
 
 export interface DownloadView {
   streamId: string;
-  phase: 'idle' | 'running' | 'done' | 'failed';
+  /** 'queued' = waiting its turn in the full-VOD download queue (active, not transferring). */
+  phase: 'queued' | 'starting' | 'idle' | 'running' | 'done' | 'failed';
   /** ANY download happening — the single flag the UI keys off. */
   active: boolean;
+  /**
+   * Whether the project's folder is reachable right now.
+   *
+   * `false` = the project records a folder that is not there (unmounted drive, moved folder):
+   * the UI reports it and blocks the actions that would fail, while leaving the settings
+   * panel reachable so it can be pointed somewhere else. `true` = there. `null` = the project
+   * records no folder, which is NOT "missing" (it may simply be empty).
+   */
+  reachable: boolean | null;
+  /** Where this project is in the download queue, when it is waiting its turn. */
+  queue: { position: number; total: number } | null;
   /** Server-composed status line ("video · 42%", "download complete"). */
   label: string;
   overall: { percent: number; etaSec: number | null };
@@ -142,6 +154,17 @@ export function isLive(view: DownloadView): boolean {
  */
 export function needsAttention(view: DownloadView): boolean {
   return view.active || view.phase === 'failed';
+}
+
+/**
+ * True when the project's folder is known to be MISSING.
+ *
+ * Only `false` counts. `null` means the project records no folder at all — an older record,
+ * or one that has never had media — and reporting that as missing would put the "unreachable"
+ * treatment on a project that is merely empty.
+ */
+export function isUnreachable(view: DownloadView | undefined): boolean {
+  return view?.reachable === false;
 }
 
 /** A download finished with a playable file — the Library row can drop it. */

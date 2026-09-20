@@ -73,6 +73,28 @@ Reference: docs/FRONTEND-REQUIREMENTS.md (professional-VOD-clipper expectations,
 
 **Exit gate**: preference adaptation demonstrable across ≥2 labeled streams; reel export produces a real composed file.
 
+
+## Phase 6 — Owner-requested workflow fixes (SHIPPED 2026-09-20)
+
+Four changes requested together, each shipped with its own test and a live check:
+
+1. **Full VOD downloads queue** — one transfer at a time, in the order added, for imports and resumes.
+   Manual per-artifact downloads stay immediate (owner's choice). New phase `queued`, active in the
+   UI, with the position shown ("waiting — 1 of 2 in queue"). Verified live: two imports queued at
+   positions 1 and 2, `running=1 queued=1` held across polls.
+2. **Recent lists newest first** — `desc(created_at)`, tested against a real in-memory database and
+   falsified against the old ordering.
+3. **A project's folder is recorded and named** `{streamer}-{game}-{date}` (migration 0.5.0), with
+   unreachable projects striped in the Library, blocked in Review (settings still reachable), and
+   repairable from a new **Change Location** using the OS folder chooser. Verified live on a copy of
+   the real database: rename a folder → `reachable: false` with no restart; relocate → the artifacts
+   come back (`video: true`, `renderPath` set). Empty projects are correctly NOT flagged.
+4. **VOD directory setting**, above Export Defaults, with `~` expansion and relative paths refused.
+
+**Exit gate met**: 335 server tests green, `deno check` clean, svelte-check 0 errors / 0 warnings,
+frontend build + tests green, and every mechanism exercised once through the real HTTP path on the
+owner's own projects (never on the live database — copies, restored afterwards).
+
 ## Standing rules
 - No phase starts before the previous exit gate is demonstrably met.
 - Anything that would fabricate success (stub returning victory) is a CI-blocking review reject.

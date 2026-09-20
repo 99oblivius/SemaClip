@@ -53,8 +53,14 @@ export interface DownloadState {
    * downloader writing its first real state. It is ACTIVE (a container renders for it)
    * but is NOT "running", so run()'s own guard against a concurrent download still
    * admits the run it is about to start.
+   *
+   * "queued" is a full VOD download waiting its turn in the FIFO. It is ACTIVE for the UI
+   * (the project must show as pending work, not as idle) but nothing is transferring — which
+   * is exactly why it is its own phase rather than "starting": the queue can hold several
+   * projects for minutes, and reporting that as "starting" would be a lie the user would
+   * notice as a bar that never moves.
    */
-  phase: "starting" | "idle" | "running" | "done" | "failed";
+  phase: "queued" | "starting" | "idle" | "running" | "done" | "failed";
   parts: DownloadPart[];
   overall: { percent: number; etaSec: number | null };
   /** Seconds of proxy media playable so far. */

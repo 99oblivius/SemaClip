@@ -9,6 +9,8 @@ export interface NewStreamInput {
   streamer?: string | undefined;
   game?: string | null | undefined;
   duration?: number | undefined;
+  /** The project's folder, when the caller already decided where the media goes. */
+  projectDir?: string | null | undefined;
 }
 
 export function createStream(input: NewStreamInput): Stream {
@@ -21,8 +23,13 @@ export function createStream(input: NewStreamInput): Stream {
     streamer: input.streamer ?? null,
     game: input.game ?? null,
     duration: input.duration ?? null,
+    // WHEN THE PROJECT WAS CREATED, deliberately not the VOD's own date: the Library's
+    // "Recent" list sorts on this field, so it means "most recently added project". The
+    // VOD's broadcast date lives in the folder name instead (`vodFolderName`), which is
+    // where it reads usefully anyway. One field, one meaning.
     createdAt: new Date().toISOString(),
     status: "pending",
+    projectDir: input.projectDir ?? null,
   };
 }
 

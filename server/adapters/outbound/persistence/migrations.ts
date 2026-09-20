@@ -114,6 +114,23 @@ export const migrations: Migration[] = [
       )`,
     ],
   },
+  {
+    version: "0.5.0",
+    description: "Add streams.project_dir — each project records where its folder lives",
+    up: [
+      // A project's folder is no longer implied by its id: it is named after the stream and
+      // lives wherever the user's VOD directory points, and they can move it. The path has
+      // to be RECORDED, because nothing can re-derive it: the folder name depends on the
+      // VOD's metadata and a collision suffix, and the location is the user's choice.
+      //
+      // NULL deliberately means "not recorded" rather than "missing": rows written before
+      // this migration resolve their location on read (see StreamReconciler, which adopts
+      // and persists it), which is why there is no data backfill here. A migration cannot
+      // stat a filesystem — the value is unknowable at migration time for a folder the user
+      // may have moved or unmounted, and guessing would record a path that is wrong.
+      `ALTER TABLE streams ADD COLUMN project_dir TEXT`,
+    ],
+  },
 ];
 
 export const LATEST_VERSION = migrations.at(-1)?.version ?? "0.0.0";

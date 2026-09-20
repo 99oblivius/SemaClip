@@ -53,3 +53,99 @@
   read-only mount, and documented by Deno: auto-update "does not work for read-only or system-owned
   installs — an AppImage mounted read-only". There is no env var or relocation hook. Windows is
   unaffected. The `.AppImage` is a fresh-download artifact until upstream ships a relocatable dylib.
+
+## 2026-09-20 — Four owner-requested changes: queue, order, project paths, VOD directory
+
+### Full VOD downloads run one at a time, in the order added
+
+- **A FIFO for full VOD downloads only** (import and resume). Manual per-artifact downloads stay
+  immediate — they are small, deliberate, usually a repair, and the owner asked for exactly that
+  split. The motivation is in the owner's own data: two VODs imported five seconds apart both ended
+  with an empty `vod_path`, because two transfers were splitting the link until neither finished.
+- **`queued` is its own phase, and it is ACTIVE.** A queued project must appear as pending work
+  (`needsAttention` → a Library container) or the import looks like it failed. It is not
+  `starting`: a queue can hold several projects for minutes and `starting` would be a bar that never
+  moves.
+- **The queue's snapshot is the ONE owner of "waiting"**, composed into the phase by the downloads
+  route. A first attempt also wrote a queued marker into the download state, which read back as
+  `phase: idle, active: false` — because a queued stream is deliberately not a live run, so
+  `getState()` serves the persisted state. The container then never rendered and the queue position
+  was invisible. Two mechanisms for one fact, in the place it does the least good; the second was
+  deleted.
+- **A queue entry that is dropped must be dropped everywhere**: cancel de-queues (a queued download
+  that starts itself a moment after Cancel is the opposite of what the button says), and a project
+  delete/purge drops it too.
+- The queue asserts its own invariant in a test as a **live concurrency counter**, not as an
+  ordering: `maxConcurrent === 1`. A run that throws (even synchronously) or is aborted releases the
+  queue in a `finally`, because a queue that stops after one failure strands every later download.
+
+### Recent lists newest first
+
+- `SqliteStreamRepository.list` orders `desc(created_at)` in both branches. The heading said
+  "Recent" and the order said oldest-first. `/api/downloads` iterates the same list, so the progress
+  area follows it — inherited, not coincidental. Tested against a real in-memory database, and
+  falsified: reverting to `asc` fails two of its three assertions.
+
+### A project's folder is RECORDED, and named after the stream
+
+- **`streams.project_dir` (migration 0.5.0)**, `{vodRoot}/{streamer}-{game}-{YYYY-MM-DD-HHmm}`,
+  local time from the VOD's own creation date, each part sanitised and capped at 60, a part that
+  sanitises to nothing omitted rather than left as an empty segment, `-2`/`-3` on collision. Artifact
+  files inside take the FOLDER name as their stem, so folder and files agree.
+- **No SQL backfill.** A migration cannot stat a filesystem, and the value is unknowable for a folder
+  the user may have moved or unmounted; guessing would record a wrong path. `NULL` therefore means
+  "not recorded", never "missing", and `StreamReconciler` resolves and persists it on first read —
+  the same read-heals mechanism already used for `vod_path`/`chat_path`. Migration proven against a
+  copy of the owner's real database: 0.4.0 → 0.5.0, both rows preserved.
+- **Reachability is three-valued, and that is the whole trick.** `false` = a recorded folder is
+  absent; `true` = present; `null` = no folder recorded, which may simply be an EMPTY project and must
+  never be flagged. The owner's data contains both empty projects, so a rule that treats "no files" as
+  unreachable would stripe two perfectly healthy projects. Measured per read in `/api/downloads`, which
+  is why a drive that comes back clears it with no restart.
+- **`createdAt` stays the PROJECT's creation time, not the VOD's.** Making it the VOD date would have
+  silently redefined the "Recent" sort. The VOD date lives in the folder name, where it reads usefully.
+
+### Change Location writes BOTH owners, or the project looks broken
+
+- The download VIEW resolves presence from the download STATE's slots, while export and the record use
+  `stream.vodPath`. Repointing only the record left a real 336MB video reporting `video: false` with
+  `renderPath: null` — measured live. A relocation therefore fills an EMPTY state slot from the
+  folder's listing via `findArtifact` (role from the FILENAME — identification, not a guess), sets the
+  part `done` with its real byte size, and hydrates `idle`/`failed` → `done`. Verified after the fix:
+  `video: true`, `renderPath` set, `phase: done`.
+- **A missing folder is a refusal, not a mkdir.** "Change location" means "the files are here";
+  creating the directory would report success while pointing the project at nothing. A running
+  download refuses too (409) — it is writing into the old folder at that moment.
+- **The artifact stem is the folder name for projects whose folder this scheme named**, and the
+  title-slug is kept as a candidate for deletion sweeps: an existing project keeps its `{id}` folder
+  and its title-named files, so a sweep using only the folder basename would find nothing and report
+  `deleted: false` while gigabytes sat on disk.
+
+### The OS folder chooser
+
+- **The runtime has no dialog API** (`op_desktop_*` is alert/confirm/prompt/clipboard/notifications),
+  so the chooser is per-platform: `zenity` (then `yad`) on Linux, which IS the desktop's GTK
+  FileChooser — on this host zenity routes through `xdg-desktop-portal-gtk`, so the portal's own
+  chooser appears; and the modern `IFileOpenDialog` + `FOS_PICKFOLDERS` behind a small STA helper on
+  Windows, emitted by the app from a template (`folder-picker-windows.ts`) and written out per-user
+  like the updater sidecar.
+- **Cancelling is a real answer**, distinct from failure, and must not fall through to the next
+  mechanism — opening a second dialog after someone declined one is worse than doing nothing.
+- **The emitted helper is checked as TEXT by a unit test** (`tests/folder-picker-helper.test.ts`),
+  because nothing else in this repo's gates compiles it and two defects reached the VM first: `''` in
+  the C# body is two empty CHARACTER literals (`Add-Type`: "Empty character literal"), and an em-dash
+  in the template shipped a non-ASCII byte that PowerShell 5.1 mis-parses. Both are now impossible to
+  reintroduce silently. Verified on the VM with the adapter's exact argument list, which returned the
+  expected path and opened at `-InitialDir`.
+
+### Paths a user types are resolved, not stored verbatim
+
+- `exportDir` had defaulted to the literal string `~/Videos/SemaClip` and nothing expanded the tilde,
+  so the "directory" was a relative path named `~` under whatever CWD the app was launched from.
+  `resolveUserPath` expands `~`, refuses relative paths (they resolve against the launch directory, so
+  the same project lands in different places on two launches), unifies separators and drops the
+  trailing one. A refused value throws before anything is written, so a setting can never be persisted
+  in a state the app cannot honour.
+- **The VOD directory defaults to the app's cache** (`{cacheDir}/vods`, injected at container
+  construction) with an empty stored value, so an untouched install writes nothing and keeps resolving
+  the old location. Changing it never moves an existing project: each records its own path.

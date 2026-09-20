@@ -93,10 +93,17 @@
           </span>
         </div>
         <div class="mt-1 h-1 overflow-hidden rounded-full bg-surface-3">
-          <div
-            class="h-full transition-all {view.phase === 'failed' ? 'bg-error' : 'bg-accent'}"
-            style="width: {view.overall.percent * 100}%"
-          ></div>
+          <!-- A queued download has moved no bytes, so it gets a striped/pulsing bar rather
+               than an empty one: an empty bar at 0% reads as "stuck", which is exactly the
+               wrong impression for work that has not started yet. -->
+          {#if view.phase === 'queued'}
+            <div class="h-full w-full animate-pulse bg-surface-3"></div>
+          {:else}
+            <div
+              class="h-full transition-all {view.phase === 'failed' ? 'bg-error' : 'bg-accent'}"
+              style="width: {view.overall.percent * 100}%"
+            ></div>
+          {/if}
         </div>
       </div>
     </button>

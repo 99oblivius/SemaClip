@@ -10,7 +10,8 @@ import type { ImportByFileInput, ImportByUrlInput, ImportResult, Stream } from "
 import { createStream } from "@/domain/mod.ts";
 import type { DownloadOrchestrator } from "@/adapters/outbound/vod/download-orchestrator.ts";
 import { fetchVodMeta, extractVodId } from "@/adapters/outbound/vod/hls.ts";
-import { streamSlug } from "@/application/use-cases/artifact-naming.ts";
+import { streamSlug, uniqueName, vodFolderName } from "@/application/use-cases/artifact-naming.ts";
+import { DownloadQueue } from "@/application/use-cases/DownloadQueue.ts";
 
 export class ImportStreamByFileUseCase {
   constructor(
@@ -37,6 +38,10 @@ export class ImportStreamByFileUseCase {
       title: input.title,
       streamer: input.streamer,
       duration: duration ?? undefined,
+      // A folder import references a folder the user already has: record it as the
+      // project's location, so this project too can report itself unreachable when that
+      // folder is not there (an unmounted drive is exactly the case this covers).
+      projectDir: resolved.vodPath.replace(/[\\/][^\\/]+$/, ""),
     });
     await this.streams.save(stream);
     return { stream, downloadJobId: null };
@@ -74,7 +79,50 @@ export class ImportStreamByUrlUseCase {
     private readonly orchestrator: DownloadOrchestrator | null = null,
     /** Per-stream abort controllers for in-flight progressive downloads. */
     private readonly aborts = new Map<string, AbortController>(),
+    /**
+     * Where new project folders are created. Returns the configured VOD directory, or the
+     * app's cache when the user has not chosen one — resolved on EVERY import rather than
+     * captured, so changing the setting applies to the next download without a restart.
+     */
+    private readonly vodRoot: () => Promise<string> = () => Promise.resolve(`${cacheDir}/vods`),
+    /**
+     * The full-VOD download queue. Injected because the UI needs the QUEUE's own view (which
+     * project is running, which are waiting and in what order) — and a queue that lived only
+     * inside this use-case could not be read by the layer composing the download view.
+     */
+    private readonly queue: DownloadQueue = new DownloadQueue(),
   ) {}
+
+  /**
+   * Create (or find) this project's folder, `{vodRoot}/{streamer}-{game}-{date}`.
+   *
+   * The name is unique within the root: two VODs from the same streamer and game in the
+   * same minute would otherwise share a folder and interleave their artifacts. The
+   * directory listing decides, so the folder name is not a guess.
+   */
+  private async projectDirFor(stream: Stream): Promise<string> {
+    const root = await this.vodRoot();
+    await this.fs.ensureDir(root);
+    const base = vodFolderName({
+      id: stream.id,
+      streamer: stream.streamer,
+      game: stream.game,
+      createdAt: stream.createdAt,
+    });
+    let names: string[] = [];
+    try {
+      names = await this.fs.listFiles(root);
+    } catch {
+      names = [];
+    }
+    // `listFiles` returns files only; colliding with an existing DIRECTORY is what matters,
+    // so ask the filesystem directly rather than relying on that listing alone.
+    let candidate = uniqueName(base, names);
+    for (let n = 2; n < 50 && await this.fs.exists(this.fs.joinPath(root, candidate)); n++) {
+      candidate = uniqueName(base, [...names, candidate]);
+    }
+    return this.fs.joinPath(root, candidate);
+  }
 
   async execute(input: ImportByUrlInput): Promise<ImportResult> {
     // Instrumented step by step: the owner reported the import POST never appears to
@@ -120,14 +168,37 @@ export class ImportStreamByUrlUseCase {
     // delivered no live-chunk behavior.
     const controller = new AbortController();
     this.aborts.set(stream.id, controller);
-    const destDir = `${this.cacheDir}/vods/${stream.id}`;
+    // The folder is decided HERE, before the download starts, and recorded on the project:
+    // that is what makes a project's location a fact rather than something re-derived from
+    // the download state later.
+    const destDir = await this.projectDirFor(stream);
     await this.fs.ensureDir(destDir);
-    step("dest dir ready — starting the background download and RETURNING");
-    this.runProgressive(stream.id, input, meta, destDir, controller).catch((err) => {
-      console.error(`Progressive download failed for ${input.url}:`, err);
+    stream.projectDir = destDir;
+    await this.streams.update(stream);
+    const slug = this.artifactStem(stream, destDir);
+    // QUEUED, not started: full VOD downloads run one at a time in the order they were added,
+    // so two imports do not split the link between them (measured on the owner's own data:
+    // two VODs imported five seconds apart both ended with an empty vod_path).
+    const position = this.queue.enqueue({
+      streamId: stream.id,
+      label: stream.title ?? stream.id.slice(0, 8),
+      run: () => this.runProgressive(stream.id, input, meta, destDir, controller, false, slug),
     });
-    step("returning 201 to the client");
+    // Nothing is written to the download state here: the queue is the ONE owner of "waiting",
+    // and the downloads route composes the `queued` phase from its snapshot. A second marker
+    // in the state was tried and read back as idle (see the route's comment for the measurement).
+    step(`queued at position ${position} — returning 201 to the client`);
     return { stream, downloadJobId: stream.id };
+  }
+
+  /** The queue's own snapshot, for composing queued positions into the download view. */
+  queueSnapshot(): { running: string | null; waiting: string[] } {
+    return this.queue.snapshot();
+  }
+
+  /** Drop a stream from the queue (a delete, or a cancel of a queued download). */
+  dequeue(streamId: string): boolean {
+    return this.queue.cancel(streamId);
   }
 
   private async runProgressive(
@@ -137,16 +208,43 @@ export class ImportStreamByUrlUseCase {
     destDir: string,
     controller: AbortController,
     resume = false,
+    presetSlug?: string,
   ): Promise<void> {
     if (!this.orchestrator) return;
     // Live-run marker: reconcile() must not flip a genuinely running
     // download's phase to failed while the poller reads state.
     this.orchestrator.markRunLive(streamId, true);
     try {
-      await this.runProgressiveInner(streamId, input, destDir, controller, resume);
+      await this.runProgressiveInner(streamId, input, destDir, controller, resume, presetSlug);
     } finally {
       this.orchestrator.markRunLive(streamId, false);
     }
+  }
+
+  /**
+   * The artifact stem for every file this project writes.
+   *
+   * It is the PROJECT FOLDER'S NAME, so the folder and the files inside it say the same
+   * thing: `novastar-minecraft-2026-09-20-0634 - video.mp4`. Deriving it from the stream
+   * TITLE (as this did) meant a folder named after the stream containing files named after
+   * a title that may since have changed, and two identities for one project. Role
+   * identification never depended on the stem being the title — `findArtifact` matches the
+   * role by SUFFIX — so this is coherence, not a behaviour change.
+   *
+   * The recorded `projectDir` is authoritative: a legacy project (or one the user moved)
+   * keeps the stem it already has rather than renaming files behind its record.
+   */
+  private artifactStem(stream: Stream | null, destDir: string): string {
+    const recorded = stream?.projectDir;
+    if (recorded && recorded === destDir) {
+      const name = destDir.replace(/^.*[\\/]/, "");
+      if (name.length > 0) return name;
+    }
+    return streamSlug({
+      id: stream?.id ?? "",
+      title: stream?.title ?? null,
+      streamer: stream?.streamer ?? null,
+    });
   }
 
   private async runProgressiveInner(
@@ -155,17 +253,16 @@ export class ImportStreamByUrlUseCase {
     destDir: string,
     controller: AbortController,
     resume: boolean,
+    presetSlug?: string,
   ): Promise<void> {
     const stream = await this.streams.findById(streamId);
     const result = await this.orchestrator!.run({
       streamId,
       sourceUrl: input.url,
       destDir,
-      slug: streamSlug({
-        id: streamId,
-        title: stream?.title ?? input.title ?? null,
-        streamer: stream?.streamer ?? null,
-      }),
+      // The stem is computed when the run is QUEUED, so it describes the project as it was
+      // then; falling back here keeps a direct call (resume) working.
+      slug: presetSlug ?? this.artifactStem(stream, destDir),
       proxyHeightCap: input.proxyHeightCap ?? 540,
       maxQualityHeight: input.maxQualityHeight ?? null,
       // Proxy-first (two files: 540p then HQ) is the opt-in — default is a
@@ -235,25 +332,44 @@ export class ImportStreamByUrlUseCase {
 
     const controller = new AbortController();
     this.aborts.set(streamId, controller);
-    const destDir = `${this.cacheDir}/vods/${streamId}`;
+    // Resume writes into the project's RECORDED folder — not a re-derived one: the folder
+    // name is fixed at creation (and may carry a collision suffix), so re-deriving it would
+    // resume into a different, empty directory.
+    const destDir = stream.projectDir ?? (await this.projectDirFor(stream));
     await this.fs.ensureDir(destDir);
-    // Resume carries the same settings as the last run, persisted in state.
-    this.runProgressive(streamId, {
-      url: stream.sourceUrl,
-      progressive: true,
-      proxyHeightCap: (existing.qualities.length > 0 ? undefined : 540) ?? 540,
-      maxQualityHeight: null,
-      includeProxy: existing.parts.some((p) => p.kind === "hq" && p.status !== "skipped") &&
-        existing.proxyPath !== existing.hqPath,
-    } as ImportByUrlInput, { title: stream.title ?? "" }, destDir, controller, true).catch((err) => {
-      console.error(`Resume download failed for ${streamId}:`, err);
+    if (!stream.projectDir) {
+      stream.projectDir = destDir;
+      await this.streams.update(stream);
+    }
+    // Resume carries the same settings as the last run, persisted in state. It QUEUES like an
+    // import: a resume moves the same gigabytes and must not compete with a running download.
+    const resumeSlug = this.artifactStem(stream, destDir);
+    this.queue.enqueue({
+      streamId,
+      label: stream.title ?? streamId.slice(0, 8),
+      run: () =>
+        this.runProgressive(streamId, {
+          url: stream.sourceUrl!,
+          progressive: true,
+          proxyHeightCap: (existing.qualities.length > 0 ? undefined : 540) ?? 540,
+          maxQualityHeight: null,
+          includeProxy: existing.parts.some((p) => p.kind === "hq" && p.status !== "skipped") &&
+            existing.proxyPath !== existing.hqPath,
+        } as ImportByUrlInput, { title: stream.title ?? "" }, destDir, controller, true, resumeSlug),
     });
   }
 
-  /** Cancel an in-flight progressive download (route: DELETE /download). */
+  /**
+   * Cancel a download (route: DELETE /download).
+   *
+   * A QUEUED entry is dropped here — otherwise "cancel" would leave a download that starts by
+   * itself a moment later, which is the opposite of what the button says. A running one is
+   * aborted via its controller, and the queue releases the next when that run resolves.
+   */
   cancelProgressive(streamId: string): boolean {
+    const dequeued = this.queue.cancel(streamId);
     const controller = this.aborts.get(streamId);
-    if (!controller) return false;
+    if (!controller) return dequeued;
     controller.abort();
     return true;
   }
@@ -277,7 +393,12 @@ export class ImportStreamByUrlUseCase {
     // indexes. Hardcoding the old names meant a delete silently removed
     // nothing once artifacts were project-named — the reported "pressing
     // delete download does nothing".
-    const dir = `${cacheDir}/vods/${streamId}`;
+    //
+    // The folder comes from the RECORD first: a project lives wherever its own path says
+    // (the VOD directory setting, or a drive the user moved it to), and `{cacheDir}/vods/id`
+    // is only the pre-0.5.0 layout.
+    const recorded = await this.streams.findById(streamId);
+    const dir = recorded?.projectDir ?? `${cacheDir}/vods/${streamId}`;
     let names: string[] = [];
     try {
       names = [...Deno.readDirSync(dir)].filter((e) => e.isFile).map((e) => e.name);
@@ -322,6 +443,12 @@ export class ImportStreamByUrlUseCase {
     return true;
   }
 
+  /**
+   * The legacy twitch-dl path. Its only caller used to be the non-progressive import
+   * branch, which no longer exists (URL imports always run the chunked orchestrator), so
+   * nothing calls it. It is left untouched rather than extended to the new layout: wiring
+   * dead code to a new path resolution would be maintaining a mechanism for no caller.
+   */
   private async downloadInBackground(jobId: string, url: string, streamId: string): Promise<void> {
     const destDir = `${this.cacheDir}/vods/${streamId}`;
     await this.fs.ensureDir(destDir);

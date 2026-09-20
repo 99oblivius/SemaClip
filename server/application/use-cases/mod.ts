@@ -8,3 +8,4 @@ export { ListClipsUseCase, GetClipUseCase, RejectClipUseCase, UpdateClipUseCase 
 export { ExportClipUseCase } from "./ExportClip.ts";
 export { ManageQueueUseCase } from "./ManageQueue.ts";
 export { SettingsUseCase } from "./SettingsUseCase.ts";
+export { SetProjectLocationUseCase } from "./SetProjectLocation.ts";

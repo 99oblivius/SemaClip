@@ -162,6 +162,69 @@
 
   let saved = $state(false);
 
+  // ── Change Location ──
+  // The project's folder is a recorded fact the user can correct, which is the whole point:
+  // a drive gets remounted somewhere else, a folder is moved, and the project has to be told
+  // where it went. The OS chooser fills the field (the app cannot browse), and typing stays
+  // possible because a picker is not always available.
+  let locationInput = $state('');
+  let locationOpen = $state(false);
+  let locationMessage = $state('');
+  let locationError = $state('');
+  const locationMutation = createMutation(() => ({
+    mutationFn: (dir: string) => apiClient.setProjectLocation(stream.id, dir),
+    onSuccess: (data: { dir: string; repointed: number; missing: string[] }) => {
+      locationOpen = false;
+      locationMessage = data.missing.length > 0
+        ? `Location set. ${data.repointed} file(s) found there; ${data.missing.length} recorded file(s) are not in that folder.`
+        : `Location set. ${data.repointed} file(s) repointed.`;
+      // Every surface showing this project's files re-reads: the location changed, so the
+      // Library row, these rows and the download view all describe something else now.
+      markDownloadsChanged();
+      queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
+      queryClient.invalidateQueries({ queryKey: ['stream', stream.id] });
+      queryClient.invalidateQueries({ queryKey: ['streams'] });
+      setTimeout(() => (locationMessage = ''), 6000);
+    },
+    onError: (err: Error) => (locationError = err.message),
+  }));
+
+  /** Ask the OS for a folder and use it directly — the picker IS the answer. */
+  async function pickLocation() {
+    locationError = '';
+    try {
+      const picked = await apiClient.pickFolder({
+        title: 'Choose this project\'s folder',
+        initialDir: locationInput.trim() || stream.projectDir || null,
+      });
+      if (picked.error) {
+        // No chooser available: the typed field is the fallback, and saying so beats a
+        // button that appears to do nothing.
+        locationError = picked.error;
+        return;
+      }
+      if (picked.cancelled || !picked.path) return; // declining is not an error
+      locationInput = picked.path;
+      locationMutation.mutate(picked.path);
+    } catch (err) {
+      locationError = err instanceof Error ? err.message : 'Could not open the folder chooser.';
+    }
+  }
+
+  function setLocationTyped() {
+    locationError = '';
+    const dir = locationInput.trim();
+    if (!dir) return;
+    locationMutation.mutate(dir);
+  }
+
+  function openLocation() {
+    locationInput = stream.projectDir ?? '';
+    locationError = '';
+    locationMessage = '';
+    locationOpen = true;
+  }
+
   // ── Media section ──
   // Rows render the SERVER's composed view verbatim. Nothing here derives
   // "is it on disk", "is a download happening" or "what size" — those local
@@ -651,22 +714,81 @@
         </div>
 
         <!-- Actions -->
-        <div class="flex items-center justify-between gap-2 border-t border-border pt-3">
-          <button
-            class="flex items-center gap-1 rounded-md border border-error/30 px-3 py-1.5 text-xs text-error transition-colors hover:bg-error/10"
-            onclick={() => (showDeleteModal = true)}
-          >
-            <Icon name="trash" size={14} />
-            Delete Project
-          </button>
-          <button
-            class="flex items-center gap-1 rounded-md bg-accent px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
-            onclick={save}
-            disabled={!dirty || updateMutation.isPending}
-          >
-            <Icon name="check" size={14} />
-            {updateMutation.isPending ? 'Saving...' : 'Save'}
-          </button>
+        <div class="flex flex-col gap-2 border-t border-border pt-3">
+          <!-- Change Location: correct where the project's folder is. Sits beside Delete
+               Project because both are project-level decisions about the files. -->
+          <div class="flex flex-col gap-2">
+            <div class="flex items-center justify-between gap-2">
+              <button
+                class="flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-xs text-ash transition-colors hover:border-accent hover:text-accent"
+                onclick={() => (locationOpen ? (locationOpen = false) : openLocation())}
+                aria-expanded={locationOpen}
+              >
+                <Icon name="folder" size={14} />
+                Change Location
+              </button>
+              {#if locationMessage}
+                <span class="font-mono text-[10px] text-success" role="status">{locationMessage}</span>
+              {/if}
+            </div>
+
+            {#if locationOpen}
+              <div class="flex flex-col gap-2 rounded-md border border-border bg-surface-2 p-2.5">
+                <span class="font-mono text-[10px] text-ash-dim">
+                  Where this project's files are now. It is not created if missing — the folder
+                  has to be there.
+                </span>
+                <div class="flex items-center gap-2">
+                  <input
+                    type="text"
+                    bind:value={locationInput}
+                    onkeydown={(e) => e.key === 'Enter' && setLocationTyped()}
+                    placeholder="/path/to/the/project/folder"
+                    class="min-w-0 flex-1 rounded border border-border bg-surface px-2 py-1 font-mono text-xs text-ink placeholder:text-ash-dim focus:border-accent focus:outline-none"
+                    aria-label="Project folder"
+                  />
+                  <!-- The OS chooser, always visible next to the field: the no-gating rule,
+                       and the picker is the natural way to answer "where is it". -->
+                  <button
+                    class="flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
+                    onclick={pickLocation}
+                    disabled={locationMutation.isPending}
+                    title="Browse for the folder in the OS chooser"
+                  >
+                    <Icon name="folder" size={12} /> Browse
+                  </button>
+                  <button
+                    class="flex shrink-0 items-center gap-1 rounded-md bg-accent px-2 py-1 text-xs font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
+                    onclick={setLocationTyped}
+                    disabled={locationMutation.isPending || locationInput.trim().length === 0}
+                  >
+                    {locationMutation.isPending ? 'Setting…' : 'Set'}
+                  </button>
+                </div>
+                {#if locationError}
+                  <p class="font-mono text-[10px] text-error" role="alert">{locationError}</p>
+                {/if}
+              </div>
+            {/if}
+          </div>
+
+          <div class="flex items-center justify-between gap-2">
+            <button
+              class="flex items-center gap-1 rounded-md border border-error/30 px-3 py-1.5 text-xs text-error transition-colors hover:bg-error/10"
+              onclick={() => (showDeleteModal = true)}
+            >
+              <Icon name="trash" size={14} />
+              Delete Project
+            </button>
+            <button
+              class="flex items-center gap-1 rounded-md bg-accent px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
+              onclick={save}
+              disabled={!dirty || updateMutation.isPending}
+            >
+              <Icon name="check" size={14} />
+              {updateMutation.isPending ? 'Saving...' : 'Save'}
+            </button>
+          </div>
         </div>
 
         {#if updateMutation.isError}

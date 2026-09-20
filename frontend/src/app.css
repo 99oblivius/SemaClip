@@ -99,6 +99,20 @@
   .font-display { font-family: var(--font-display); }
   .font-mono { font-family: var(--font-mono); }
 
+  /* A project whose folder is not there (an unmounted drive, a moved folder).
+     Black/grey diagonal stripes, drawn with a gradient rather than an image so it scales
+     with the row and needs no asset. Deliberately low-contrast: it has to read as "this row
+     is not available", not as an error dialog. */
+  .stripe-unreachable {
+    background-image: repeating-linear-gradient(
+      135deg,
+      var(--color-foundation) 0px,
+      var(--color-foundation) 8px,
+      var(--color-surface-3) 8px,
+      var(--color-surface-3) 16px
+    );
+  }
+
   /* Accent glow — applied to active/selected elements */
   .accent-glow {
     box-shadow: 0 0 80px var(--color-accent-glow);

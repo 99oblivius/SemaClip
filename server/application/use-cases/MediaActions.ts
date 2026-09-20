@@ -9,6 +9,7 @@
  */
 
 import type { EventBus, StreamRepository, StreamMetadataRepository, FileSystemPort } from "@/application/ports/outbound.ts";
+import type { Stream } from "shared/types";
 import { STREAM_CHANGED_TOPIC } from "@/application/ports/outbound.ts";
 import { DownloadOrchestrator, type DownloadState } from "@/adapters/outbound/vod/download-orchestrator.ts";
 import { resolveQualities, pickProxyQuality, pickBestQuality, extractVodId, type HlsQuality } from "@/adapters/outbound/vod/hls.ts";
@@ -126,13 +127,58 @@ export class MediaActionsUseCase {
    * Uses the same shared rule every other read uses, so this use-case cannot drift from the
    * reconciler that repairs the record.
    */
+  /**
+   * The artifact stem for files this use-case WRITES or scans for.
+   *
+   * New projects take their stem from the FOLDER NAME, so folder and files match. A project
+   * whose folder was NOT named by the current scheme (anything created before it, including
+   * the pre-0.5.0 `{id}` folders) keeps the stem it already has: renaming a project's files
+   * behind its own record is how artifact identity breaks.
+   */
+  private artifactStemFor(dir: string, stream: Stream | null): string {
+    if (stream?.projectDir && stream.projectDir === dir) {
+      const name = dir.replace(/^.*[\\/]/, "");
+      if (name.length > 0) return name;
+    }
+    return stream
+      ? streamSlug({ id: stream.id, title: stream.title, streamer: stream.streamer })
+      : "";
+  }
+
+  /**
+   * Every stem this project's artifacts may carry, for a DELETION sweep.
+   *
+   * Both are needed, and the reason is a real case: a project created before the folder-name
+   * scheme has `projectDir` adopted as its `{id}` folder, so the folder basename is a UUID
+   * while its files are `{title-slug} - proxy.mp4`. Sweeping only the current stem would
+   * silently delete nothing — the exact defect class this file has already been fixed for
+   * twice (hardcoded names, then the title-only slug).
+   */
+  private candidateStems(dir: string, stream: Stream | null): string[] {
+    const stems = new Set<string>();
+    const current = this.artifactStemFor(dir, stream);
+    if (current) stems.add(current);
+    if (stream) {
+      const legacy = streamSlug({ id: stream.id, title: stream.title, streamer: stream.streamer });
+      if (legacy) stems.add(legacy);
+    }
+    // The folder's own basename is a candidate even when the record does not point at it:
+    // it covers a project whose files were written under the new scheme but whose recorded
+    // projectDir is momentarily unreadable.
+    const base = dir.replace(/^.*[\\/]/, "");
+    if (base.length > 0) stems.add(base);
+    return [...stems];
+  }
+
   private async scanArtifacts(streamId: string): Promise<ArtifactDirScan | null> {
     const dir = await this.artifactDir(streamId);
     if (!dir) return null;
     try {
       const names = await this.fs.listFiles(dir);
       const stream = await this.streams.findById(streamId);
-      return scanArtifactNames(dir, names, stream ? streamSlug(stream) : null);
+      // The stem only PREFERS an exact filename here; role identification falls back to the
+      // role suffix, so a project whose stem is unknown is still scanned correctly.
+      return scanArtifactNames(dir, names, this.artifactStemFor(dir, stream) || null);
     } catch {
       return null;
     }
@@ -140,19 +186,25 @@ export class MediaActionsUseCase {
 
   private async artifactDir(streamId: string): Promise<string | null> {
     const dl = await this.orchestrator.getState(streamId);
+    // The project's RECORDED folder comes first: it is the only source that knows where the
+    // media lives when the files are gone from view (an unmounted drive, a moved folder), and
+    // it is what makes a stale path recoverable rather than silently creating a new folder
+    // somewhere else.
+    const stream = await this.streams.findById(streamId);
+    if (stream?.projectDir && await this.fs.exists(stream.projectDir)) return stream.projectDir;
     // Every candidate is stat-checked: a path recorded in state can be stale
     // (the file was deleted), and deriving a directory from a dead path makes
     // every later delete a silent no-op.
     for (const candidate of [dl.proxyPath, dl.proxyMp4, dl.hqPath, dl.hqMp4, dl.chatPath]) {
       if (!candidate) continue;
-      const dir = candidate.replace(/\/[^/]+$/, "");
+      const dir = candidate.replace(/[\\/][^\\/]+$/, "");
       if (await this.fs.exists(dir)) return dir;
     }
     const raw = await this.metadata.get(streamId, "transcript_srt");
     if (raw) {
       try {
         const path = (JSON.parse(raw) as { path: string }).path;
-        return path.replace(/\/[^/]+$/, "");
+        return path.replace(/[\\/][^\\/]+$/, "");
       } catch {
         // fall through to the cache-dir default
       }
@@ -196,12 +248,9 @@ export class MediaActionsUseCase {
       ];
       const streamForSlug = await this.streams.findById(streamId);
       if (streamForSlug) {
-        const slug = streamSlug({
-          id: streamId,
-          title: streamForSlug.title,
-          streamer: streamForSlug.streamer,
-        });
-        names.push(artifactName("video", slug), artifactName("video-index", slug));
+        for (const stem of this.candidateStems(dir, streamForSlug)) {
+          names.push(artifactName("video", stem), artifactName("video-index", stem));
+        }
       }
       for (const name of names) {
         const p = `${dir}/${name}`;
@@ -274,12 +323,9 @@ export class MediaActionsUseCase {
     const candidates = [...LEGACY_NAMES.proxy, ...LEGACY_NAMES["proxy-index"]];
     const streamForSlug = await this.streams.findById(streamId);
     if (streamForSlug) {
-      const slug = streamSlug({
-        id: streamId,
-        title: streamForSlug.title,
-        streamer: streamForSlug.streamer,
-      });
-      candidates.push(artifactName("proxy", slug), artifactName("proxy-index", slug));
+      for (const stem of this.candidateStems(dir, streamForSlug)) {
+        candidates.push(artifactName("proxy", stem), artifactName("proxy-index", stem));
+      }
     }
     let removed = false;
     for (const name of candidates) {
@@ -372,7 +418,10 @@ export class MediaActionsUseCase {
    * directory is the only honest delete.
    */
   async purgeArtifacts(streamId: string): Promise<{ bytes: number }> {
-    const dir = `${this.cacheDir}/vods/${streamId}`;
+    // The project's own folder when it has one, else the pre-0.5.0 layout. Deleting the
+    // wrong one leaves every downloaded gigabyte on disk.
+    const stream = await this.streams.findById(streamId);
+    const dir = stream?.projectDir ?? `${this.cacheDir}/vods/${streamId}`;
     let bytes = 0;
     try {
       for await (const entry of Deno.readDir(dir)) {
@@ -407,11 +456,9 @@ export class MediaActionsUseCase {
     const names = [...LEGACY_NAMES.chat];
     const stream = await this.streams.findById(streamId);
     if (stream) {
-      names.push(artifactName("chat", streamSlug({
-        id: streamId,
-        title: stream.title,
-        streamer: stream.streamer,
-      })));
+      for (const stem of this.candidateStems(dir, stream)) {
+        names.push(artifactName("chat", stem));
+      }
     }
     // Whatever the state or the record actually points at, wherever it lives — a
     // folder import references the user's own directory, which is not `dir`.
@@ -463,9 +510,10 @@ export class MediaActionsUseCase {
 
     let dir = await this.artifactDir(opts.streamId);
     if (!dir) {
-      // Fresh progressive import with no downloaded media yet — create the
-      // canonical cache dir so the piece lands where imports expect it.
-      const fresh = `${this.cacheDir}/vods/${opts.streamId}`;
+      // No media on disk yet. Use the project's RECORDED folder when it has one (a fresh
+      // import has already created it), else the app's cache — never a re-derived name, or
+      // the piece would land in a folder the project does not know about.
+      const fresh = stream.projectDir ?? `${this.cacheDir}/vods/${opts.streamId}`;
       await this.fs.ensureDir(fresh);
       dir = fresh;
     }
@@ -491,11 +539,7 @@ export class MediaActionsUseCase {
         destDir: dir,
         kind: opts.kind,
         vodId,
-        slug: streamSlug({
-          id: opts.streamId,
-          title: stream.title ?? null,
-          streamer: stream.streamer ?? null,
-        }),
+        slug: this.artifactStemFor(dir, stream),
         quality: quality ?? undefined,
         signal: controller.signal,
       });

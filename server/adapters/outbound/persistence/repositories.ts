@@ -25,6 +25,7 @@ function rowToStream(r: typeof schema.streams.$inferSelect): Stream {
     duration: r.duration,
     createdAt: r.created_at,
     status: r.status as Stream["status"],
+    projectDir: r.project_dir ?? null,
   };
 }
 
@@ -86,6 +87,7 @@ export class SqliteStreamRepository implements StreamRepository {
       duration: stream.duration,
       created_at: stream.createdAt,
       status: stream.status,
+      project_dir: stream.projectDir ?? null,
     }).run();
   }
 
@@ -115,6 +117,7 @@ export class SqliteStreamRepository implements StreamRepository {
       game: stream.game,
       duration: stream.duration,
       status: stream.status,
+      project_dir: stream.projectDir ?? null,
     }).where(eq(schema.streams.id, stream.id)).run();
   }
 

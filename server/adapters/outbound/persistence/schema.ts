@@ -12,6 +12,8 @@ export const streams = sqliteTable("streams", {
   duration: real("duration"),
   created_at: text("created_at").notNull(),
   status: text("status").notNull().default("pending"),
+  /** The project's folder, as recorded. NULL = not recorded yet (pre-0.5.0 rows). */
+  project_dir: text("project_dir"),
 });
 
 export const jobs = sqliteTable("jobs", {

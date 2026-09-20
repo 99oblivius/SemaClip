@@ -20,8 +20,10 @@ import type {
   ExportClipUseCase,
   ManageQueueUseCase,
   SettingsUseCase,
+  SetProjectLocationUseCase,
 } from "@/application/use-cases/mod.ts";
 import type { Axis, StreamStatus } from "shared/types";
+import type { FolderPickerPort } from "@/application/ports/folder-picker.ts";
 import type { DownloadState as DownloadStateType } from "@/adapters/outbound/vod/download-orchestrator.ts";
 import type { EventBus, StreamMetadataRepository, StreamStorage, VodDownloadPort } from "@/application/ports/outbound.ts";
 import type { SqliteExportPresetRepository } from "@/adapters/outbound/persistence/repositories.ts";
@@ -100,6 +102,10 @@ export interface HttpDeps {
   deleteStream: DeleteStreamUseCase;
   updateStream: UpdateStreamUseCase;
   attachChat: AttachChatUseCase;
+  /** Point a project at a different folder ("Change Location"). */
+  setProjectLocation: SetProjectLocationUseCase;
+  /** The OS folder chooser (zenity/yad on Linux, the modern shell dialog on Windows). */
+  folderPicker: FolderPickerPort;
   startJob: StartJobUseCase;
   cancelJob: CancelJobUseCase;
   listJobs: ListJobsUseCase;
@@ -116,6 +122,8 @@ export interface HttpDeps {
   tools: ToolRegistry;
   downloadState: (streamId: string) => Promise<DownloadStateType>;
   downloadRevision: (streamId: string) => number;
+  /** The full-VOD queue's own view (who is running, who is waiting, in what order). */
+  downloadQueue: () => { running: string | null; waiting: string[] };
   /** Record a view change that has no state write (artifact deletion). */
   touchDownload: (streamId: string) => void;
   /** Remove a project's downloaded media directory. */
@@ -211,6 +219,10 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   // those local derivations were the source of the reported inconsistencies.
   app.get("/api/downloads", async (c) => {
     const streams = await deps.listStreams.execute();
+    // ONE snapshot for the whole response: the queue owns order, so every view is composed
+    // against the same instant. Asking per stream could show two projects claiming position 1.
+    const queue = deps.downloadQueue();
+    const queueTotal = queue.waiting.length + (queue.running ? 1 : 0);
     const views = await Promise.all(streams.map(async (stream) => {
       const [state, markersRaw] = await Promise.all([
         deps.downloadState(stream.id),
@@ -225,12 +237,35 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
           markers = null;
         }
       }
+      // Reachability is measured HERE, on every read, because this is the layer that can
+      // touch the filesystem and this is the request the UI already refreshes on. It is
+      // three-valued on purpose: a project that records no folder is not "missing" (it may
+      // be empty), so only a recorded-but-absent folder reports false. Measured per read
+      // also means a drive that appears or disappears is picked up by the next poll — the
+      // same mechanism that makes deletions and completions appear without a refresh.
+      let reachable: boolean | null = null;
+      if (stream.projectDir) {
+        reachable = await Deno.stat(stream.projectDir).then(() => true).catch(() => false);
+      }
+      const waitingAt = queue.waiting.indexOf(stream.id);
+      // THE QUEUE IS THE ONE OWNER of "this project is waiting". The phase is composed here
+      // rather than written into the download state, because a queued stream is deliberately
+      // not a live run (nothing is being written) — so `getState()` legitimately serves the
+      // persisted state, and a second mechanism trying to mark it queued there produced a
+      // project that read `phase: idle, active: false` while it was genuinely queued. That
+      // made `needsAttention` false, so the Library rendered no container for it at all and
+      // the queue position was invisible to the user.
+      const viewState = waitingAt === -1 ? state : { ...state, phase: "queued" as const };
       return projectDownloadView({
         streamId: stream.id,
-        state,
+        state: viewState,
         markers,
         hasSource: Boolean(stream.sourceUrl),
         revision: deps.downloadRevision(stream.id),
+        reachable,
+        // Position within the WAITING list (1-based), so "1 of 2 in queue" means one download
+        // is ahead of this project.
+        queue: waitingAt === -1 ? null : { position: waitingAt + 1, total: queueTotal },
       });
     }));
     return c.json({ views, revision: deps.downloadRevision("__global__") });
@@ -373,6 +408,48 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     const body = await c.req.json();
     const stream = await deps.updateStream.execute(c.req.param("id"), body);
     return c.json(stream);
+  });
+
+  /**
+   * Point a project at a different folder ("Change Location").
+   *
+   * The path may come from the OS folder picker or be typed. It is NOT created when missing:
+   * "change location" means "the files are here", so an absent directory is a refusal with the
+   * reason — creating it would report success while pointing the project at an empty folder.
+   */
+  app.post("/api/streams/:id/location", async (c) => {
+    const body = await c.req.json().catch(() => ({})) as { dir?: string };
+    if (typeof body.dir !== "string" || body.dir.trim().length === 0) {
+      return c.json({ error: "dir is required" }, 400);
+    }
+    try {
+      const result = await deps.setProjectLocation.execute(c.req.param("id"), body.dir);
+      deps.touchDownload(c.req.param("id"));
+      return c.json({
+        stream: result.stream,
+        dir: result.dir,
+        repointed: result.repointed,
+        missing: result.missing,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // A running download is a conflict, a bad path is a bad request — the UI reports both.
+      return c.json({ error: msg }, /running/i.test(msg) ? 409 : 400);
+    }
+  });
+
+  /** Open the OS folder chooser and return the chosen path (or nothing, on cancel). */
+  app.post("/api/system/pick-folder", async (c) => {
+    const body = await c.req.json().catch(() => ({})) as { title?: string; initialDir?: string | null };
+    try {
+      const result = await deps.folderPicker.pick({
+        title: body.title ?? "Choose a folder",
+        initialDir: body.initialDir ?? null,
+      });
+      return c.json(result, result.error ? 500 : 200);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
   });
 
   // ── Jobs ──

@@ -4,7 +4,8 @@
   import Icon from '$lib/components/Icon.svelte';
   import DownloadProgress from '$lib/components/DownloadProgress.svelte';
   import { DOWNLOADS_KEY, downloadsQuery, viewFor, markDownloadsChanged } from '$lib/api/downloads';
-  import { needsAttention } from '$lib/api/download';
+  import { needsAttention, isUnreachable } from '$lib/api/download';
+  import ProjectSettings from '$lib/components/ProjectSettings.svelte';
   import { fadeIn, staggerIn, hoverLift } from '$lib/actions/gsap';
   import type { Stream, Job, ImportByUrlInput, ImportByFileInput } from '$shared/types';
   import type { QualityInfo } from '$lib/api/download';
@@ -447,7 +448,12 @@
         <h2 class="mb-1 font-mono text-xs uppercase tracking-wider text-ash-dim">Recent</h2>
         <div class="flex flex-col gap-1" use:staggerIn>
           {#each filteredStreams as stream (stream.id)}
-            <div class="flex items-center gap-3 rounded-md border border-transparent bg-surface px-4 py-3 transition-colors hover:border-border-strong hover:bg-surface-2">
+            {@const unreachable = isUnreachable(viewFor(downloads.data?.views, stream.id))}
+            <div
+              class="flex items-center gap-3 rounded-md border bg-surface px-4 py-3 transition-colors hover:bg-surface-2
+              {unreachable ? 'border-warning/40 stripe-unreachable' : 'border-transparent hover:border-border-strong'}"
+              title={unreachable ? 'This project\'s folder is not there — the drive may be unmounted, or the folder moved. Use Change Location in the settings panel.' : undefined}
+            >
               <button class="flex flex-1 items-center gap-3 text-left" onclick={() => openStream(stream.id)} use:hoverLift>
                 <div class="flex min-w-0 flex-1 flex-col gap-0.5">
                   <span class="truncate text-sm font-medium text-ink">{stream.title ?? 'Untitled Stream'}</span>
@@ -456,7 +462,15 @@
                   </span>
                 </div>
                 <div class="flex items-center gap-2">
-                  {#if stream.status === 'processing'}
+                  {#if unreachable}
+                    <!-- The one thing this project needs is its location, so the chip and the
+                         action sit together. The panel is reachable from HERE as well as from
+                         Review, because an unreachable project is exactly the one you cannot
+                         usefully open. -->
+                    <span class="flex items-center gap-1 font-mono text-xs text-warning">
+                      <Icon name="alert" size={12} /> path not found
+                    </span>
+                  {:else if stream.status === 'processing'}
                     <span class="flex items-center gap-1 font-mono text-xs text-warning"><Icon name="cpu" size={13} /> processing</span>
                   {:else if stream.status === 'completed'}
                     <span class="font-mono text-xs text-success">✓</span>
@@ -467,15 +481,19 @@
                        labels track reality live: a download finishing, a file deleted or
                        dragged into the folder all converge here without a refresh. Hidden
                        while an artifact is still downloading — its absence is not yet a
-                       fact. -->
-                  {#if missingArtifacts(stream.id).chat}
+                       fact. Suppressed entirely for an unreachable project: every artifact
+                       reads absent there, and "no chat · no video" beside "path not found"
+                       says nothing that is not already explained. -->
+                  {#if !unreachable && missingArtifacts(stream.id).chat}
                     <span class="font-mono text-xs text-ash-dim">no chat</span>
                   {/if}
-                  {#if missingArtifacts(stream.id).video}
+                  {#if !unreachable && missingArtifacts(stream.id).video}
                     <span class="font-mono text-xs text-ash-dim">no video</span>
                   {/if}
                 </div>
               </button>
+              <!-- Outside the row button so a press here cannot also open the project. -->
+              <ProjectSettings {stream} />
             </div>
           {/each}
         </div>

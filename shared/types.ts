@@ -28,6 +28,17 @@ export interface Stream {
   duration: number | null; // seconds
   createdAt: string; // ISO
   status: StreamStatus;
+  /**
+   * The folder this project's media lives in, as recorded when it was created (or when the
+   * user pointed it somewhere else).
+   *
+   * It must be recorded because it cannot be re-derived: the folder is named from the VOD's
+   * own metadata plus a collision suffix, and its LOCATION is the user's choice — the VOD
+   * directory setting, or any drive they moved the project to. `null` means "not recorded
+   * yet" (a project created before the field existed): its location resolves from the media
+   * paths on the record, and the first reconcile persists what it found.
+   */
+  projectDir: string | null;
 }
 
 export interface Job {

@@ -119,6 +119,30 @@ export const apiClient = {
   updateStream: (id: string, patch: Partial<Pick<Stream, 'title' | 'streamer' | 'game' | 'vodPath' | 'chatPath' | 'sourceUrl'>>) =>
     api<Stream>(`/streams/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
 
+  /**
+   * Point a project at a different folder.
+   *
+   * The path is NOT created when it is missing: an absent directory is a refusal with a
+   * reason, because "change location" means "the files are here".
+   */
+  setProjectLocation: (streamId: string, dir: string) =>
+    api<{ stream: Stream; dir: string; repointed: number; missing: string[] }>(
+      `/streams/${streamId}/location`,
+      { method: 'POST', body: JSON.stringify({ dir }) },
+    ),
+
+  /**
+   * Open the OS folder chooser and return the chosen path.
+   *
+   * `cancelled` is a real answer, not an error: the user declining is not a failure, and the
+   * caller must not show an error for it. `error` is set only when no chooser could run.
+   */
+  pickFolder: (opts?: { title?: string; initialDir?: string | null }) =>
+    api<{ path: string | null; source: string; cancelled: boolean; error: string | null }>(
+      '/system/pick-folder',
+      { method: 'POST', body: JSON.stringify(opts ?? {}) },
+    ),
+
   // ── Jobs ──
   listJobs: () =>
     api<Job[]>('/jobs'),

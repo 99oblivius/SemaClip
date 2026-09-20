@@ -38,7 +38,13 @@ import {
   ExportClipUseCase,
   ManageQueueUseCase,
   SettingsUseCase,
+  SetProjectLocationUseCase,
 } from "@/application/use-cases/mod.ts";
+import { DownloadQueue } from "@/application/use-cases/DownloadQueue.ts";
+import type { FolderPickerPort } from "@/application/ports/folder-picker.ts";
+import { LinuxFolderPicker } from "@/adapters/outbound/platform/folder-picker-linux.ts";
+import { WindowsFolderPicker } from "@/adapters/outbound/platform/folder-picker-windows.ts";
+import { sidecarDir } from "@/adapters/outbound/platform/sidecar.ts";
 import type { FileSystemPort } from "@/application/ports/outbound.ts";
 import type { HttpDeps } from "@/adapters/inbound/http/routes.ts";
 
@@ -144,7 +150,22 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
   const importByFile = new ImportStreamByFileUseCase(streamRepo, fs, ffmpeg);
   const downloadOrchestrator = new DownloadOrchestrator(metadataRepo, config.tools, streamRepo);
   const mediaActions = new MediaActionsUseCase(streamRepo, metadataRepo, fs, downloadOrchestrator, config.cacheDir, bus);
-  const importByUrl = new ImportStreamByUrlUseCase(streamRepo, vodDownloader, fs, bus, config.cacheDir, downloadOrchestrator);
+  // ONE queue for full VOD downloads: the import use-case enqueues into it, and the downloads
+  // route reads its snapshot for positions. Two queues would be two answers to "what is next".
+  const downloadQueue = new DownloadQueue();
+  // The VOD directory is read per import (not captured), so changing the setting applies to
+  // the next download without a restart.
+  const importByUrl = new ImportStreamByUrlUseCase(
+    streamRepo,
+    vodDownloader,
+    fs,
+    bus,
+    config.cacheDir,
+    downloadOrchestrator,
+    undefined,
+    async () => (await settings.get()).vodDir,
+    downloadQueue,
+  );
   const deleteStream = new DeleteStreamUseCase(streamRepo, jobRepo, metadataRepo, streamStorage);
   const updateStream = new UpdateStreamUseCase(streamRepo);
   const attachChat = new AttachChatUseCase(streamRepo, fs);
@@ -165,13 +186,19 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
   const streamReconciler = new StreamReconciler(streamRepo, fs, config.cacheDir);
   const getStream = new GetStreamUseCase(streamRepo, streamReconciler);
   const listStreams = new ListStreamsUseCase(streamRepo, streamReconciler);
+  const setProjectLocation = new SetProjectLocationUseCase(streamRepo, fs, downloadOrchestrator, bus);
+  // The OS folder chooser. Per-platform because the runtime exposes no dialog API at all
+  // (see application/ports/folder-picker.ts for the measurements).
+  const folderPicker: FolderPickerPort = Deno.build.os === "windows"
+    ? new WindowsFolderPicker(sidecarDir())
+    : new LinuxFolderPicker();
   const listClips = new ListClipsUseCase(clipRepo);
   const getClip = new GetClipUseCase(clipRepo);
   const rejectClip = new RejectClipUseCase(clipRepo);
   const updateClip = new UpdateClipUseCase(clipRepo);
   const exportClip = new ExportClipUseCase(clipRepo, streamRepo, ffmpeg, fs, config.exportDir, metadataRepo, downloadOrchestrator);
   const manageQueue = new ManageQueueUseCase(jobRepo);
-  const settings = new SettingsUseCase(new SqliteSettingsRepository(db), bus);
+  const settings = new SettingsUseCase(new SqliteSettingsRepository(db), bus, `${config.cacheDir}/vods`);
   const presets = new SqliteExportPresetRepository(db);
   // Seed the spec's default presets once (idempotent by fixed ids).
   const DEFAULT_PRESETS = [
@@ -234,6 +261,8 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
       deleteStream,
       updateStream,
       attachChat,
+      setProjectLocation,
+      folderPicker,
       startJob,
       cancelJob,
       listJobs,
@@ -248,6 +277,7 @@ export async function buildContainer(config: AppConfig): Promise<AppContainer> {
       vod: vodDownloader,
       tools: config.tools,
       downloadState: (id: string) => downloadOrchestrator.getState(id),
+      downloadQueue: () => downloadQueue.snapshot(),
       downloadRevision: (id: string) => id === "__global__" ? downloadOrchestrator.globalRev : downloadOrchestrator.revision(id),
       touchDownload: (id: string) => downloadOrchestrator.touch(id),
       purgeArtifacts: (id: string) => mediaActions.purgeArtifacts(id),

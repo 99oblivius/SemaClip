@@ -71,6 +71,20 @@
   // presence of a URL.
   const downloads = downloadsQuery();
   const localMedia = $derived(viewFor(downloads.data?.views, streamId)?.media ?? null);
+  /** The project's own view: what says whether its folder is reachable right now. */
+  const projectView = $derived(viewFor(downloads.data?.views, streamId));
+  /**
+   * The project's folder is gone (an unmounted drive, a moved folder).
+   *
+   * Everything below the header is blocked while this is true, because every action there
+   * would fail against a missing file — exports, clip edits, playback. The HEADER stays live
+   * so the settings panel (Change Location) can be reached to fix it: blocking the only route
+   * to the repair would trap the user. Measured server-side on every read, so plugging the
+   * drive back in clears this without a refresh.
+   */
+  const unreachable = $derived(
+    viewFor(downloads.data?.views, streamId)?.reachable === false,
+  );
   /**
    * What the player may play: LOCAL MEDIA ONLY, never the VOD URL.
    *
@@ -451,8 +465,10 @@
         <ProjectSettings {stream} />
       {/if}
       <button
-        class="flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent-hover"
+        class="flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
         onclick={exportAllClips}
+        disabled={unreachable}
+        title={unreachable ? 'This project\'s folder is not reachable — use Project settings → Change Location' : 'Export all clips'}
         aria-label="Export all clips"
       >
         <Icon name="scissors" size={14} />
@@ -461,7 +477,16 @@
     </div>
   </div>
 
-  <div class="flex flex-1 gap-3 overflow-hidden">
+  <!--
+    The project's folder is gone: block everything below the header.
+
+    An overlay rather than a `pointer-events` toggle on each child, because the rule must hold
+    for controls nobody enumerated — the player, the timeline's drag handles, the candidate
+    queue, the chat. The HEADER sits outside this wrapper, so the settings panel and its
+    Change Location button stay reachable; the panel itself renders at z-40, above this layer.
+  -->
+  <div class="relative flex flex-1 flex-col overflow-hidden">
+  <div class="flex flex-1 gap-3 overflow-hidden {unreachable ? 'pointer-events-none select-none' : ''}">
     <!-- Left: video + timeline + clip detail -->
     <div class="flex flex-1 flex-col gap-3">
       <!-- Video player -->
@@ -539,6 +564,34 @@
       reviewed={reviewedLocal}
       onSelectClip={(i) => { currentClipIndex = i; if (visibleClips[i]) jumpToClip(visibleClips[i]); }}
     />
+  </div>
+
+  <!--
+    The explanation, ON TOP of the blocked content: a dimming veil that also says what is
+    wrong and where to fix it. It blocks input itself (the layer below is pointer-events-none
+    AND this covers it), and it sits under the settings panel's z-40 so the Change Location
+    control is never covered by it.
+  -->
+  {#if unreachable}
+    <div
+      class="pointer-events-auto absolute inset-0 z-30 flex items-start justify-center bg-black/55 pt-16"
+      role="alert"
+      aria-live="polite"
+    >
+      <div class="max-w-md rounded-md border border-warning/40 bg-surface px-4 py-3 shadow-lg">
+        <p class="flex items-center gap-2 text-sm text-ink">
+          <Icon name="alert" size={15} class="text-warning" />
+          This project's folder is not there.
+        </p>
+        <p class="mt-1.5 text-xs text-ash">
+          The drive may be unmounted, or the folder was moved. Everything here is blocked until
+          it is found — use <span class="text-ink">Project settings → Change Location</span>
+          {#if projectView?.streamId}<span class="text-ash-dim"> (top right)</span>{/if} to point
+          this project at the folder again.
+        </p>
+      </div>
+    </div>
+  {/if}
   </div>
 </div>
 

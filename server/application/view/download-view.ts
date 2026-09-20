@@ -52,9 +52,26 @@ export interface ArtifactView {
 export interface DownloadView {
   streamId: string;
   /** "starting" is a download that has been registered and is about to run. */
-  phase: "starting" | "idle" | "running" | "done" | "failed";
+  phase: "queued" | "starting" | "idle" | "running" | "done" | "failed";
   /** ANY artifact running — the single "show progress" flag. */
   active: boolean;
+  /**
+   * Whether the project's folder is reachable right now, or `null` when that is not knowable.
+   *
+   * THREE states, and the third is what makes this usable:
+   *   - `false` — the project RECORDS a folder and it is not there (an unmounted drive, a
+   *     moved or renamed folder). The UI reports it and blocks the actions that would fail;
+   *     the settings panel stays reachable so the user can point it somewhere else.
+   *   - `true` — the recorded folder is there.
+   *   - `null` — the project records NO folder (created before the field existed, and nothing
+   *     resolvable was found). This must NOT be reported as missing: such a project may
+   *     simply be empty, and flagging it would stripe a project that is perfectly fine. The
+   *     server resolves legacy projects from their media paths, so `null` means "ask the
+   *     artifacts, not the folder".
+   */
+  reachable: boolean | null;
+  /** Where this project is in the full-VOD download queue, when it is waiting. */
+  queue: { position: number; total: number } | null;
   /** Server-composed status line for the container header. */
   label: string;
   overall: { percent: number; etaSec: number | null };
@@ -93,7 +110,18 @@ export function composeLabel(view: {
   phase: DownloadView["phase"];
   active: boolean;
   artifacts: ArtifactView[];
+  /** False only when the project's folder is known to be missing. */
+  reachable?: boolean | null;
+  /** Set while this project waits its turn in the download queue. */
+  queue?: { position: number; total: number } | null;
 }): string {
+  // A missing folder outranks everything else: it explains why nothing here can act, and it
+  // is the one condition the user has to fix in settings.
+  if (view.reachable === false) return "folder not reachable";
+  // Waiting its turn: say WHICH turn, because "queued" alone does not answer "how long".
+  // One at a time is the rule, so a position of 1 means the project it is behind.
+  if (view.queue) return `waiting — ${view.queue.position} of ${view.queue.total} in queue`;
+  if (view.phase === "queued") return "waiting in queue";
   if (view.phase === "done") return "download complete";
   if (view.phase === "idle") return "";
   if (view.phase === "failed") {

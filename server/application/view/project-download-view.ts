@@ -142,6 +142,17 @@ export interface ProjectInput {
   hasSource: boolean;
   /** Monotonic revision for change detection. */
   revision: number;
+  /**
+   * Whether the project's recorded folder exists, as measured by the caller (the only layer
+   * with filesystem access). `null` when the project records no folder at all — see
+   * `DownloadView.reachable` for why that is not the same as "missing".
+   */
+  reachable?: boolean | null;
+  /**
+   * This project's place in the full-VOD download queue, from the QUEUE's own snapshot — the
+   * queue owns order, so nothing re-derives "how many are ahead of me" here.
+   */
+  queue?: { position: number; total: number } | null;
 }
 
 export function projectDownloadView(input: ProjectInput): DownloadView {
@@ -205,11 +216,16 @@ export function projectDownloadView(input: ProjectInput): DownloadView {
   const active =
     state.phase === "running" ||
     state.phase === "starting" ||
+    // Queued is ACTIVE: the project is work the app has accepted and not finished, so it
+    // belongs in the Library's progress area. It is not "running" — nothing is transferring.
+    state.phase === "queued" ||
     artifacts.some((a) => a.status === "running");
   const view: DownloadView = {
     streamId: input.streamId,
     phase: state.phase,
     active,
+    reachable: input.reachable ?? null,
+    queue: input.queue ?? null,
     label: "",
     overall: { percent: state.overall.percent, etaSec: state.overall.etaSec },
     artifacts,
@@ -218,6 +234,6 @@ export function projectDownloadView(input: ProjectInput): DownloadView {
     revision: input.revision,
     updatedAt: new Date().toISOString(),
   };
-  view.label = composeLabel({ phase: view.phase, active, artifacts });
+  view.label = composeLabel({ phase: view.phase, active, artifacts, reachable: view.reachable, queue: view.queue });
   return view;
 }
