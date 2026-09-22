@@ -68,13 +68,25 @@ Deno.test("the extension follows the CONTAINER for all three", () => {
 
 Deno.test("the export SUBSHELF is the project-folder name, built from the stream", () => {
   // The same convention the project folders use, so the export tree reads like the project tree.
+  const createdAt = "2026-09-22T19:02:23.991Z";
   const folder = vodFolderName({
     id: "ba173ffc-26a2-4c05-bd5e-fbd651452caf",
     streamer: "SoulCamera",
     game: "ELDEN RING NIGHTREIGN",
-    createdAt: "2026-09-22T19:02:23.991Z",
+    createdAt,
   });
-  assertEquals(folder, "soulcamera-elden-ring-nightreign-2026-09-22-2102");
+  // The date in a folder name is LOCAL time, deliberately: the folder is meant to read as the
+  // streamer's own day and hour, so the expectation has to be derived the same way rather than
+  // spelled out. A hardcoded local rendering is a CI failure waiting to happen — CI runs in UTC
+  // while the dev machine does not (measured: this exact assertion failed on github's runner only,
+  // `-1902` against `+2102`), and `Deno.env.set("TZ")` cannot pin it because V8 caches the zone.
+  const d = new Date(createdAt);
+  const p = (n: number) => String(n).padStart(2, "0");
+  const localDay = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  assertEquals(folder, `soulcamera-elden-ring-nightreign-${localDay}-${p(d.getHours())}${p(d.getMinutes())}`);
+  // What the folder name must be independent of zone: slugged, and anchored on that local day.
+  assertStringIncludes(folder, "soulcamera-elden-ring-nightreign-");
+  assertStringIncludes(folder, localDay);
   // Parts that sanitise to nothing are OMITTED, not left as an empty segment.
   const partial = vodFolderName({ id: "abc12345", streamer: "SoulCamera", game: null, createdAt: "2026-09-22T19:02:00Z" });
   assert(!partial.includes("--"), "an absent part must not leave a doubled separator");
