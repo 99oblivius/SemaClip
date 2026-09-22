@@ -57,6 +57,52 @@ jobs:
           sys.exit(bad)
           PY
 
+  # The version scheme is exactly `{yy}.{patch}` and the commit count is unbounded.
+  #
+  # Measured: the script carried a three-part overflow branch (`26.255.<patch>`) as an
+  # MSI ProductVersion escape hatch. The .msi was then retired as an artifact, so the
+  # branch guarded a constraint that no longer exists — and it would have fired at
+  # commit 256, one release away. A wrong version is the worst kind of defect here: it
+  # is baked into the binary, compared against the manifest by the updater, and cannot
+  # be corrected after the fact. Pinned so the third field cannot come back.
+  version:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # version.sh counts commits this year; a shallow clone counts from the clone
+          # point and silently produces a wrong (smaller) number.
+          fetch-depth: 0
+      - name: The version is {yy}.{patch} with no third field
+        run: |
+          set -euo pipefail
+          out="$(./scripts/version.sh --check)"
+          version="$(printf '%s\n' "$out" | sed -n 's/^version=//p')"
+          [ -n "$version" ] || { echo "::error::version.sh printed no version"; exit 1; }
+          case "$version" in
+            *[!0-9.]*|*.*.*|.*|*.)
+              echo "::error::version '$version' is not {yy}.{patch} — the scheme is exactly two parts"
+              exit 1 ;;
+          esac
+          echo "version scheme ok: $version"
+      - name: The 255 overflow branch is gone
+        run: |
+          set -euo pipefail
+          # Assert the ABSENCE, but check EXECUTABLE lines only: a naive grep for
+          # "26.255" matches the comment that explains why it was removed, so the gate
+          # would fail on every push against its own documentation. Measured while
+          # writing this — the first version of this step did exactly that.
+          code="$(grep -vE '^[[:space:]]*#' scripts/version.sh || true)"
+          if printf '%s\n' "$code" | grep -qE 'yy\}\.255|26\.255\.'; then
+            echo "::error::scripts/version.sh reintroduced the three-part overflow version"
+            exit 1
+          fi
+          # And assert the two-part derivation is present, so deleting the branch cannot
+          # silently become deleting the version.
+          printf '%s\n' "$code" | grep -qE '^version="\$\{yy\}\.\$\{patch\}"$' \
+            || { echo "::error::version.sh no longer derives {yy}.{patch}"; exit 1; }
+          echo "no three-part overflow branch present; {yy}.{patch} intact"
+
 # Runner image: PINNED, not `ubuntu-latest`.
 #
 # `ubuntu-latest` resolves to 24.04 today (measured in this workflow's own run logs) and 26.04 is

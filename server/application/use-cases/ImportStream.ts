@@ -385,7 +385,8 @@ export class ImportStreamByUrlUseCase {
     // Abort an in-flight run if one is live (best effort; the orphaned case
     // has no controller).
     this.cancelProgressive(streamId);
-    // Give the aborted fetches a beat to release file handles.
+    // Give the aborted fetches a beat to release file handles. The aborted run's own state write
+    // is suppressed (orchestrator `runAborted`), so the reset below cannot be resurrected.
     await new Promise((r) => setTimeout(r, 300));
 
     // Remove EVERY artifact this project may hold: the project-named files

@@ -379,12 +379,6 @@
     void videoEl.play();
   }
 
-  export function jumpToClipPeak(clip: Clip) {
-    if (!videoEl) return;
-    autoAdvanceClip = null;
-    seek(clip.peakTime);
-  }
-
   export function togglePlayExported() { togglePlay(); }
   export function seekRelativeExported(delta: number) { seekRelative(delta); }
   export function frameStepExported(delta: number) { frameStep(delta); }

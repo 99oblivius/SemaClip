@@ -104,6 +104,193 @@ then falsified by removing the single adopt statement (which reproduces the repo
 frontend build + tests green, and every mechanism exercised once through the real HTTP path on the
 owner's own projects (never on the live database — copies, restored afterwards).
 
+## Version scheme corrected (26.255)
+
+Before the next feature: the versioning was producing a three-part version (`26.255.256`), which the
+owner rejected. `yy` was a leftover Windows-Installer bound and **no `.msi` is built**, so the
+overflow branch was dead code; it is removed and the version is `v{yy}.{patch}` with `patch`
+(commits since Jan 1) unbounded. A CI gate in `check.yml` now asserts the two-part shape, checking
+executable lines only (the first gate version matched its own explanatory prose). Proved on a
+throwaway 256-commit repo: `26.256` new, `26.255.256` old, three parts refused.
+
+## Cancel fixed — stop, don't destroy (26.255)
+
+Reported by the owner while reviewing the browser build. Three defects, all confirmed by
+measurement (`tests/cancel-stops-run.test.ts`, plus a live HTTP check):
+
+1. **Cancel was wired to `DELETE /download`**, which sweeps the artifact directory — so pressing
+   Cancel destroyed the partial download it was cancelling ("deletes the proxy and chat as well").
+   Cancel now has its own verb (`POST /streams/:id/download/cancel`): stops both abort registers,
+   keeps every file. The DELETE remains the discard verb.
+2. **A cancelled run resurrected its own state** after the reset — `finalize()` wrote the run's
+   state over the reset, and `markRunLive(id, false)` then made the next read come off disk, so the
+   UI saw progress that "never stops". One choke point now suppresses every write from an
+   externally-aborted run (`runAborted` guards `persist` and `finalize`).
+3. **Deleting a project did not stop its download** — the record and directory went while the run
+   kept writing into them, and nothing was left to cancel it with. The route stops the download
+   first.
+
+Root cause of why it survived: `run()` called `downloadFmp4`/`resolveQualities` directly, bypassing
+the `net` seam, so the whole-download path had no test that could abort and re-read. The seam now
+covers both, and the test falsifies in both directions.
+
+## Phase 1 — manual clip creation (26.255)
+
+A clip that no engine found: drawn by hand at the playhead.
+
+1. **Migration 0.6.0** rebuilds `clips` so `job_id`, `axis` and `score` are nullable, re-creating
+   both indexes. Safe: no `FOREIGN KEY` is declared anywhere. **0.7.0** then adds `clips.title` for
+   the clip's NAME (an ALTER) — never `axis`, which is an engine enum that validation, filtering and
+   feedback all depend on.
+2. **Create route** `POST /api/streams/:id/clips` taking `{startTime, endTime?}`, resolving the end
+   server-side (next clip's start, else the VOD duration) and returning the created clip, which the
+   page then SELECTS.
+3. **Five icon buttons** in a frameless vertical rail on the clip-detail container's **left edge**
+   (the timeline keeps its full width): create (`N`), set start (`[`), set end (`]`), previous
+   (`J`), next (`K`). Bracket glyphs for in/out, since that is what the keys are. No Delete button —
+   Discard is the reject verb and having both said the same thing twice. Icon-only with hover names,
+   and every action also has a keybinding per the no-gating rule.
+4. **Null-safe everywhere** a clip is rendered or ranked: a dash instead of `0.00`, no fabricated
+   peak row, no SIGNALS column at all when there is no signal data, and a manual clip survives an
+   axis filter (it is not an axis result). The name field shows `title`, falling back to the axis,
+   falling back to `MANUAL` — with nothing prefilled from the axis.
+5. **Timeline draws TWO timestamps per clip, never three.** Every clip's range is filled and bounded
+   whether or not it is selected (the fill IS the duration; a bare tick makes a clip look lengthless),
+   the start line is the start, and the end line is drawn thicker so a glance separates them. Nothing
+   is derived from `peakTime`, which is a recorded fact that goes stale on trim — that stale field is
+   what read as a second, independent start line. Selection seeks to the clip's START for the same
+   reason, and the hover hit-test uses the range rather than the peak.
+6. **Thumbnails** (`GET /api/clips/:id/thumbnail`): extracted on demand from the proxy-first source,
+   cached as `{clipId}@{start}.jpg`, replaced rather than accumulated when the start moves, and
+   deleted when the clip is rejected.
+7. The playable-source ordering moved into `resolveMediaSource` so the player and the thumbnail route
+   cannot disagree — and so a folder-imported project (no download state at all) resolves its media.
+
+**Exit gate met**: **356 server tests** green, `deno check` clean, svelte-check 0 errors / 0
+warnings, frontend build + **12** frontend tests green, and the whole path driven live through real
+HTTP on an isolated data dir with a real video: create → computed end → null round-trip → JPEG
+thumbnail served then cached → trim produces a different frame leaving exactly one file → nine drag
+PATCHes still one file → reject removes that clip's frames only. Each new rule falsified by
+reverting it.
+
+**Not claimed**: the rail's appearance, icon sizing, hover titles, the bracket glyphs, the timeline
+fill and the rendered thumbnails are the owner's to GUI-verify — control state and HTTP behaviour are
+asserted, pixels are not. The rename path is asserted at the DB level only; it has not been driven
+end-to-end over HTTP.
+
+## Phase 2 — export page + profiles (IMPLEMENTED, uncommitted)
+
+The export feature the owner specified: the export list is DURABLE (references, never copies), the
+batch over it is DURABLE and RESUMABLE, and progress is reported per item AND across the whole batch.
+
+**Implemented and verified.** `v0.8.0` migration (`export_list` + `export_jobs`), repositories,
+`ExportQueue` use case, batch + list routes, WS topics, and the export page's progress panel. The
+encoder work: a pure `domain/export-profile.ts` (profile → ffmpeg args, 13 unit tests), `-progress
+pipe:1` parsing with a real abort seam, and a hardware-gated encoder that reports the backend that
+ACTUALLY produced the file.
+
+**Exit gate met**: **391 server tests** green (10 new in `migrations.test.ts`, 10 in
+`export-queue.test.ts`), `deno check` clean, svelte-check 0/0, frontend build + npm test green, and
+the whole path driven live over real HTTP with real ffmpeg and real restarts: list → enqueue →
+observed progress → cancel (partial deleted, completed kept, nothing still writing) → kill mid-batch
+→ resumed to 3 real files. **Migration verified against a WAL-safe copy of the owner's real
+database**: only `0.8.0` applied, 2 streams / 4 clips and the clip name preserved byte-identically,
+both tables usable, second open applied nothing, and the live DB left untouched at `0.7.0`.
+
+### Encoder settings (per codec, measured)
+
+Quality AND bitrate are part of the encoder options and are **manually editable per codec**, with the
+profile-tier defaults coming from measurement rather than taste. Every number below was taken on the
+reference host (RTX 4090, 1080p60, VMAF against a lossless reference); the full table is in the
+`semaclip-dev` skill's `references/codec-quality-profiles.md`.
+
+- **Encoder choice is per codec, defaulting on measurement.** H.264 defaults to the CPU (parity at
+  matched quality, universally decodable); **AV1 defaults to the GPU** (smaller at comparable quality
+  and ~3x the software encoder's speed). The user can override either way.
+- **The quality mapping is a BAND, not an offset.** Mapping AV1 via a constant `+16` was derived by
+  comparing AV1 against *libx264's* crf 23 — a cross-codec comparison, and wrong. Within each codec's
+  own scale, x264's band (crf 18–30) maps to `h264_nvenc` cq 26–38 (slope 1.0) while SVT-AV1's
+  (crf 28–45) maps to `av1_nvenc` cq 32–41 (**slope 0.53**), so a constant cannot work for AV1.
+- **Quality correlates with encode time and that is now data.** Measured x-realtime at 1080p60:
+  h264 5.2x, h265 2.2x, **vp9 0.8x** (slower than playback), svt-av1 2.0x, nvenc 6.2x. Each codec's
+  band carries a speed and the export UI states the cost of the current choice.
+- **Each band's `best` edge is where the curve flattens**, measured by marginal utility (VMAF per
+  1000kbps): h264 gains 5.70 going 30→26 but only **0.35** going 18→16. Above `best` a codec is
+  effectively lossless and more quality buys only bytes and seconds.
+- **The bitrate ceiling is per codec and opt-in**, with a measured suggestion per codec/resolution.
+  The automatic height-keyed ceiling was codec-blind and was compensating for the quality-scale bug.
+
+Two defects this work found and fixed, both of which produced a *valid-looking* wrong output:
+
+1. **AV1 hardware could never have worked.** `av1_nvenc` was missing from the upload-filter map, so
+   the lookup fell through to bare `hwupload`, which fails with "A hardware device reference is
+   required" — the export then fell back to the CPU while reporting success. Measured: `hwupload`
+   fails for BOTH nvenc encoders, `hwupload_cuda` works for both. The GPU probe was also single-codec
+   (`h264_nvenc` regardless of what was asked), which caused the same silent fallback.
+2. **The quality mapping was cross-scale** (above). At matched quality `h264_nvenc` is now **1.03x**
+   the CPU's file size, against 2.9x with the number forwarded.
+
+### What remains
+
+1. **The hardware-encode crossover (~10s) is an internal default**, not a visible setting. Measured:
+   nvenc is slower than the CPU below ~10s and faster above it. Open question whether to expose it.
+2. **Visual verification of the encoder settings, progress bar and stat line** is the owner's, per the
+   standing rule — control state, HTTP and the produced files are asserted; the pixels are not.
+3. **Cancel does not clear the downloaded CHAT.** Deliberate: chat is GPU-cost work and reusable
+   after a cancel, so clearing it would discard real compute. A one-line change if the owner wants it.
+4. **Phase 3 candidates** (not started, in the earlier plan): per-axis export naming from the
+   `nameTemplate` tokens, batch-level output-directory choice in the UI, and re-running a failed item.
+
+Highest risk remains hardware filter-graph compatibility, now MEASURED rather than assumed:
+`format=nv12,hwupload_cuda` is the working upload path, while the
+`hwdownload`→filter→`hwupload` round-trip fails with exit 218.
+
+**Honest limits.** The bands and speeds were measured on ONE host with one GPU; a machine with
+different hardware would probe to different encoders, and the `best`/`worst` edges are a 1080p60
+measurement applied at every resolution. The speeds for H.265 and VP9 hardware are `null` because no
+such encoder exists on the reference host — nothing was timed, so nothing is claimed. `h264_vaapi`'s
+speed is also `null`: it EXISTS here, but nothing was timed for it, and the earlier per-backend keying
+reported it at NVENC's 6.2x, which was a borrowed number presented as measured.
+
+**Live-verified encoder arms (this host, real exports through the HTTP API).** Named `h264_nvenc` →
+`backend: "h264_nvenc"`; named `h264_vaapi` → `backend: "h264_vaapi"` (no fallback in the log, so the
+iGPU genuinely encoded); named `libx264` → `backend: "cpu"`. The output file ffprobes as
+`h264 1280x720` + `aac`. P7's `/api/streams/:id/source-media` returned
+`h264, 3044 kbps, 1280x720, 60fps` matching ffprobe's own reading, and `null` for a missing file with a
+404 for an unknown stream.
+
+**Export page revamp — the owner's nine points (P1-P9).** P1 (real thumbnail in the preview), P6 (one
+filename renderer, filename centred in the row with the duration beside the name), P7 (Force Bitrate
+with real source-media semantics), P8 (tier is explicit state; a manual edit never re-matches a tier),
+P9 (the encoder picker lists the machine's own verified encoders per codec) and P2/P3/P4/P5 (a preset
+is always selected, presets are a managed list with save/duplicate/delete, controls no longer wait for
+a clip, Filename first with Encoder inside a collapsed Advanced, Export-all at the bottom of the list
+it acts on) are IMPLEMENTED. Server-side: `listEncodersFor`, `/api/system/encoders`,
+`/api/streams/:id/source-media`, `export_presets.origin` (migration 0.9.0) with a by-name delete
+refusal.
+
+**Owner's nine export-page corrections — IMPLEMENTED and live-verified.** Encoder explanatory text
+removed; the quality input moved in-line with its bar (the old separate row is what overflowed the
+container); presets now load (the legacy-blob read defect above) and a preset application drives EVERY
+control including the filename; the fabricated `{platform}` token and the hardcoded `-tiktok`/`-shorts`
+literals removed, with migration 0.10.0 fixing existing databases; Revert covers every section via a
+single shared writer; a format change overrides the bitrate and restores the user's own state on return;
+tiers are one-shot setters that carry measured per-tier bitrates and never stay selected; Export this
+clip moved to the top right; crop alignments removed as a concept.
+
+**Migrations 0.6.0-0.10.0 flattened into ONE migration (0.6.0).** Nothing after schema 0.5.0 has ever
+been published — `v26.252`/`v26.253` are the highest tags, and both carry the 0.5.0 migration set — so
+the five version numbers described working history rather than any user-reachable state. Statements kept
+in their original order and unedited; the end state is identical by construction. Verified by
+`0.5.0 → latest` end-to-end with the real rows a published seeder wrote (three presets with the legacy
+flat blob and the `-tiktok`/`-shorts` literals), the 0.6.0 REBUILD preserving every clip and stream row,
+and a read-back through the repository the export page uses. Both text guards falsified independently.
+
+**Not verified by the assistant:** every visual outcome of the export page — the encoder picker's
+rendered layout, the Force Bitrate toggle's hidden/enabled states, the quality tier highlight, the
+preview thumbnail's pixels. Control state and HTTP responses were asserted; the rendering is the
+user's to confirm.
+
 ## Standing rules
 - No phase starts before the previous exit gate is demonstrably met.
 - Anything that would fabricate success (stub returning victory) is a CI-blocking review reject.

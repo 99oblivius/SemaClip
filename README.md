@@ -8,7 +8,7 @@ SemaClip is a local-first desktop application that finds clip-worthy moments in 
 
 **Pre-alpha.** The app runs end to end — import a VOD, download it (chat + a scrub-able preview + full quality), review detected moments, edit captions, export — but features are missing and things break. The UI says so in its header bar. Current state and phase gates: [ROADMAP.md](ROADMAP.md). Functional design: [ARCHITECTURE.md](ARCHITECTURE.md). Release mechanics and CI: [docs/RELEASING.md](docs/RELEASING.md). Superseded v1 design docs are archived under [docs/archive/v1/](docs/archive/v1/).
 
-Versioning is `v{yy}.{patch}` (e.g. `v26.196`), where patch counts commits since Jan 1. The two-digit year is forced by Windows: an MSI ProductVersion packs as major(0-255).minor(0-255).build(0-65535), so a full CalVer year is unencodable. See [docs/RELEASING.md](docs/RELEASING.md).
+Versioning is `v{yy}.{patch}` (e.g. `v26.196`), where patch counts commits since Jan 1 and is unbounded — there are exactly two parts, always. The two-digit year comes from Windows: an MSI ProductVersion packs as major(0-255).minor(0-255).build(0-65535), so a full CalVer year is unencodable. See [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Getting started
 

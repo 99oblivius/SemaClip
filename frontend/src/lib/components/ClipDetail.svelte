@@ -2,6 +2,7 @@
   import SignalBar from './SignalBar.svelte';
   import Icon from './Icon.svelte';
   import CaptionEditor from './CaptionEditor.svelte';
+  import { untrack } from 'svelte';
   import type { Clip } from '$shared/types';
 
   interface Props {
@@ -11,10 +12,34 @@
     onPlay: () => void;
     onExport: () => void;
     onDiscard: () => void;
-    onAccept: () => void;
+    /** Persist a new name for this clip. */
+    onRename: (axis: string) => void;
   }
 
-  let { clip, clipIndex, streamId, onPlay, onExport, onDiscard, onAccept }: Props = $props();
+  let { clip, clipIndex, streamId, onPlay, onExport, onDiscard, onRename }: Props = $props();
+
+  /**
+   * The clip's NAME, held locally while it is being typed.
+   *
+   * `title` is the user's own label and is null until someone names the clip — so the placeholder
+   * shows for an unnamed clip instead of the word "manual". "manual" describes a KIND (no engine
+   * behind it), not a name, and a field pre-filled with it would be saved as the clip's name. The
+   * axis is deliberately NOT shown here: it is an engine enum, and putting it in an editable
+   * free-text box invites someone to overwrite detection data with prose.
+   */
+  // `untrack` on the initial read only: the field takes the clip's current name as its starting
+  // value, and the effect below is what keeps it in step when the selection changes. Reading it
+  // tracked here would make every keystroke re-run against the same prop.
+  let name = $state(untrack(() => clip.title ?? ''));
+
+  // Follow the clip when selection changes: the field belongs to whichever clip is open.
+  $effect(() => {
+    name = clip.title ?? '';
+  });
+
+  function commitName() {
+    onRename(name);
+  }
 
   function fmtTime(sec: number): string {
     const h = Math.floor(sec / 3600);
@@ -27,24 +52,45 @@
 <div class="mb-3 flex items-center justify-between">
   <div class="flex items-center gap-3">
     <span class="font-mono text-xs text-ash-dim">{String(clipIndex + 1).padStart(2, '0')}</span>
-    <span class="font-display text-sm font-medium text-accent uppercase">{clip.axis}</span>
-    <span class="font-mono text-sm text-ink">{clip.score.toFixed(2)}</span>
+    <!-- The clip's name, editable in place: it is what identifies the clip in the library and in
+         export filenames. Committed on blur and on Enter, never per keystroke — every character
+         would otherwise be a PATCH. -->
+    <input
+      bind:value={name}
+      onblur={commitName}
+      onkeydown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+        if (e.key === 'Escape') name = clip.title ?? '';
+      }}
+      class="w-40 rounded border border-transparent bg-transparent px-1 py-0.5 font-display text-sm font-medium text-accent transition-colors hover:border-border focus:border-border-strong focus:bg-surface-2 focus:outline-none"
+      placeholder="unnamed clip"
+      spellcheck="false"
+      autocapitalize="off"
+      autocomplete="off"
+      aria-label="Clip name"
+      title="Clip name — Enter to save, Escape to cancel"
+    />
+    <!--
+      No score for a clip with no engine behind it, and a DASH rather than "0.00": zero is a
+      plausible engine score, so showing it would present a deliberate edit as a badly-ranked
+      detection.
+    -->
+    <span class="font-mono text-sm text-ink">
+      {clip.score === null ? '—' : clip.score.toFixed(2)}
+    </span>
   </div>
   <div class="flex items-center gap-2">
-    <button
-      class="flex items-center gap-1 rounded-md border border-success/50 px-2 py-1 text-xs text-success transition-colors hover:bg-success/10"
-      onclick={onAccept}
-      aria-label="Accept clip"
-      title="Accept (A) — marks reviewed and advances"
-    >
-      <Icon name="check" size={12} /> Accept
-    </button>
+    <!--
+      No Accept button. Accepting marked a clip reviewed and advanced; candidates stay visible until
+      discarded, so there is nothing an Accept would record that the panel acts on — and two verbs
+      that both mean "keep this" made the review flow say the same thing twice.
+    -->
     <button
       class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-border-strong hover:text-ink"
       onclick={onExport}
       aria-label="Export this clip"
     >
-      <Icon name="scissors" size={12} /> Export
+      <Icon name="upload" size={12} /> Export
     </button>
     <button
       class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-error hover:text-error"
@@ -58,32 +104,37 @@
 
 {#if clip.justification}
   <p class="mb-3 text-sm text-ash leading-relaxed">{clip.justification}</p>
-{:else}
-  <p class="mb-3 text-sm text-ash-dim italic">No justification provided.</p>
 {/if}
 
 <div class="grid grid-cols-3 gap-4">
-  <!-- Signals: real engine evidence, or an honest absence. -->
-  <div class="col-span-1">
-    <div class="mb-2 font-mono text-xs text-ash-dim uppercase">Signals</div>
-    {#if clip.signals}
+  <!--
+    Signals: real engine evidence, or NOTHING AT ALL. A clip with no signals gets no column — the
+    heading plus an apology was four fifths empty space claiming a metric that does not exist.
+    (The engine's own "justification says evidence but no signal fired" case is caught by the
+    honesty tests in the server, not by an empty panel.)
+  -->
+  {#if clip.signals}
+    <div class="col-span-1">
+      <div class="mb-2 font-mono text-xs text-ash-dim uppercase">Signals</div>
       <div class="flex flex-col gap-1.5">
         <SignalBar label="chat" value={clip.signals.chatExcitement} />
         <SignalBar label="emote" value={clip.signals.emoteVelocity} />
         <SignalBar label="audio" value={clip.signals.audioEnergy} />
         <SignalBar label="speech" value={clip.signals.speechCoverage} />
       </div>
-    {:else}
-      <div class="text-xs text-ash-dim italic">No signal data from engine.</div>
-    {/if}
-  </div>
+    </div>
+  {/if}
 
   <!-- Endpoints -->
   <div class="col-span-1">
     <div class="mb-2 font-mono text-xs text-ash-dim uppercase">Endpoints</div>
     <div class="flex flex-col gap-1 font-mono text-xs">
       <div class="flex justify-between"><span class="text-ash-dim">Start</span><span class="text-ink">{fmtTime(clip.startTime)}</span></div>
-      <div class="flex justify-between"><span class="text-ash-dim">Peak</span><span class="text-accent">{fmtTime(clip.peakTime)}</span></div>
+      <!-- A clip with no engine behind it has no detected peak; showing Start again would be a
+           fabricated field. -->
+      {#if clip.peakTime !== clip.startTime}
+        <div class="flex justify-between"><span class="text-ash-dim">Peak</span><span class="text-accent">{fmtTime(clip.peakTime)}</span></div>
+      {/if}
       <div class="flex justify-between"><span class="text-ash-dim">End</span><span class="text-ink">{fmtTime(clip.endTime)}</span></div>
       <div class="flex justify-between border-t border-border pt-1"><span class="text-ash-dim">Dur</span><span class="text-ink">{(clip.endTime - clip.startTime).toFixed(0)}s</span></div>
     </div>
@@ -102,7 +153,7 @@
       class="flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-xs text-ash transition-colors hover:border-border-strong hover:text-ink"
       onclick={onExport}
     >
-      <Icon name="scissors" size={12} /> Export clip
+      <Icon name="upload" size={12} /> Export clip
     </button>
   </div>
 </div>

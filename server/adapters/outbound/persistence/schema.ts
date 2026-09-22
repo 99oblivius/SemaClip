@@ -29,10 +29,13 @@ export const jobs = sqliteTable("jobs", {
 
 export const clips = sqliteTable("clips", {
   id: text("id").primaryKey(),
-  job_id: text("job_id").notNull(),
+  /** Nullable: a MANUAL clip has no job — no engine ran, so there is nothing to reference. */
+  job_id: text("job_id"),
   stream_id: text("stream_id").notNull(),
-  axis: text("axis").notNull(),
-  score: real("score").notNull(),
+  /** Nullable: a manual clip carries no engine axis (NULL = no axis, never a sentinel one). */
+  axis: text("axis"),
+  /** Nullable: a manual clip is not ranked (NULL = unranked, never a fake 0). */
+  score: real("score"),
   start_time: real("start_time").notNull(),
   end_time: real("end_time").notNull(),
   peak_time: real("peak_time").notNull(),
@@ -42,6 +45,9 @@ export const clips = sqliteTable("clips", {
   export_path: text("export_path"),
   rejected: integer("rejected").notNull().default(0),
   signals_json: text("signals_json"), // JSON ClipSignals, null = no signal data
+  /** The user's own name for the clip. Null = not named (never ""). NOT the axis: a name is
+   *  free text and an axis is an engine enum — one column cannot honestly hold both. */
+  title: text("title"),
 });
 
 export const personas = sqliteTable("personas", {
@@ -70,4 +76,58 @@ export const exportPresets = sqliteTable("export_presets", {
   name: text("name").notNull(),
   config_json: text("config_json").notNull(),
   created_at: text("created_at").notNull(),
+  /**
+   * Who the preset belongs to: `seeded` (the app shipped it) or `user` (someone saved it).
+   *
+   * A DATA property rather than a hardcoded id list in the frontend, because deletability is a fact
+   * about the row and the server is the only place that can enforce it. The default is `seeded`,
+   * which mirrors the migration's backfill: every preset written before this column existed was one
+   * the app shipped.
+   */
+  origin: text("origin").notNull().default("seeded"),
+});
+
+/**
+ * The export LIST — durable REFERENCES to clips, never copies.
+ *
+ * A clip is a persistent entity in its own right (`clips`), independent of whether anyone ever
+ * exports it. This table is the answer to "which clips does the user intend to export", and it
+ * stores only that intent: no boundaries, no name, no axis. Duplicating any of those here would make
+ * two owners of one truth that drift the instant a clip is trimmed or renamed on the Review page.
+ *
+ * `removed_at` instead of DELETE-ing the row, so taking a clip off the list is a reversible intent
+ * rather than a lost fact — and so a re-add can keep its original place in the order.
+ */
+export const exportList = sqliteTable("export_list", {
+  clip_id: text("clip_id").primaryKey(),
+  added_at: text("added_at").notNull(),
+  position: integer("position").notNull(),
+  removed_at: text("removed_at"),
+});
+
+/**
+ * The export BATCH — durable, because a batch must survive a restart and resume.
+ *
+ * `clip_id` is the primary key by design: one clip has at most ONE pending export. Two rows for one
+ * clip would race for the same output filename, and the schema refusing that beats the queue
+ * remembering to check.
+ *
+ * `artifact_path` records where THIS attempt writes, so cancelling can delete precisely the partial
+ * file it produced instead of re-deriving a filename from the naming rule and risking deleting the
+ * wrong thing.
+ */
+export const exportJobs = sqliteTable("export_jobs", {
+  clip_id: text("clip_id").primaryKey(),
+  status: text("status").notNull().default("queued"),
+  position: integer("position").notNull(),
+  profile_json: text("profile_json").notNull(),
+  output_dir: text("output_dir"),
+  filename: text("filename"),
+  artifact_path: text("artifact_path"),
+  phase: text("phase"),
+  percent: real("percent").notNull().default(0),
+  requested_at: text("requested_at").notNull(),
+  started_at: text("started_at"),
+  completed_at: text("completed_at"),
+  error: text("error"),
 });

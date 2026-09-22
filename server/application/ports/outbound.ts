@@ -1,4 +1,5 @@
 import type {
+  SourceMedia,
   Stream,
   Job,
   Clip,
@@ -51,6 +52,100 @@ export interface StreamMetadataRepository {
   deleteAll(streamId: string): Promise<void>;
 }
 
+// ── Export list & batch repositories ───────────────────────────
+
+/** A row of the export list, as stored. The clip itself is resolved by the caller. */
+export interface ExportListRow {
+  clipId: string;
+  addedAt: string;
+  position: number;
+  removedAt: string | null;
+}
+
+/**
+ * The durable record of "which clips the user means to export".
+ *
+ * References only. Nothing about a clip's content is stored here — see `export_list` in the schema
+ * for why a copy would be a second owner of the same truth.
+ */
+export interface ExportListRepository {
+  /** Add references, keeping the existing order. Re-adding a removed clip RESTORES its position. */
+  add(clipIds: string[]): Promise<void>;
+  /** Live entries, in order. Removed ones are excluded. */
+  list(): Promise<ExportListRow[]>;
+  /** Soft-remove: sets `removed_at`, never DELETE — the history is what preserves a re-add's place. */
+  remove(clipId: string): Promise<void>;
+  removeMany(clipIds: string[]): Promise<void>;
+  clear(): Promise<void>;
+  /** Clip ids live on the list, for the UI's "already added" state. */
+  liveIds(): Promise<string[]>;
+}
+
+/**
+ * The durable export batch.
+ *
+ * Durable on purpose: a batch interrupted by a restart must resume. See the `export_jobs` table for
+ * the one-row-per-clip rule and why `artifact_path` is recorded.
+ */
+export interface ExportJobRepository {
+  /** Insert or replace a queued item at the end. Never creates a second row for one clip. */
+  upsertQueued(row: {
+    clipId: string;
+    profileJson: string;
+    outputDir: string | null;
+    filename: string | null;
+    position: number;
+    /** The BATCH's stamp, shared by every row of one enqueue — see the adapter for why. */
+    requestedAt: string;
+  }): Promise<void>;
+  list(): Promise<ExportJobRecord[]>;
+  get(clipId: string): Promise<ExportJobRecord | null>;
+  /** The next item to run: lowest position among `queued`. */
+  nextQueued(): Promise<ExportJobRecord | null>;
+  markRunning(clipId: string, startedAt: string): Promise<void>;
+  /**
+   * Progress of the running item. Deliberately does NOT touch `status`, so a slow sample cannot
+   * resurrect a cancelled row — the same class of bug as a cancelled download writing `done`.
+   */
+  setProgress(clipId: string, phase: string | null, percent: number, artifactPath: string | null): Promise<void>;
+  markCompleted(clipId: string, exportPath: string, completedAt: string): Promise<void>;
+  markFailed(clipId: string, error: string, completedAt: string): Promise<void>;
+  markCancelled(clipId: string, completedAt: string): Promise<void>;
+  /**
+   * Forget a deleted artifact path.
+   *
+   * Called after a cancel removes the partial file, so the row does not keep pointing at something
+   * that no longer exists — and so a second cancel does not re-report the same deletion.
+   */
+  clearArtifactPath(clipId: string): Promise<void>;
+  /**
+   * Clear the items a cancel asked to drop, keeping the finished and failed history.
+   *
+   * Returns what it dropped so the caller can delete each item's `artifactPath`: this is the
+   * handover that lets a cancelled partial file be removed without re-deriving its name.
+   */
+  dropIncomplete(): Promise<ExportJobRecord[]>;
+  /** Batch totals, so the progress stats are computed from the database and not re-counted in the UI. */
+  counts(): Promise<Record<string, number>>;
+}
+
+/** One export batch row. */
+export interface ExportJobRecord {
+  clipId: string;
+  status: string;
+  position: number;
+  profileJson: string;
+  outputDir: string | null;
+  filename: string | null;
+  artifactPath: string | null;
+  phase: string | null;
+  percent: number;
+  requestedAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  error: string | null;
+}
+
 /** Manages per-stream directory structure for file artifacts.
  *  Layout: {dataDir}/streams/{streamId}/{vod,chat,waveform,thumbnails,exports}/ */
 export interface StreamStorage {
@@ -100,28 +195,44 @@ export interface VodDownloadPort {
 export interface MediaProbePort {
   /** Probe a video file's duration in seconds. Returns null on failure. */
   probeDuration(vodPath: string): Promise<number | null>;
+  /**
+   * Probe the source video's codec, bitrate, fps and dimensions.
+   *
+   * Separate from `probeDuration` because it answers a different question and is needed by the export
+   * UI: "the original bitrate is used" and "this is a transcode, so a bitrate must be forced" both
+   * depend on the source's own facts. Returns null when the probe fails — an unmeasured source is
+   * reported as unmeasured rather than defaulted.
+   */
+  probeSourceMedia(vodPath: string): Promise<SourceMedia | null>;
 }
 
 // ── FFmpeg export port ──────────────────────────────────────────
 
 export interface FFmpegExportPort {
+  /**
+   * Cut a clip out of the video and encode it to the profile's container/codec.
+   *
+   * The PROFILE carries every output decision (container, codecs, cap, quality, aspect, captions) so
+   * there is one source of truth: a second argument repeating any of it is how the two drift.
+   */
   exportClip(input: {
     vodPath: string;
     startTime: number;
     endTime: number;
     outputPath: string;
-    format: "mp4_h264" | "mp4_h265" | "webm";
-    aspectRatio: "16:9" | "9:16" | "1:1";
-    cropPosition: "center" | "top" | "bottom";
-    captions: {
-      enabled: boolean;
-      srtPath: string | null;
-      preset: "bold-white" | "yellow" | "custom";
-      position: "bottom" | "top";
-      fontSize: number;
-      backgroundOpacity: number;
-    };
-  }): Promise<{ exportPath: string; durationMs: number }>;
+    profile: import("shared/types").ExportProfile;
+    /** The transcript to burn in, resolved by the caller; null when there is none. */
+    srtPath: string | null;
+    /**
+     * Where the run has reached, in ENCODED SECONDS of the clip. Called about once a second.
+     *
+     * Seconds rather than a fraction: the adapter holds the ffmpeg process and the caller holds the
+     * clip window, so converting here would duplicate the duration the caller already knows.
+     */
+    onProgress?: ((p: { encodedSec: number }) => void) | undefined;
+    /** Cancellation. Aborting kills the encoder; the caller deletes the partial file it recorded. */
+    signal?: AbortSignal | undefined;
+  }): Promise<{ exportPath: string; durationMs: number; /** Which encoder actually ran. */ backend: string }>;
   /** Generate a low-res proxy proxy (P0-10). Null vodPath output = reuse source dir. */
   generateProxy(input: {
     vodPath: string;
@@ -150,6 +261,26 @@ export const ENGINE_EVENT_TOPIC = "engine:event";
 export const JOB_STATUS_TOPIC = "job:status";
 export const STREAM_STATUS_TOPIC = "stream:status";
 export const DOWNLOAD_PROGRESS_TOPIC = "download:progress";
+
+/**
+ * The export list or batch changed — the UI should re-read it.
+ *
+ * Same contract as STREAM_CHANGED_TOPIC: the payload says WHAT changed and the client refetches,
+ * because duplicating the batch's state into an event would make a second source of truth for it.
+ * The one exception is per-item progress, which rides its own topic with numbers attached — see
+ * `EXPORT_PROGRESS_TOPIC`.
+ */
+export const EXPORT_CHANGED_TOPIC = "export:changed";
+
+/**
+ * One export item's progress, carrying the numbers.
+ *
+ * Progress is the case where the thin-payload rule does not apply: an ffmpeg run emits a sample
+ * every second, and answering each one with a refetch would put the whole batch's state on the wire
+ * sixty times a minute to move a bar. The authoritative state stays in the database; this is the
+ * fast path, and a dropped event costs nothing because the next sample corrects it.
+ */
+export const EXPORT_PROGRESS_TOPIC = "export:progress";
 
 /**
  * Something about a stream's stored state changed and the UI should re-read it.

@@ -60,6 +60,23 @@
         }
         return;
       }
+      if (event.type === 'export_list') {
+        // The durable export list changed (a clip was sent to export, or removed).
+        void qc.invalidateQueries({ queryKey: ['export-list'] });
+        return;
+      }
+      if (event.type === 'export_queue' || event.type === 'export_progress') {
+        // Batch transitions and per-item progress. Both drive the same progress bar and statistics,
+        // so both refetch the one view rather than the page hand-merging events into its own state
+        // (which would be a second owner of "how far along is this export").
+        void qc.invalidateQueries({ queryKey: ['export-queue'] });
+        // A completed export writes `exported`/`export_path` on the clip, so the clip lists are
+        // stale too — the same reason a stream change invalidates `streams`.
+        if (event.type === 'export_queue') {
+          void qc.invalidateQueries({ queryKey: ['clips'] });
+        }
+        return;
+      }
     });
   });
 
@@ -145,10 +162,15 @@
   // exists, otherwise land on the nearest meaningful surface.
   const navItems = $derived([
     { id: 'library', icon: 'grid' as const, label: 'Library', href: '/', active: currentPath === '/' || currentPath.startsWith('/stream') },
-    { id: 'review', icon: 'film' as const, label: 'Review', href: reviewHref(), active: currentPath.startsWith('/stream') && !currentPath.includes('/processing') },
-    { id: 'processing', icon: 'queue' as const, label: 'Processing', href: '/queue', active: currentPath.startsWith('/queue') || currentPath.includes('/processing') },
+    // Scissors are here, not on Export: cutting clips IS the review surface's job.
+    { id: 'review', icon: 'scissors' as const, label: 'Review', href: reviewHref(), active: currentPath.startsWith('/stream') && !currentPath.includes('/processing') },
+    // A CPU, because this is the page where work is computed — the paragraph glyph it had said
+    // nothing about anything.
+    { id: 'processing', icon: 'cpu' as const, label: 'Processing', href: '/queue', active: currentPath.startsWith('/queue') || currentPath.includes('/processing') },
     { id: 'compose', icon: 'layers' as const, label: 'Compose', href: '/compose', active: currentPath.startsWith('/compose') },
-    { id: 'export', icon: 'scissors' as const, label: 'Export', href: '/export', active: currentPath.startsWith('/export') },
+    // Export SENDS the result out of the app, so it gets the "leaves the tray" arrow rather than
+    // the cutting tool.
+    { id: 'export', icon: 'upload' as const, label: 'Export', href: '/export', active: currentPath.startsWith('/export') },
     { id: 'settings', icon: 'settings' as const, label: 'Settings', href: '/settings', active: currentPath.startsWith('/settings') },
   ]);
 

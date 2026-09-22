@@ -29,15 +29,15 @@
     wasActive = active;
   });
 
-  // Cancel here stops THIS download. The whole-download DELETE is the honest verb for
-  // "the library started this and I want it gone": it aborts every live run and removes the
-  // artifacts. Re-downloading lives in project settings.
-  const deleteMutation = createMutation(() => ({
-    mutationFn: () => apiClient.deleteDownload(streamId),
+  // Cancel here STOPS this download and keeps whatever has landed — the partial proxy/video is
+  // hours of transfer and a cancel must not be a delete. Discarding is the separate "Delete" verb
+  // in project settings.
+  const cancelMutation = createMutation(() => ({
+    mutationFn: () => apiClient.cancelDownload(streamId),
     onSuccess: () => {
       // markDownloadsChanged() too, not just the invalidation: the poller would
       // otherwise stay on its idle heartbeat, so the row lingers for up to 30 s after a
-      // delete has already happened. The other mutators in this file already do both;
+      // cancel has already happened. The other mutators in this file already do both;
       // this one did not, which the structural test caught.
       markDownloadsChanged();
       queryClient.invalidateQueries({ queryKey: DOWNLOADS_KEY as unknown as string[] });
@@ -159,20 +159,21 @@
               Resume download
             </button>
           {/if}
-          <!-- Cancel IS the delete here: it aborts the run and removes what
-               it downloaded. Re-downloading lives in project settings. -->
+          <!-- Cancel STOPS the download and keeps its files. A partial proxy is hours of
+               transfer; a cancel that destroyed it was reported as a bug. Deleting the artifacts
+               is the separate verb in project settings. -->
           <button
             class="rounded border border-border px-2 py-0.5 text-[10px] text-ash transition-colors hover:border-error hover:text-error disabled:opacity-50"
-            onclick={() => deleteMutation.mutate()}
-            disabled={deleteMutation.isPending}
-            title="Cancel this download and delete its files"
+            onclick={() => cancelMutation.mutate()}
+            disabled={cancelMutation.isPending}
+            title="Stop this download, keeping what has downloaded"
           >
-            {deleteMutation.isPending ? 'Cancelling…' : 'Cancel'}
+            {cancelMutation.isPending ? 'Cancelling…' : 'Cancel'}
           </button>
         </div>
-        {#if deleteMutation.isError}
+        {#if cancelMutation.isError}
           <p class="mt-1 text-right font-mono text-[10px] text-error">
-            {deleteMutation.error?.message ?? 'Delete failed'}
+            {cancelMutation.error?.message ?? 'Cancel failed'}
           </p>
         {/if}
       </div>

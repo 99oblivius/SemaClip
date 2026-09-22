@@ -238,3 +238,41 @@ export function resolvePlayback(artifacts: ArtifactView[]): DownloadView["media"
     durationSec,
   };
 }
+
+/**
+ * The playable source for a project, decided in ONE place.
+ *
+ * `GET /api/video` used to own this ordering: proxy mp4 twin, then raw proxy, then the HQ mp4
+ * twin, then raw HQ — every candidate stat-checked. That rule is now here, taking already-known
+ * facts, because a SECOND consumer appeared: the clip-thumbnail route needs the same file the
+ * player is showing (a frame drawn from the wrong source is a frame the user never saw).
+ *
+ * A folder-imported project is the case that makes a second copy of the rule a real bug rather
+ * than a duplication: it has media on disk with NO download artifacts at all, so anything that
+ * derives the source from download state alone finds nothing and reports "no media" for a
+ * project whose file is sitting right there.
+ *
+ * `twin` prefers the mp4 forms deliberately — Chromium cannot demux raw MPEG-TS, so a `.ts`
+ * path is unplayable and its `.mp4` twin is the playable form of the same bytes. The final
+ * fallback is the stream's own recorded `vodPath`, which is the only candidate a folder import
+ * has and the file exports render from.
+ */
+export async function resolveMediaSource(input: {
+  /** Download-state paths (mp4 twins first, then the raw .ts forms). */
+  proxyMp4?: string | null;
+  proxyPath?: string | null;
+  hqMp4?: string | null;
+  hqPath?: string | null;
+  /** The stream row's own recorded media path — export's RENDER source. */
+  vodPath?: string | null;
+  /** Which candidates actually exist on disk right now (may be async). */
+  present: (path: string) => boolean | Promise<boolean>;
+}): Promise<string | null> {
+  // Proxy before HQ: it lands first and scrubs cheaply, so it is the right source for both
+  // previewing and drawing a thumbnail. The HQ file can be mid-download while the proxy is whole.
+  const ordered = [input.proxyMp4, input.proxyPath, input.hqMp4, input.hqPath, input.vodPath];
+  for (const candidate of ordered) {
+    if (candidate && (await input.present(candidate))) return candidate;
+  }
+  return null;
+}

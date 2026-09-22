@@ -7,6 +7,10 @@ import type {
   ImportResult,
   ExportClipInput,
   ExportResult,
+  ExportListEntry,
+  ExportQueueView,
+  ExportProfile,
+  SourceMedia,
   ExportPreset,
   QueueAction,
   AppSettings,
@@ -70,6 +74,16 @@ export const apiClient = {
   /** Every stream's composed download view — the single UI source. */
   listDownloads: () =>
     api<{ views: DownloadView[] }>('/downloads'),
+
+  /**
+   * STOP a download, keeping what landed on disk.
+   *
+   * This is the cancel verb. It used to be wired to `deleteDownload`, so pressing Cancel swept the
+   * artifact directory — destroying the partial download it was cancelling. Deleting is a separate,
+   * deliberate act (below).
+   */
+  cancelDownload: (streamId: string) =>
+    api<{ ok: boolean; stopped: boolean; queued: boolean }>(`/streams/${streamId}/download/cancel`, { method: 'POST' }),
 
   deleteDownload: (streamId: string) =>
     api<{ ok: boolean }>(`/streams/${streamId}/download`, { method: 'DELETE' }),
@@ -168,15 +182,37 @@ export const apiClient = {
   getClip: (id: string) =>
     api<Clip>(`/clips/${id}`),
 
+  /** Create a clip by hand at a playhead position. `endTime` omitted = the server's rule
+   *  (next clip's start, else the VOD's end); the response carries the computed end. */
+  createClip: (streamId: string, input: { startTime: number; endTime?: number }) =>
+    api<Clip>(`/streams/${streamId}/clips`, { method: 'POST', body: JSON.stringify(input) }),
+
   rejectClip: (id: string) =>
     api<Clip>(`/clips/${id}/reject`, { method: 'POST' }),
 
-  /** Persist endpoint/trim adjustments (review state, P0-11). */
-  updateClip: (id: string, patch: { startTime?: number; endTime?: number }) =>
+  /** Persist endpoint/trim adjustments (review state, P0-11) and the clip's NAME. */
+  updateClip: (id: string, patch: { startTime?: number; endTime?: number; title?: string | null }) =>
     api<Clip>(`/clips/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
 
   exportClip: (input: ExportClipInput) =>
     api<ExportResult>(`/clips/${input.clipId}/export`, { method: 'POST', body: JSON.stringify(input) }),
+
+  // ── The export list: durable references to the clips the user means to export ──
+  getExportList: () => api<{ entries: ExportListEntry[] }>('/export/list'),
+  addToExportList: (clipIds: string[]) =>
+    api<{ ok: boolean; added: number }>('/export/list', { method: 'POST', body: JSON.stringify({ clipIds }) }),
+  removeFromExportList: (clipId: string) =>
+    api<{ ok: boolean }>(`/export/list/${clipId}`, { method: 'DELETE' }),
+  clearExportList: () => api<{ ok: boolean }>('/export/list', { method: 'DELETE' }),
+
+  // ── The export batch: durable, resumable, cancellable ──
+  getExportQueue: () => api<ExportQueueView>('/export/queue'),
+  enqueueExports: (input: { profile?: ExportProfile; outputDir?: string | null; filename?: string | null; clipIds?: string[] }) =>
+    api<{ enqueued: number }>('/export/queue', { method: 'POST', body: JSON.stringify(input) }),
+  cancelExports: () =>
+    api<{ ok: boolean; cancelled: number; deletedArtifacts: number }>('/export/queue', { method: 'DELETE' }),
+  cancelExportItem: (clipId: string) =>
+    api<{ ok: boolean }>(`/export/queue/${clipId}`, { method: 'DELETE' }),
 
   // ── Tool provisioning (ffmpeg) ──
   // ffmpeg resolves PATH -> previously-installed -> managed, so the UI asks
@@ -197,8 +233,12 @@ export const apiClient = {
   listPresets: () =>
     api<ExportPreset[]>('/presets'),
 
-  savePreset: (preset: ExportPreset) =>
-    api<{ ok: boolean }>(`/presets/${preset.id}`, { method: 'PUT', body: JSON.stringify(preset) }),
+  /** The route takes `{name, profile}`; the id travels in the path so the body cannot mint one. */
+  savePreset: (preset: Pick<ExportPreset, 'id' | 'name' | 'profile'>) =>
+    api<{ ok: boolean }>(`/presets/${preset.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ name: preset.name, profile: preset.profile }),
+    }),
 
   deletePreset: (id: string) =>
     api<{ ok: boolean }>(`/presets/${id}`, { method: 'DELETE' }),
@@ -206,6 +246,44 @@ export const apiClient = {
   // ── System ──
   listComputeDevices: () =>
     api<{ id: string; label: string; index: number | null; type: 'gpu' | 'cpu'; memoryMB: number }[]>('/system/devices'),
+
+  /**
+   * The hardware encoder for a codec, and its measured speed.
+   *
+   * Per codec, because the answer differs: `nvenc` offers `h264_nvenc` and `av1_nvenc` but nothing
+   * for H.265 or VP9 on this host. `speed` is null when no encoder exists OR none was measured, and
+   * the UI must not turn either into a number.
+   */
+  /**
+   * Every encoder the machine offers for a codec, verified by encoding.
+   *
+   * NOT the same as `getGpuEncoder`, which answers "which should we default to?" and stops at the
+   * first working family. This is the picker's list: each entry a real encoder on this host with the
+   * vendor label a user recognises, plus a measured speed when one exists (null when not).
+   */
+  listEncoders: (codec: string) =>
+    api<{
+      encoder: string;
+      label: string;
+      backend: string;
+      codec: string;
+      deviceArgs?: string[];
+      software: boolean;
+      speed: number | null;
+    }[]>(`/system/encoders?codec=${codec}`),
+
+  /**
+   * The SOURCE video's own media facts, for the export's bitrate semantics.
+   *
+   * Answers `null` when the source could not be probed (path moved, unreadable) — the UI then reports
+   * the bitrate as unmeasured rather than showing a default that would read as the real number.
+   */
+  getSourceMedia: (streamId: string) =>
+    api<SourceMedia | null>(`/streams/${streamId}/source-media`),
+
+  getGpuEncoder: (codec: string) =>
+    api<{ backend: string; encoder: string | null; speed: number | null; detail: string }>(
+      `/system/gpu-encoder?codec=${codec}`),
 
   // ── Video ──
   videoUrl: (streamId: string) =>

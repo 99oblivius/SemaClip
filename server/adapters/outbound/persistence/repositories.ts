@@ -1,14 +1,19 @@
 import { eq, and, asc, desc } from "drizzle-orm";
 import type { Db } from "./db.ts";
 import { schema } from "./db.ts";
+import { normaliseProfile } from "shared/types";
 import type {
   StreamRepository,
   JobRepository,
   ClipRepository,
   PersonaRepository,
   StreamMetadataRepository,
+  ExportListRepository,
+  ExportListRow,
+  ExportJobRepository,
+  ExportJobRecord,
 } from "@/application/ports/outbound.ts";
-import type { Stream, Job, Clip, Persona, StreamStatus, Axis, ExportPreset } from "shared/types";
+import type { Stream, Job, Clip, Persona, StreamStatus, Axis, ExportPreset, ExportProfile } from "shared/types";
 
 // ── Row → domain mappers ──────────────────────────────────────
 // SQLite stores JSON as text; booleans as 0/1.
@@ -45,14 +50,21 @@ function rowToJob(r: typeof schema.jobs.$inferSelect): Job {
 function rowToClip(r: typeof schema.clips.$inferSelect): Clip {
   return {
     id: r.id,
+    // Null for a manual clip — the absence of a job IS the fact that it was made by hand.
     jobId: r.job_id,
     streamId: r.stream_id,
-    axis: r.axis as Axis,
+    // Null for a manual clip: no engine axis, no score, no signals. Never coerced to a
+    // default, because a fabricated axis/score would present a hand-cut clip as an engine
+    // finding (and "0.00" as a bad one).
+    axis: r.axis as Axis | null,
     score: r.score,
     startTime: r.start_time,
     endTime: r.end_time,
     peakTime: r.peak_time,
     justification: r.justification,
+    // Not named yet — the honest state, and the one an engine-found clip keeps: it is identified
+    // by its axis, and inventing a title would be a label nobody chose.
+    title: r.title,
     rank: r.rank,
     exported: r.exported === 1,
     exportPath: r.export_path,
@@ -201,6 +213,7 @@ export class SqliteClipRepository implements ClipRepository {
       end_time: clip.endTime,
       peak_time: clip.peakTime,
       justification: clip.justification,
+      title: clip.title,
       rank: clip.rank,
       exported: clip.exported ? 1 : 0,
       export_path: clip.exportPath,
@@ -233,6 +246,7 @@ export class SqliteClipRepository implements ClipRepository {
       end_time: clip.endTime,
       peak_time: clip.peakTime,
       justification: clip.justification,
+      title: clip.title,
       rank: clip.rank,
       exported: clip.exported ? 1 : 0,
       export_path: clip.exportPath,
@@ -322,25 +336,303 @@ export class SqliteExportPresetRepository {
     const rows = await this.db.select().from(schema.exportPresets)
       .orderBy(asc(schema.exportPresets.created_at)).all();
     return rows.map((r) => {
-      const cfg = JSON.parse(r.config_json) as Omit<ExportPreset, "id" | "name" | "createdAt">;
-      return { id: r.id, name: r.name, createdAt: r.created_at, ...cfg };
+      const cfg = JSON.parse(r.config_json) as Record<string, unknown>;
+      // ── NORMALISED ON READ, and that is not belt-and-braces ────────────────────────────────
+      // `config_json` is the profile, and it has TWO shapes in the wild. Presets written before the
+      // full profile existed carry the legacy FLAT subset (`format`, `aspectRatio`, `cropPosition`,
+      // `captions`, `nameTemplate`); presets written since carry the profile itself, nested under
+      // `profile`. Spreading the blob verbatim — which this did — handed the legacy rows straight to
+      // the client with NO `profile` field at all, so every consumer reading `preset.profile.x` threw.
+      // A thrown expression inside a `$derived` aborts the render rather than rendering an error, so
+      // the export page showed "Loading presets…" for ever with no preset in the list and no
+      // complaint anywhere: the query had succeeded and the DATA was the problem.
+      //
+      // Normalising here (rather than migrating the blob) is deliberate: `normaliseProfile` already
+      // understands the legacy shape, it degrades any unreadable field to a safe default instead of
+      // failing, and it therefore also repairs hand-edited rows. A migration rewriting JSON in place
+      // would have to be equally tolerant to be safe, and would still leave any row it could not
+      // parse broken — this is idempotent by construction.
+      const { origin: _fromBlob, profile: nested, ...flat } = cfg;
+      const raw = nested && typeof nested === "object" ? nested : flat;
+      return {
+        id: r.id,
+        name: r.name,
+        // A preset IS a profile, so what comes out is always the full profile — every field filled,
+        // the quality clamped to the codec's useful band, an unencodable pair degraded. Same policy as
+        // the write path, because a read must never hand out a shape the writer would not accept.
+        profile: normaliseProfile(raw as Partial<ExportProfile>),
+        createdAt: r.created_at,
+        // The column is authoritative; anything unreadable is treated as `seeded`, which is the safe
+        // direction — an undeletable preset is a nuisance, a wrongly deletable one is data loss.
+        origin: r.origin === "user" ? "user" : "seeded",
+      };
     });
   }
 
   async save(preset: ExportPreset): Promise<void> {
-    const { id, name, createdAt, ...cfg } = preset;
+    const { id, name, createdAt, origin, ...cfg } = preset;
     await this.db.insert(schema.exportPresets).values({
       id,
       name,
       config_json: JSON.stringify(cfg),
       created_at: createdAt,
+      origin,
     }).onConflictDoUpdate({
       target: schema.exportPresets.id,
+      // `origin` is NOT updated on conflict: a preset that exists keeps the origin it was written
+      // with, so re-saving over a seeded preset cannot promote it into a deletable one.
       set: { name, config_json: JSON.stringify(cfg) },
     }).run();
+  }
+
+  /**
+   * The stored origin, or null when the preset does not exist.
+   *
+   * Uses `.all()` and reads the first row, NOT `.get()`. In this remote-callback setup `.get()`
+   * returns the row's COLUMNS AS ARRAYS — `{ origin: ["user"] }` for a row whose origin is `"user"`,
+   * and `{}` for no match — so a string comparison against it silently reports a user preset as
+   * seeded. Every other repository in this codebase reads with `.all()`; this method follows that
+   * pattern deliberately, because the difference is invisible until a value is compared.
+   */
+  async originOf(id: string): Promise<"seeded" | "user" | null> {
+    const rows = await this.db.select({ origin: schema.exportPresets.origin })
+      .from(schema.exportPresets).where(eq(schema.exportPresets.id, id)).all();
+    const first = rows[0];
+    if (!first || typeof first.origin !== "string") return null;
+    return first.origin === "user" ? "user" : "seeded";
   }
 
   async delete(id: string): Promise<void> {
     await this.db.delete(schema.exportPresets).where(eq(schema.exportPresets.id, id)).run();
   }
+}
+
+// ── Export list & batch repositories ───────────────────────────
+
+/**
+ * The durable export list.
+ *
+ * Order is `position`, assigned from the current maximum when a clip is added, so the list reads in
+ * the order the user built it rather than by insertion time or clip score.
+ */
+export class SqliteExportListRepository implements ExportListRepository {
+  constructor(private readonly db: Db) {}
+
+  async add(clipIds: string[]): Promise<void> {
+    if (clipIds.length === 0) return;
+    const rows = await this.db.select().from(schema.exportList).all();
+    const maxPosition = rows.reduce((m, r) => Math.max(m, r.position), 0);
+    let next = maxPosition + 1;
+    const now = new Date().toISOString();
+    for (const clipId of clipIds) {
+      const existing = rows.find((r) => r.clip_id === clipId);
+      if (existing) {
+        // RE-ADDING RESTORES the original position rather than appending. The row was only
+        // soft-removed, so its place is still meaningful — moving it to the end would silently
+        // reorder the user's list because they toggled something off and back on.
+        if (existing.removed_at !== null) {
+          await this.db.update(schema.exportList)
+            .set({ removed_at: null })
+            .where(eq(schema.exportList.clip_id, clipId))
+            .run();
+        }
+        continue;
+      }
+      await this.db.insert(schema.exportList).values({
+        clip_id: clipId,
+        added_at: now,
+        position: next++,
+        removed_at: null,
+      }).run();
+    }
+  }
+
+  async list(): Promise<ExportListRow[]> {
+    const rows = await this.db.select().from(schema.exportList)
+      .orderBy(asc(schema.exportList.position)).all();
+    return rows
+      .filter((r) => r.removed_at === null)
+      .map((r) => ({ clipId: r.clip_id, addedAt: r.added_at, position: r.position, removedAt: r.removed_at }));
+  }
+
+  async remove(clipId: string): Promise<void> {
+    await this.db.update(schema.exportList)
+      .set({ removed_at: new Date().toISOString() })
+      .where(eq(schema.exportList.clip_id, clipId))
+      .run();
+  }
+
+  async removeMany(clipIds: string[]): Promise<void> {
+    for (const clipId of clipIds) await this.remove(clipId);
+  }
+
+  async clear(): Promise<void> {
+    const now = new Date().toISOString();
+    await this.db.update(schema.exportList).set({ removed_at: now }).run();
+  }
+
+  async liveIds(): Promise<string[]> {
+    return (await this.list()).map((r) => r.clipId);
+  }
+}
+
+/**
+ * The durable export batch.
+ *
+ * Every write here is scoped to ONE clip so a slow or failed item cannot disturb its neighbours, and
+ * `setProgress` deliberately leaves `status` alone: a progress sample arriving after a cancel must
+ * not put a cancelled row back into a live state.
+ */
+export class SqliteExportJobRepository implements ExportJobRepository {
+  constructor(private readonly db: Db) {}
+
+  async upsertQueued(row: {
+    clipId: string;
+    profileJson: string;
+    outputDir: string | null;
+    filename: string | null;
+    position: number;
+    /**
+     * The BATCH's own stamp, supplied by the caller so every row of one enqueue shares it.
+     *
+     * This must not be generated here. `new Date()` per row meant a batch's rows carried stamps that
+     * differed whenever they landed in different milliseconds — measured true on this machine's SSD
+     * (two rows at `...16.896Z` and one at `...17.271Z` in separate enqueues), but NOT guaranteed:
+     * a slower disk or Windows' coarser clock can spread a single batch across several stamps. The
+     * batch scope is derived from these stamps (see `ExportQueue.view`), so per-row values make a
+     * batch's own rows ambiguous with a previous batch's — with no way to tell them apart from the
+     * data. One enqueue is one batch, so one enqueue passes one stamp.
+     */
+    requestedAt: string;
+  }): Promise<void> {
+    const now = row.requestedAt;
+    const existing = await this.get(row.clipId);
+    if (existing) {
+      // ONE row per clip, so a re-enqueue REPLACES the record rather than appending a rival. Its
+      // position is preserved when it was still pending, so re-enqueueing does not send an item to
+      // the back of a queue it never left.
+      await this.db.update(schema.exportJobs).set({
+        status: "queued",
+        profile_json: row.profileJson,
+        output_dir: row.outputDir,
+        filename: row.filename,
+        position: existing.status === "queued" ? existing.position : row.position,
+        phase: null,
+        percent: 0,
+        started_at: null,
+        completed_at: null,
+        error: null,
+      }).where(eq(schema.exportJobs.clip_id, row.clipId)).run();
+      return;
+    }
+    await this.db.insert(schema.exportJobs).values({
+      clip_id: row.clipId,
+      status: "queued",
+      position: row.position,
+      profile_json: row.profileJson,
+      output_dir: row.outputDir,
+      filename: row.filename,
+      artifact_path: null,
+      phase: null,
+      percent: 0,
+      requested_at: now,
+      started_at: null,
+      completed_at: null,
+      error: null,
+    }).run();
+  }
+
+  async list(): Promise<ExportJobRecord[]> {
+    const rows = await this.db.select().from(schema.exportJobs)
+      .orderBy(asc(schema.exportJobs.position)).all();
+    return rows.map(rowToExportJob);
+  }
+
+  async get(clipId: string): Promise<ExportJobRecord | null> {
+    const rows = await this.db.select().from(schema.exportJobs)
+      .where(eq(schema.exportJobs.clip_id, clipId)).all();
+    return rows[0] ? rowToExportJob(rows[0]) : null;
+  }
+
+  async nextQueued(): Promise<ExportJobRecord | null> {
+    const rows = await this.db.select().from(schema.exportJobs)
+      .where(eq(schema.exportJobs.status, "queued"))
+      .orderBy(asc(schema.exportJobs.position)).all();
+    return rows[0] ? rowToExportJob(rows[0]) : null;
+  }
+
+  async markRunning(clipId: string, startedAt: string): Promise<void> {
+    await this.db.update(schema.exportJobs)
+      .set({ status: "running", started_at: startedAt, percent: 0, phase: "probing", error: null })
+      .where(eq(schema.exportJobs.clip_id, clipId)).run();
+  }
+
+  async setProgress(clipId: string, phase: string | null, percent: number, artifactPath: string | null): Promise<void> {
+    // `status` is intentionally absent from this SET: progress is not a lifecycle event, and a
+    // sample landing after a cancel would otherwise restore a cancelled row to "running".
+    await this.db.update(schema.exportJobs)
+      .set({ phase, percent, artifact_path: artifactPath })
+      .where(eq(schema.exportJobs.clip_id, clipId)).run();
+  }
+
+  async markCompleted(clipId: string, exportPath: string, completedAt: string): Promise<void> {
+    await this.db.update(schema.exportJobs)
+      .set({ status: "completed", percent: 1, phase: null, completed_at: completedAt, artifact_path: exportPath, error: null })
+      .where(eq(schema.exportJobs.clip_id, clipId)).run();
+  }
+
+  async markFailed(clipId: string, error: string, completedAt: string): Promise<void> {
+    await this.db.update(schema.exportJobs)
+      .set({ status: "failed", phase: null, completed_at: completedAt, error })
+      .where(eq(schema.exportJobs.clip_id, clipId)).run();
+  }
+
+  async markCancelled(clipId: string, completedAt: string): Promise<void> {
+    await this.db.update(schema.exportJobs)
+      .set({ status: "cancelled", phase: null, completed_at: completedAt })
+      .where(eq(schema.exportJobs.clip_id, clipId)).run();
+  }
+
+  async clearArtifactPath(clipId: string): Promise<void> {
+    await this.db.update(schema.exportJobs)
+      .set({ artifact_path: null })
+      .where(eq(schema.exportJobs.clip_id, clipId)).run();
+  }
+
+  async dropIncomplete(): Promise<ExportJobRecord[]> {
+    const all = await this.list();
+    // "Incomplete" is queued OR running. A FAILED item is history and stays — dropping it would
+    // erase the record of what went wrong, and the owner's rule was explicit that only incomplete
+    // work is cancelled.
+    const doomed = all.filter((r) => r.status === "queued" || r.status === "running");
+    for (const row of doomed) {
+      await this.db.delete(schema.exportJobs).where(eq(schema.exportJobs.clip_id, row.clipId)).run();
+    }
+    return doomed;
+  }
+
+  async counts(): Promise<Record<string, number>> {
+    const all = await this.list();
+    const out: Record<string, number> = { queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0, total: all.length };
+    for (const r of all) out[r.status] = (out[r.status] ?? 0) + 1;
+    return out;
+  }
+}
+
+function rowToExportJob(r: typeof schema.exportJobs.$inferSelect): ExportJobRecord {
+  return {
+    clipId: r.clip_id,
+    status: r.status,
+    position: r.position,
+    profileJson: r.profile_json,
+    outputDir: r.output_dir,
+    filename: r.filename,
+    artifactPath: r.artifact_path,
+    phase: r.phase,
+    percent: r.percent,
+    requestedAt: r.requested_at,
+    startedAt: r.started_at,
+    completedAt: r.completed_at,
+    error: r.error,
+  };
 }

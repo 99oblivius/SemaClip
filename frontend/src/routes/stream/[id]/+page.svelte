@@ -35,8 +35,10 @@
   let showKeyboardHelp = $state(false);
   let discarded = $state<Set<string>>(new Set());
   let pendingUndo = $state<{ id: string; timer: ReturnType<typeof setTimeout> } | null>(null);
-  // Q toggles: show only clips without a review decision (default view) or everything.
-  let unreviewedOnly = $state(true);
+  // Q toggles: "hide the clips set aside this session". A candidate stays visible until it is
+  // discarded, so this OFF by default and reads the snooze set — which is the only thing that can
+  // currently set a clip aside.
+  let unreviewedOnly = $state(false);
 
   const allClips = $derived(clipsQuery.data ?? []);
   // Axis filters (keys 1–7): toggled sets, AND-composed across enabled axes;
@@ -45,20 +47,25 @@
   const visibleClips = $derived(
     allClips
       .filter((c) => !c.rejected && !discarded.has(c.id))
-      .filter((c) => activeAxes.size === 0 || activeAxes.has(c.axis))
-      .filter((c) => !unreviewedOnly || !reviewedLocal.has(c.id))
+      // A manual clip has NO axis, so an axis filter must not hide it: the filters select which
+      // ENGINE axes to look at, and a clip the user drew by hand is not an axis result. Treating
+      // null as "no match" would make every hand-made clip vanish as soon as any filter is on.
+      .filter((c) => activeAxes.size === 0 || c.axis === null || activeAxes.has(c.axis))
+      .filter((c) => !unreviewedOnly || !snoozedIds.has(c.id))
       .sort((a, b) => {
         // Snoozed clips sort last, stable within their group.
         const aSnoozed = snoozedIds.has(a.id) ? 1 : 0;
         const bSnoozed = snoozedIds.has(b.id) ? 1 : 0;
         if (aSnoozed !== bSnoozed) return aSnoozed - bSnoozed;
-        return b.score - a.score;
+        // Unranked clips (manual ones carry no score) sort by POSITION instead of being coerced
+        // to a number — a null score must not rank as 0 or as NaN, which would scatter them
+        // unpredictably through the engine's ranking.
+        const score = (c: Clip) => c.score ?? -1;
+        const byScore = score(b) - score(a);
+        if (byScore !== 0) return byScore;
+        return a.startTime - b.startTime;
       })
   );
-  // Locally-reviewed = accepted (kept in view history) or snoozed this session.
-  // Backend persistence of accept-state is B3; until then accepted clips simply
-  // leave the unreviewed set when acted on.
-  let reviewedLocal = $state<Set<string>>(new Set());
   const currentClip = $derived(visibleClips[currentClipIndex]);
   const stream = $derived(streamQuery.data);
 
@@ -164,7 +171,13 @@
     });
   }
 
-  /** S: move the current candidate to the end of the audit queue. */
+  /**
+   * S: move the current candidate to the end of the audit queue.
+   *
+   * `unreviewedOnly` is off by DEFAULT because a candidate must stay visible: discarding is the only
+   * thing that removes a clip from view, so starting filtered would hide every existing clip behind
+   * a toggle the user never asked for.
+   */
   function snoozeClip() {
     if (!currentClip) return;
     snoozedIds = new Set([...snoozedIds, currentClip.id]);
@@ -218,8 +231,16 @@
     selectClip(clip.id);
   }
 
+  /**
+   * Select a clip and move the playhead to it.
+   *
+   * The playhead goes to the clip's START, never its `peakTime`. Selecting a candidate used to jump
+   * to the peak, which is the point the ENGINE found rather than where the clip begins — so the
+   * player landed mid-clip and the timeline's start line did not agree with the playhead. A clip has
+   * exactly two meaningful timestamps, and the one you land on when you open it is the start.
+   */
   function jumpToClip(clip: Clip) {
-    playerComp?.jumpToClipPeak(clip);
+    playerComp?.seekToExported(clip.startTime);
     selectClip(clip.id);
   }
 
@@ -238,7 +259,6 @@
   }
 
   function handleClipEnd() {
-    // Auto-advance to next clip's peak.
     nextClip();
   }
 
@@ -265,19 +285,82 @@
   }
 
   function exportClip() {
-    // Export is a first-class screen (P0-7); deep-link with the clip id.
-    window.location.href = `/export?clip=${currentClip?.id ?? ''}`;
+    // "Send to export" is a real WRITE, not just navigation: the clip is added to the durable
+    // export list, so the Export page shows what the user actually chose. Navigating alone left the
+    // list to be inferred from "every clip that still exists", which made the Review page's Export
+    // button indistinguishable from doing nothing.
+    if (!currentClip) return;
+    sendToExportMutation.mutate([currentClip.id]);
   }
 
   function exportAllClips() {
-    window.location.href = '/export';
+    // Every VISIBLE candidate — what the reviewer can see is what they mean by "all". Discarded
+    // clips are already excluded from the panel, so they are excluded here too.
+    const ids = visibleClips.map((c) => c.id);
+    if (ids.length === 0) return;
+    sendToExportMutation.mutate(ids);
   }
 
-  /** A: accept = mark reviewed and advance (persistence of accept-state is B3). */
-  function acceptClip() {
-    if (!currentClip) return;
-    reviewedLocal = new Set([...reviewedLocal, currentClip.id]);
-    nextClip();
+  /**
+   * Add clips to the export list, then open the Export screen.
+   *
+   * The navigation happens on SUCCESS: opening the page first would show a list that does not yet
+   * contain what the user just clicked, which reads as the button having failed.
+   */
+  const sendToExportMutation = createMutation(() => ({
+    mutationFn: (clipIds: string[]) => apiClient.addToExportList(clipIds),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['export-list'] });
+      window.location.href = '/export';
+    },
+  }));
+
+  /**
+   * Create a clip at the playhead, ending at the next clip's start or the VOD's end.
+   *
+   * The server computes the end (one owner for that rule). The response is adopted and the new
+   * clip is SELECTED, so pressing the button leaves the user editing what they just made rather
+   * than wondering whether anything happened.
+   */
+  function createClipAtPlayhead() {
+    if (!stream) return;
+    const at = $playerStore.currentTime;
+    createClipMutation.mutate({ streamId, startTime: at });
+  }
+
+  const createClipMutation = createMutation(() => ({
+    mutationFn: (input: { streamId: string; startTime: number }) =>
+      apiClient.createClip(input.streamId, { startTime: input.startTime }),
+    onSuccess: (created: Clip) => {
+      // Seed the cache so the new clip is present before the refetch lands, then invalidate so
+      // the panel reconciles with the server's own ordering.
+      queryClient.setQueryData<Clip[]>(['clips', streamId], (old) => [...(old ?? []), created]);
+      queryClient.invalidateQueries({ queryKey: ['clips', streamId] });
+      // Select it: creation is the one mutation whose result the user must immediately see.
+      currentClipIndex = 0;
+      jumpToClip(created);
+    },
+  }));
+
+  /**
+   * Rename a clip.
+   *
+   * The name is the `title` field, NOT the axis: `axis` is an engine enum (hype/humor/…) used by
+   * validation, filtering and axis-weight feedback, so a typed name stored there would corrupt all
+   * three. A clip keeps its axis while being renamed, and a manual clip stays axis-less.
+   *
+   * Saved through the same update route as the endpoints, optimistically into the cache so the
+   * field does not flicker back to the old value while the request is in flight. A blank name is not
+   * sent: the server refuses it, and an empty field should leave the previous name alone rather than
+   * clear it — clearing is a deliberate act, not a side effect of blurring an empty box.
+   */
+  function renameClip(clip: Clip, name: string) {
+    const trimmed = name.trim();
+    if (trimmed.length === 0 || trimmed === clip.title) return;
+    queryClient.setQueryData<Clip[]>(['clips', streamId], (old) =>
+      old?.map((c) => (c.id === clip.id ? { ...c, title: trimmed } : c)),
+    );
+    apiClient.updateClip(clip.id, { title: trimmed }).catch((err) => console.error('renameClip failed:', err));
   }
 
   function adjustEndpoints(clip: Clip, start: number, end: number) {
@@ -369,10 +452,9 @@
         if (e.shiftKey) exportAllClips();
         else exportClip();
         break;
-      case 'a': case 'A':
-        e.preventDefault();
-        acceptClip();
-        break;
+      // `A` (accept) is GONE with the Accept button: candidates are never removed by accepting, so
+      // the key marked a clip as reviewed for a state nothing read. `S` already snoozes — the one
+      // "set this aside" verb the queue has — so aliasing A to it would only hide the removal.
       case 'd': case 'D':
         e.preventDefault();
         discardClip();
@@ -384,6 +466,22 @@
       case 'o': case 'O':
         e.preventDefault();
         if (currentClip) setEndpoint('end', $playerStore.currentTime);
+        break;
+      // Aliases for in/out that clip editors' hands already know. `[` opens the clip and `]`
+      // closes it, and both are unclaimed here (I/O keep working).
+      case '[':
+        e.preventDefault();
+        if (currentClip) setEndpoint('start', $playerStore.currentTime);
+        break;
+      case ']':
+        e.preventDefault();
+        if (currentClip) setEndpoint('end', $playerStore.currentTime);
+        break;
+      // Create a clip at the playhead. Deliberately NOT a chord: this is the primary action of
+      // hand-cutting, and the no-gating rule wants it reachable in one keystroke.
+      case 'n': case 'N':
+        e.preventDefault();
+        createClipAtPlayhead();
         break;
       case 's': case 'S':
         e.preventDefault();
@@ -471,7 +569,7 @@
         title={unreachable ? 'This project\'s folder is not reachable — use Project settings → Change Location' : 'Export all clips'}
         aria-label="Export all clips"
       >
-        <Icon name="scissors" size={14} />
+        <Icon name="upload" size={14} />
         Export All
       </button>
     </div>
@@ -528,23 +626,82 @@
         {/if}
       </div>
 
-      <!-- Active clip detail -->
-      <div class="rounded-md border border-border bg-surface p-4">
-        {#if currentClip}
-          <ClipDetail
-            clip={currentClip}
-            clipIndex={currentClipIndex}
-            {streamId}
-            onPlay={() => playClip(currentClip)}
-            onExport={exportClip}
-            onDiscard={discardClip}
-            onAccept={acceptClip}
-          />
-        {:else}
-          <div class="flex items-center justify-center py-8">
-            <p class="text-sm text-ash-dim">No clip selected. Click a clip in the timeline or queue to inspect it.</p>
-          </div>
-        {/if}
+      <!-- Active clip detail, with the manual-clip action rail to its LEFT.
+           The timeline above keeps its full width: the rail takes a strip from the detail row
+           only, so nothing about the timeline's geometry changes. The rail is frameless (no
+           border, no background) — the icons read as tools belonging to the panel, not as a
+           second container competing with it. Every button is icon-only with its name on hover,
+           and every one also has a key (no-gating: a visible surface AND a keybinding). -->
+      <div class="flex gap-3">
+        <div class="flex shrink-0 flex-col items-center gap-1 pt-1" role="toolbar" aria-label="Clip actions" aria-orientation="vertical">
+          <button
+            class="rounded p-1.5 text-ash-dim transition-colors hover:bg-surface-2 hover:text-accent disabled:cursor-not-allowed disabled:opacity-30"
+            onclick={createClipAtPlayhead}
+            disabled={!stream}
+            title="Create clip — from the playhead to the next clip or the end of the video (N)"
+            aria-label="Create clip at playhead"
+          >
+            <Icon name="plus" size={16} />
+          </button>
+
+          <button
+            class="rounded p-1.5 text-ash-dim transition-colors hover:bg-surface-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30"
+            onclick={() => currentClip && setEndpoint('start', $playerStore.currentTime)}
+            disabled={!currentClip}
+            title="Set clip start to the playhead ([)"
+            aria-label="Set clip start"
+          >
+            <Icon name="bracket-left" size={16} />
+          </button>
+
+          <button
+            class="rounded p-1.5 text-ash-dim transition-colors hover:bg-surface-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30"
+            onclick={() => currentClip && setEndpoint('end', $playerStore.currentTime)}
+            disabled={!currentClip}
+            title="Set clip end to the playhead (])"
+            aria-label="Set clip end"
+          >
+            <Icon name="bracket-right" size={16} />
+          </button>
+
+          <button
+            class="rounded p-1.5 text-ash-dim transition-colors hover:bg-surface-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30"
+            onclick={prevClip}
+            disabled={visibleClips.length === 0}
+            title="Previous clip (J)"
+            aria-label="Previous clip"
+          >
+            <Icon name="arrow-left" size={16} />
+          </button>
+
+          <button
+            class="rounded p-1.5 text-ash-dim transition-colors hover:bg-surface-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30"
+            onclick={nextClip}
+            disabled={visibleClips.length === 0}
+            title="Next clip (K)"
+            aria-label="Next clip"
+          >
+            <Icon name="arrow-right" size={16} />
+          </button>
+        </div>
+
+        <div class="min-w-0 flex-1 rounded-md border border-border bg-surface p-4">
+          {#if currentClip}
+            <ClipDetail
+              clip={currentClip}
+              clipIndex={currentClipIndex}
+              {streamId}
+              onPlay={() => playClip(currentClip)}
+              onExport={exportClip}
+              onDiscard={discardClip}
+              onRename={(axis) => renameClip(currentClip, axis)}
+            />
+          {:else}
+            <div class="flex items-center justify-center py-8">
+              <p class="text-sm text-ash-dim">No clip selected. Create one at the playhead, or click a clip in the timeline or queue to inspect it.</p>
+            </div>
+          {/if}
+        </div>
       </div>
 
       <!-- Undo toast for discarded clips -->
@@ -561,7 +718,7 @@
       stream={stream}
       clips={visibleClips}
       {currentClipIndex}
-      reviewed={reviewedLocal}
+      snoozed={snoozedIds}
       onSelectClip={(i) => { currentClipIndex = i; if (visibleClips[i]) jumpToClip(visibleClips[i]); }}
     />
   </div>

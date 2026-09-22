@@ -4,6 +4,7 @@
  * Generates a 4s test video via ffmpeg lavfi, then exports a 1s sub-clip.
  */
 import { assertEquals } from "@std/assert";
+import type { ExportProfile } from "shared/types";
 import { FFmpegAdapter } from "@/adapters/outbound/ffmpeg/FFmpegAdapter.ts";
 
 const TEST_DIR = await Deno.makeTempDir({ prefix: "semaclip_export_test_" });
@@ -17,6 +18,15 @@ try {
 } catch {
   ffmpegAvailable = false;
 }
+
+const profile = (over: Partial<ExportProfile> = {}): ExportProfile => ({
+  container: "mp4", videoCodec: "h264", audioCodec: "aac", maxHeight: null,
+    encoder: "auto", encoderName: null, options: { quality: 26, maxBitrateKbps: null },
+    aspectRatio: "16:9",
+  captions: { enabled: false, preset: "bold-white", position: "bottom", fontSize: 48, backgroundOpacity: 0.8 },
+  nameTemplate: "{date}",
+  ...over,
+});
 
 Deno.test({
   name: "export produces a real, non-empty, decodable mp4",
@@ -47,17 +57,8 @@ Deno.test({
       startTime: 1,
       endTime: 3,
       outputPath: out,
-      format: "mp4_h264",
-      aspectRatio: "9:16",
-      cropPosition: "center",
-      captions: {
-        enabled: false,
-        srtPath: null,
-        preset: "bold-white",
-        position: "bottom",
-        fontSize: 48,
-        backgroundOpacity: 0.8,
-      },
+      profile: profile({ aspectRatio: "9:16" }),
+      srtPath: null,
     });
 
     assertEquals(result.exportPath, out);
@@ -85,17 +86,9 @@ Deno.test({
         startTime: 0,
         endTime: 2,
         outputPath: out,
-        format: "mp4_h264",
-        aspectRatio: "16:9",
-        cropPosition: "center",
-        captions: {
-          enabled: true,
-          srtPath: `${TEST_DIR}/nonexistent.srt`,
-          preset: "bold-white",
-          position: "bottom",
-          fontSize: 48,
-          backgroundOpacity: 0.8,
-        },
+        // Captions enabled with a transcript path that does not exist on disk.
+        profile: profile({ captions: { enabled: true, preset: "bold-white", position: "bottom", fontSize: 48, backgroundOpacity: 0.8 } }),
+        srtPath: `${TEST_DIR}/nonexistent.srt`,
       });
     } catch {
       threw = true;

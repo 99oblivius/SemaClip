@@ -8,11 +8,11 @@
     stream: Stream | undefined;
     clips: Clip[];
     currentClipIndex: number;
-    reviewed: Set<string>;
+    snoozed: Set<string>;
     onSelectClip: (index: number) => void;
   }
 
-  let { streamId, stream, clips, currentClipIndex, reviewed, onSelectClip }: Props = $props();
+  let { streamId, stream, clips, currentClipIndex, snoozed, onSelectClip }: Props = $props();
 
   let activeTab = $state<'clips' | 'chat'>('clips');
 </script>
@@ -42,7 +42,7 @@
   <!-- Tab content -->
   <div class="min-h-0 flex-1 overflow-hidden">
     {#if activeTab === 'clips'}
-      <CandidateQueue {clips} {currentClipIndex} {reviewed} {onSelectClip} />
+      <CandidateQueue {clips} {currentClipIndex} {snoozed} {onSelectClip} {streamId} />
     {:else}
       <ChatView {streamId} duration={stream?.duration ?? null} />
     {/if}

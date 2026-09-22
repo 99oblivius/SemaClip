@@ -178,3 +178,363 @@
   appears; then edit → Revert restores the saved value and writes nothing. Falsified by commenting
   out the single `adoptForm(saved)` statement, which reproduces the owner's exact symptom.
 
+### A hand-made clip records ABSENCE, and the schema had to be rebuilt to allow it
+
+- Manual clip creation needed `clips.job_id`, `clips.axis` and `clips.score` to become NULLABLE.
+  SQLite cannot drop `NOT NULL` with ALTER, so migration **0.6.0** rebuilds the table (and
+  re-creates `idx_clips_stream` + `idx_clips_job`, which go with it). Safe because **no
+  `FOREIGN KEY` is declared anywhere** in this schema, so `PRAGMA foreign_keys = ON` has nothing
+  to break.
+- **All three go nullable together, and no sentinel replaces them.** A clip with no job cannot keep
+  a fabricated `jobId`, and a manual clip's `score` must not become `0` — zero is a plausible
+  engine score, so it would present a deliberate edit as a badly-ranked detection. The panel renders
+  an explicit **manual** label and a dash, never `0.00`.
+- Consequence: manual clips are excluded from the axis-weight path (that feedback is keyed on
+  `axis`, and feedback about nothing is worse than none), and they sort by position after the
+  score-ranked candidates rather than being coerced into the ranking.
+- The end of a hand-made clip is computed on the SERVER (`createManualClip`/`clipEndFrom`): the next
+  clip's start after the playhead, else the VOD duration. One owner for the rule, so the browser
+  cannot disagree with it — and the created clip is returned and **selected**, because creation is
+  the one mutation whose result the user must immediately see.
+- **Nullability is a runtime behaviour, not a type error.** Two consumers were silently wrong in ways
+  `tsc` cannot see: the queue sort `b.score - a.score` yields `NaN` (which leaves elements in
+  implementation-defined order), and the axis filter `activeAxes.has(c.axis)` is false for `null`,
+  so turning on ANY axis filter made every hand-made clip *vanish*. Both rules are now covered by
+  `frontend/tests/manual-clip-queue.test.mjs`, falsified by reverting each.
+- Delete is the existing SOFT reject — no row is removed. It is also the only verb that now has
+  derived media to clean up: a rejected clip's thumbnails are deleted with it.
+
+### A thumbnail's cache name must carry the start, and must replace rather than accumulate
+
+- Keyed by the clip id alone, trimming a clip keeps serving the frame from the OLD start for ever —
+  and a query-string cache-buster cannot fix that, because the browser's copy is not what the server
+  reads. So the cached file is named `{clipId}@{start}.jpg`.
+- Keyed **only** by `(clip, start)` it leaks instead: `Timeline` PATCHes endpoints on every
+  `pointermove` with no debounce, so a five-second drag would leave a file per pixel moved — none of
+  which any surface can name again. So the new frame is written FIRST and the other names for that
+  clip are removed after, with an mtime guard so a file still being written by a concurrent request
+  is never a deletion candidate.
+- Verified live: trim at t=15 leaves **exactly one** file named for 15; nine consecutive drag
+  PATCHes still leave exactly one; four clips leave four files; reject deletes that clip's frames and
+  leaves the other clips' frames untouched.
+
+### The playable source is decided in ONE place, and a folder import is why
+
+- `GET /api/video` owned the ordering (proxy mp4 twin → raw proxy → HQ mp4 twin → raw HQ, each
+  stat-checked). The clip-thumbnail route needed the same file the player serves — a frame drawn
+  from a source the user is not watching is worse than no frame — so the rule moved to
+  `resolveMediaSource` in `application/view/download-view.ts` and both call it.
+- **The second consumer made a second copy a real BUG rather than duplication.** A folder-imported
+  project has media on disk and NO download artifacts at all, so a rule derived from download state
+  alone reports "no media" for a file sitting right there. `streams.vodPath` is that project's only
+  candidate, and it is also export's RENDER source, so it is in the ordering explicitly.
+- Falsified by putting HQ before the proxy: the proxy-preference test fails. The ordering is not
+  cosmetic — the proxy lands first and scrubs cheaply, which is why it is downloaded first.
+
+### Cancel STOPS and delete SWEEPS — one verb each
+
+Reported: cancelling a download "deletes the proxy and chat as well and does not actually stop
+downloading — the backend still shows progress ... Even deleting the project doesn't stop the
+downloading." Three defects, all structural, all confirmed by measurement.
+
+- **Cancel was wired to the DELETE verb.** `DELETE /download` aborts, then SWEEPS the artifact
+  directory and resets the state. So Cancel destroyed the partial download it was cancelling — the
+  owner's "deletes the proxy and chat as well". Cancel now has its own route
+  (`POST /streams/:id/download/cancel`) and stops the transfer while KEEPING every file; the
+  DELETE remains the deliberate discard verb.
+- **A cancelled run wrote its state back over the reset — the reason it "never stopped".** The
+  delete reset the state at T; the aborted run was still unwinding and its own `finalize()` wrote
+  the RUN's state at T+delta, resurrecting `phase`, the part counters and the paths just cleared.
+  `markRunLive(id, false)` then drops the RAM copy, so the next read came off DISK and served the
+  resurrected state. Measured by `tests/cancel-stops-run.test.ts` probe B: the run wrote `done`
+  over the `idle`. Fixed with ONE choke point — `runAborted` guards `persist` (all 22 progress
+  writes) and `finalize` — because an externally-aborted operation's own conclusions are
+  meaningless, including its "failed" verdict, which would otherwise overwrite the canceller's
+  intent with a word the user never chose.
+- **Deleting a project did not stop its download.** `DELETE /streams/:id` removed the record and
+  purged the directory while the run kept writing into it — and with the record gone, nothing in
+  any UI could cancel it. The route now stops the download first.
+- **The reason this survived: the whole-download path was untestable.** `run()` called
+  `downloadFmp4` and `resolveQualities` DIRECTLY, bypassing the `net` seam that `startPiece` uses,
+  so no test could drive a full run without reaching Twitch's usher. The seam now covers both — and
+  turning it on immediately revealed that the seam's own type omitted `resumeSec`/`onFragment`,
+  which every real caller passes.
+- Verified live through HTTP: create a project with real media + chat → `POST /download/cancel` →
+  **both files still present**, state `idle` and still `idle` across three re-reads → `DELETE`
+  afterwards still sweeps everything. Falsified by removing the two abort guards, which reproduces
+  the resurrection exactly.
+
+### Versioning is `v{yy}.{patch}` — two parts, always
+
+- The owner rejected a three-part version (`26.255.256`) as nonsensical. `yy` was originally a
+  Windows-Installer bound, and **no `.msi` is built at all** (`build-desktop.ts`: "NO .msi IS BUILT
+  (owner decision)"), so the overflow branch that produced a third part was dead code guarding a
+  retired constraint. It is removed, and `patch` (commits since Jan 1) is unbounded.
+- `.github/workflows/check.yml` now asserts the shape as a gate — inspecting **executable lines
+  only**, because the first version of the gate matched the prose in its own explanatory comment and
+  failed on a correct script.
+- Proved on a throwaway 256-commit repository: the rewritten script yields `26.256`, the old one
+  `26.255.256`, and a three-part version is refused with exit 1.
+
+### A clip's name is `clips.title`, not `clips.axis`
+
+- The owner asked for the "MANUAL" label to become an editable name. Writing that free text into
+  `axis` is the obvious move and it is wrong: `axis` is an engine enum that `isAxis` validates,
+  the axis filter queries and axis-weight feedback aggregates. A typed name there would fail
+  validation on the next engine write, return a bogus category from a filtered query, teach the
+  model a category the engine never emits, and erase the "manual clip = ABSENCE of axis" invariant
+  the manual-clip design rests on. Migration `0.7.0` adds `clips.title` as an **ALTER** — unlike the
+  `0.6.0` NOT NULL drop, nothing blocks it and no index is disturbed.
+- `null` means unnamed and `""` is never stored: a blank name is refused by the use case and
+  clearing is explicit (`title: null`), so an untouched field never becomes a failed edit.
+- Display precedence is `title ?? axis ?? "manual"` — the user's name, then the engine's, then the
+  KIND. The name field is never prefilled from the axis: an editable box holding an enum invites
+  overwriting detection data with prose.
+- The migration is numbered `0.7.0` and `0.6.0` keeps the nullable-columns rebuild. The live
+  database had **already applied `0.6.0`** (the owner ran the browser build), so renumbering was
+  the only safe choice — inserting `title` as a new second migration leaves an applied version
+  number untouched, and no `0.8.0` gap is ever created.
+- **A clip has exactly two timestamps, and nothing may derive a third from `peakTime`.** The peak is
+  a recorded fact that goes stale when the clip is trimmed. This showed up TWICE: as an independent
+  start line on the timeline (the peak tick sat where the clip was created while the boundaries
+  moved) and again in selection, which seeked to the peak so opening a candidate landed mid-clip.
+  The timeline's hit-test also keyed on the peak, making a clip hoverable only near a point that
+  could be outside the clip entirely — it now tests the RANGE, which is what gets drawn.
+
+
+## The export list and batch (26.255)
+
+- **Clips are persistent INDEPENDENTLY of exporting.** The export list holds REFERENCES to clips,
+  never copies: boundaries, name and axis live in `clips`, and a duplicate here would be a second
+  owner of the same truth — the recurring bug class — drifting the moment either side is edited.
+  `removed_at` is a soft flag rather than a row DELETE, so taking a clip off the list does not erase
+  that it was once on it, and a re-add can keep its original position.
+- **The batch is DURABLE, and that is a requirement rather than a preference.** A batch interrupted
+  by a restart must resume instead of silently vanishing: the user asked for those files, and a
+  half-finished batch reporting "done" is a lie about their deliverables. `export_jobs.clip_id` is
+  the PRIMARY KEY, not a surrogate id — one clip has at most one pending export, because two rows
+  would race for the same output filename. The schema makes that state unrepresentable rather than
+  relying on the queue to avoid it.
+- **Migration `0.8.0` adds both tables.** No `FOREIGN KEY` is declared, matching the rest of the
+  schema (see the 0.6.0 note); adding one only here would make this table's delete semantics differ
+  from every other. Each migration runs in its own transaction, so a failure rolls back its earlier
+  statements and records nothing (measured by fault injection).
+- **Cancel = stop the unfinished, delete the partial artifact, keep finished exports.** The artifact
+  path is RECORDED per attempt (`artifact_path`) rather than re-derived at cancel time: deriving it
+  would be a second implementation of the naming rule, and a cancel that deletes the wrong file is
+  worse than one that leaves a fragment. **`artifact_path` carries the LIVE partial while a job runs
+  and the DELIVERED file once it lands**, so `deleteArtifact` refuses `completed`/`failed` rows
+  structurally — a cancel must never be able to delete a file the user was told was ready.
+- **The running item's artifact was the one file cancel never cleaned.** Aborting makes the PUMP
+  mark the running item `cancelled` while `cancelIncomplete` waits, and `dropIncomplete` removes only
+  NON-terminal rows — so the item that certainly had a partial file was the one nobody swept. Both
+  populations are now collected. Found live (a 1.7 MB partial survived `cancelled: 0`), then pinned
+  by a unit test.
+- **`resume()` pumps whenever ANY row is queued, not only when a stranded `running` row exists.** A
+  process killed BETWEEN two items leaves rows `queued` and none `running`; gating the pump on
+  `stranded` left a durable batch sitting there for ever — the exact failure durability is meant to
+  prevent. Found by the unit test written for the queue.
+- **Progress parsing is `-progress pipe:1`, not the human stats on stderr.** The adapter's header had
+  claimed progress parsing for months while `run()` passed `-nostats` with `stdout: "null"` — a
+  comment describing a feature that did not exist. Measured: ~2 samples/sec, monotonic, correct
+  fraction, and an abort genuinely kills the encoder mid-encode.
+- **A published topic that is absent from the WS handler's TOPICS list looks wired and is not.**
+  `EXPORT_CHANGED_TOPIC` and `EXPORT_PROGRESS_TOPIC` were published from the routes and the queue
+  while missing from that list, so progress would have reached no browser at all.
+- **A mutation that changes the database must PUBLISH.** Sending a clip to export is a real write
+  (`POST /api/export/list`) followed by navigation on success — it was previously two lines of
+  `window.location.href`, which made the Review page's Export button indistinguishable from doing
+  nothing. `export_list` and `export_queue` are separate event variants because they have different
+  consequences: a batch transition also invalidates the clip rows (an export writes `exported` /
+  `export_path` onto its clip), while adding or removing a reference touches only the list.
+
+## The encoder settings are per codec, and the mapping is a measured BAND (26.255)
+
+Owner: "quality options often correlate with time to encode and in some codecs above a certain
+quality value it becomes effectively lossless. Intelligently research each codec's range of utility
+for the profile tier defaults." Quality and bitrate are both part of the encoder options and both are
+manually editable per codec; the tier defaults are measured, not chosen.
+
+- **A constant quality OFFSET between two encoders is not a mapping.** The first attempt mapped AV1 by
+  `+16`, derived by matching `av1_nvenc` against **libx264's** crf 23. That is a cross-codec
+  comparison: it says those two points agree, not how the rest of the scales relate. Measured within
+  each codec's own scale, x264's band (crf 18–30, 12 wide) maps onto `h264_nvenc` cq 26–38 (also 12
+  wide, slope 1.0) — which is why a constant `+8` happened to work for H.264 — while SVT-AV1's band
+  (crf 28–45, 17 wide) maps onto `av1_nvenc` cq 32–41 (**9 wide, slope 0.53**). A constant cannot
+  serve both; `HW_QUALITY_BANDS` stores the measured endpoints and the mapping interpolates between
+  them. The failing case is visible in one number: the old code turned the SVT-AV1 default (crf 35)
+  into `-cq 51`, the least useful cq `av1_nvenc` accepts, for a request at its own recommended quality.
+- **The test asserts band ENDPOINTS and MONOTONICITY, not a midpoint.** A single mid-band assertion
+  passes for a wrong slope; asserting both ends plus "a worse software quality never asks for a better
+  hardware quality" fails it. This is the check the original offset would not have survived.
+- **`speed` is measured and nullable.** Quality and encode time rise together, so the tradeoff is
+  recorded as data: h264 5.2x realtime at 1080p60, h265 2.2x, **vp9 0.8x** (slower than playback),
+  svt-av1 2.0x, nvenc 6.2x. H.265 and VP9 hardware speeds are `null` because no such encoder exists
+  on the reference host — nothing was timed, so nothing is claimed, and the UI omits the estimate
+  rather than quoting a number nobody took.
+- **Each band's `best` edge comes from marginal utility, not from a vendor recommendation.** VMAF
+  gained per 1000kbps: h264 5.70 stepping 30→26, but **0.35** stepping 18→16. Past that point the
+  codec is effectively lossless and more quality buys only bytes and time. This is what "above a
+  certain quality value it becomes effectively lossless" means as a number.
+- **A hardware encoder that silently falls back is worse than one that fails.** `av1_nvenc` was absent
+  from `HW_UPLOAD_FOR`, so the lookup fell through to bare `hwupload` ("A hardware device reference is
+  required to upload frames to") and the export fell back to the CPU while returning a valid file and
+  reporting success. Measured: `hwupload` fails for BOTH nvenc encoders, `hwupload_cuda` works for
+  both. The GPU probe was also codec-blind — it answered `h264_nvenc` to a question about AV1, which
+  the hardware check then correctly refused, producing the same silent fallback. Both are fixed and
+  the live check now asserts the backend that RAN (`av1_nvenc`), not merely that a file appeared.
+- **The automatic bitrate ceiling is gone, not retuned.** It was codec-blind (6000 kbps at 1080p for
+  H.264/H.265/VP9/AV1 alike) and existed to compensate for the quality-scale bug. At a matched quality
+  nvenc is at parity (1.03x), so capping by default would cap a file that is not oversized. The
+  ceiling is now opt-in, per codec, with a measured starting point.
+- **Encoder choice is per codec and reflects measurement**: H.264 on the CPU (parity at matched
+  quality, universally decodable), AV1 on the GPU (smaller at comparable quality, ~3x the software
+  encoder's speed). The owner's read — H.264 popular on CPU, AV1 sensibly hardware — is what the
+  measurements support, and the user can override either default.
+- **The encoder picker lists what the MACHINE offers, per codec, verified by encoding — the OBS
+  model.** `probeGpuEncoder` and `listEncodersFor` are deliberately two routines: the first answers
+  "which should we default to?" and stops at the first working family; the second answers "what can we
+  offer?" and tries every family. Using the first for the picker is what made the page claim "no
+  hardware encoder on this machine" for every codec whose hardware was not nvenc, when this host has
+  two H.264 encoders, two H.265 encoders and one AV1 encoder. Families are filtered to the useful
+  vendors (NVENC, VAAPI/AMD, QSV/Intel, AMF/Windows, and the software entries); a family that is
+  platform-gated (AMF) is not offered off its platform.
+- **A NAMED encoder outranks the profile's default, and that precedence is explicit code.** The name
+  and the `encoder: auto|software|hardware` field are two channels onto one decision, and the field was
+  overruling the name: a profile naming `h264_nvenc` with `encoder: "auto"` — which is exactly what
+  picking from the list produces — ran libx264. Precedence is now named > probed hardware > named
+  software > per-codec default, unit-tested, and cannot return null.
+- **A measured speed is keyed by ENCODER, never by backend or codec.** `h264_nvenc` (RTX 4090) and
+  `h264_vaapi` (AMD iGPU) are different silicon, so reporting one's measurement under the other's name
+  is a borrowed number that reads as measured. Absent means unmeasured, and the UI shows nothing.
+- **VAAPI rate control is CQP, and pairing `-rc_mode VBR` with `-qp` is refused by ffmpeg** (exit 234,
+  "Could not open encoder before EOF", nothing written). That shipped, so every VAAPI export failed and
+  the silent CPU fallback absorbed it — the caller saw a valid file and a success throughout. The
+  lesson generalises: **assert the backend that RAN, because a silent fallback hides encoder-config
+  bugs completely.** Verified after the fix: a named `h264_vaapi` export reports `backend:
+  "h264_vaapi"` with no fallback in the log, alongside `h264_nvenc` and `cpu` for a named libx264.
+
+## Preset origin is DATA, and the drizzle `.get()` trap it exposed
+
+- **Deletability is a COLUMN on the row, not a hardcoded id list in the UI.** The frontend held
+  `DEFAULT_PRESET_IDS = new Set(['preset-tiktok-916', ...])`, which is the wrong owner for a property
+  of a row: the set has to be edited in step with `DEFAULT_PRESETS`, and the server — which owns the
+  data and can be called by anything — would delete a seeded preset while the UI still assumed it
+  could not. `export_presets.origin` ('seeded' | 'user') gives ONE owner, and the DELETE route refuses
+  a seeded preset BY NAME (409 with the reason) instead of trusting a client not to ask.
+- **`origin` is NOT written into `config_json`, and is omitted from the update set on conflict.** Two
+  owners of one fact drift, and re-saving over a seeded preset must not promote it into a deletable
+  one — the origin is a property of the existing ROW, so the repo's `onConflictDoUpdate` deliberately
+  leaves the column alone. A test asserts both halves.
+- **Drizzle `.get()` returns COLUMNS AS ARRAYS here, so it is unusable.** `createDb` runs drizzle over
+  a remote callback; selecting `{ origin }` returned `{ origin: ["user"] }` for a user preset and `{}`
+  for no match. Both failure modes are silent and both were live in the first version of `originOf`:
+  a user preset compared as unequal to `"user"` and reported as `seeded`, and a missing row never
+  tripped `if (!row)`, making the route's 404 branch dead code — an unknown preset answered 409
+  "ships with the app". Fixed by reading with `.all()` and type-checking `rows[0].origin`; every
+  pre-existing repository already did this, which is why nothing had hit it before.
+- **The 0.9.0 migration backfills every existing preset as `seeded`, and that is the CORRECT value,
+  not a convenient one.** User presets did not exist before this version, so any preset already in
+  someone's database was one the app shipped. It also fails safe: a wrongly-seeded preset is merely
+  undeletable, while a wrongly-user one is deletable when it should not be. Verified on the live DB
+  (3 presets backfilled, none lost) and pinned by a test that builds the schema at the PREVIOUS
+  version, migrates, and asserts the backfill; falsified by removing the `DEFAULT` (the migration
+  still applies, and the test fails with the right message).
+
+## Presets are normalised on READ, because the stored shape is not the only shape
+
+`export_presets.config_json` holds the profile, and TWO shapes exist in real databases: the legacy FLAT
+subset (`format`/`aspectRatio`/`cropPosition`/`captions`/`nameTemplate`) and the full nested profile.
+`list()` spread the blob verbatim, so a legacy row reached the client with NO `profile` field and every
+`preset.profile.x` read threw. A thrown `$derived` does not render an error — it aborts the render — so
+the export page sat on "Loading presets…" for ever while the HTTP request returned 200. The query had
+succeeded and the DATA was the problem, which is why no unit test caught it: the suite asserted the
+shape the CODE produced, not the shape the DATA had.
+
+Fixed by normalising on read (`normaliseProfile` already understands the legacy `format`), NOT by
+migrating the blobs. Reasons: it is idempotent by construction, it degrades an unreadable field instead
+of failing, and it therefore also repairs hand-edited rows — a JSON-rewriting migration would need the
+same tolerance to be safe and would still leave an unparseable row broken. Pin it with a test whose
+fixtures are the ACTUAL blobs from a live database.
+
+## Setters and radios are different kinds of control, and Revert needs the distinction
+
+A quality TIER is a one-shot SETTER: pressing it writes a quality AND a bitrate, then the buttons all
+read unselected, because the user took an ACTION rather than selecting a mode. A tier staying lit was
+the category error — the same as a Save button staying pressed — so `selectedTier` was removed entirely,
+along with any derivation of a tier from a quality number. FORMAT, aspect ratio, encoder and the caption
+controls are RADIOS: their current value is the state, so reverting writes the preset's value back.
+
+`applyPreset` and `revertToPreset` are now ONE operation (`writeValues(valuesFromPreset(p))`), differing
+only in whether the preset is adopted as active. Two separate implementations were why Revert missed
+controls: every new control had to be added twice and only one site got updated.
+
+## A format change OVERRIDES the bitrate; it does not overwrite the user's choice
+
+Switching to a different codec makes the source's own bitrate unusable (a transcode has no original rate
+to fall back to), so the control moves to a forced one. That is a TEMPORARY override: what the user had
+is remembered and restored when they return to the source's format, so a round-trip leaves them where
+they started rather than silently converting "use the source's rate" into a pinned number they never
+chose.
+
+## `{platform}` was a fabricated token, and the fix had to be a data migration
+
+`{platform}` resolved to the FIRST WORD OF THE PRESET NAME (falling back to the literal `"export"`), and
+the seeded templates baked in a literal `-tiktok` / `-shorts`. There is no platform concept in the app:
+the token described a display name, changed when a preset was renamed, and wrote invented text into a
+filename. Removed, along with the literal. Because the text lived in every existing database's rows,
+removing it from `DEFAULT_PRESETS` alone would have fixed only fresh installs — migration 0.10.0 strips
+it from a SEEDED preset whose template is EXACTLY the shipped literal, so a user's own text in any
+preset, seeded or not, is untouched. Both guards are individually falsified.
+
+## Crop position was removed as a concept, not just as a control
+
+Removing only the UI would have left a profile field no user could ever set — dead config that still
+round-trips through save/load and still needs testing. Every existing preset was already `center`, so
+removing the type, the domain maths, the seeded values and the control changes no behaviour; the vertical
+crop is computed centred. A vertical crop of a 16:9 source has no better answer than the middle, and
+offering three positions invited cutting off heads or feet while looking for framing that had already
+been chosen.
+
+## The unreleased 0.6.0-0.10.0 range was FLATTENED into one migration
+
+Five version numbers (0.6.0 through 0.10.0) accumulated while the code was never published. The highest
+schema any SHIPPED release created is **0.5.0** (`v26.252` / `v26.253` — the tags are the publication
+boundary, not the branch: `refs/heads/main` on origin matched local HEAD the whole time), so those five
+numbers described the author's working history rather than any state a user can be in. They are now ONE
+migration, 0.6.0.
+
+Why this is not cosmetic:
+
+- **0.6.0 is a REBUILD (`DROP TABLE` + rename + recreate).** It is the one kind of migration that can
+  lose rows, and chaining four more migrations onto it multiplied the number of ways that single step
+  could go wrong. One unreleased step is one migration.
+- Five numbers for one step is noise in a list whose entire job is to describe the path from a user's
+  database to the current schema.
+- The consolidation had to happen NOW. Once a build containing 0.6.0-0.10.0 is pushed, a released state
+  exists at each of those versions and merging them becomes unsafe (it would either skip or replay DDL a
+  user already has). It is only flattenable while none of them has ever been published.
+
+**The statements were kept in their ORIGINAL ORDER and unedited.** Nothing was "simplified" while
+merging: the rebuilt `clips` table still gets 0.7.0's `title` column from a later statement rather than
+by editing the rebuild, because editing that DDL would be a NEW migration wearing an old version number
+— a change no existing reader has ever validated. The end state is identical by construction, and the
+tests assert the same outcomes (0.5.0 → latest with real rows, the rebuild preserving every row, the
+template strip, the origin backfill) that they asserted before.
+
+**One consequence worth stating:** the `origin = 'seeded'` condition on the template UPDATE became
+INERT. It was correct when that statement was its own migration, where only pre-existing rows had been
+backfilled. Merged into 0.6.0, the origin backfill earlier in the SAME migration sets every row to
+`seeded` and no `user` row can exist yet, so the condition could never exclude anything. It was removed
+rather than left in place reading as protection while preventing nothing. The guards that DO protect a
+user's text are the id match and the exact-template match, and each now has its own test with its own
+database — they cannot share a fixture, because `id` is the primary key and "shipped template" vs
+"template the user edited" are two states of the SAME id. An earlier test put the edited row under a
+different id, so the id guard excluded it and the template guard was never exercised: it passed while
+proving nothing about the guard it named. Falsifying that guard is what exposed it.
+
+**`schema_versions` rows for 0.7.0-0.10.0 may still exist** on a database that ran a pre-consolidation
+build (the developer's own does). They are harmless: the runner reads the table into a SET and compares
+it against the `migrations` array, so an unknown recorded version is simply never matched and nothing
+re-runs — verified by opening a database recorded through 0.10.0 against the consolidated set, which
+applies zero migrations and returns a usable handle.

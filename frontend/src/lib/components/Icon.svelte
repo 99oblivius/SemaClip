@@ -6,7 +6,12 @@
     | 'grid' | 'waveform' | 'clock' | 'cpu' | 'volume' | 'volume-mute' | 'expand' | 'compress'
     | 'rewind' | 'fast-forward' | 'zoom-in' | 'zoom-out' | 'keyboard' | 'back' | 'shuffle'
     | 'eye' | 'bookmark' | 'film' | 'arrow-left' | 'arrow-right' | 'gauge' | 'frame'
-    | 'layers' | 'music' | 'caption' | 'image' | 'edit' | 'flag' | 'refresh' | 'folder';
+    | 'layers' | 'music' | 'caption' | 'image' | 'edit' | 'flag' | 'refresh' | 'folder'
+    // Brackets: the clip in/out glyphs. `[` and `]` are also the keyboard verbs for setting an
+    // endpoint, so the icon states the same thing the key does.
+    | 'bracket-left' | 'bracket-right'
+    // An arrow leaving a tray: "send this OUT of the app". Export is what leaves; scissors cut.
+    | 'upload';
 
   interface Props {
     name: IconName;
@@ -38,6 +43,11 @@
     alert: 'M12 3l10 17H2zM12 9v5M12 17h.01',
     'chevron-right': 'M9 6l6 6-6 6',
     'chevron-left': 'M15 6l-6 6 6 6',
+    // Square brackets: straight verticals with short top/bottom arms. Drawn on the same 24-box as
+    // everything else, and deliberately squarer than the chevrons they replace — a bracket says
+    // "this edge is the boundary", a chevron says "go this way".
+    'bracket-left': 'M14 4H6v16h8',
+    'bracket-right': 'M10 4h8v16h-8',
     close: 'M6 6l12 12M18 6L6 18',
     search: 'M11 4a7 7 0 100 14 7 7 0 000-14zM21 21l-5-5',
     grid: 'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z',
@@ -62,6 +72,9 @@
     'arrow-left': 'M19 12H5M12 19l-7-7 7-7',
     'arrow-right': 'M5 12h14M12 5l7 7-7 7',
     gauge: 'M12 4a8 8 0 100 16 8 8 0 000-16zM12 12l4-3',
+    // An arrow leaving an open tray: "send this OUT of the app". Export is what leaves; scissors
+    // are for cutting, which is what the REVIEW page does.
+    upload: 'M12 15V3M8 7l4-4 4 4M4 15v4a2 2 0 002 2h12a2 2 0 002-2v-4',
     layers: 'M12 3l9 5-9 5-9-5 9-5zM3 13l9 5 9-5M3 17l9 5 9-5',
     music: 'M9 18a2 2 0 100 4 2 2 0 000-4zM9 20V5l10-2v13M19 16a2 2 0 100 4 2 2 0 000-4',
     caption: 'M3 5h18v12H8l-5 4zM7 10h6M7 13h10',

@@ -18,8 +18,8 @@ Everything here was measured against Deno 2.9.6. `deno desktop` is
 There is **one continuous line of releases** and no channel of any kind. A version
 suffix (`-nightly`, `-beta`) fails the build: CI asserts the version has no suffix.
 
-**`yy` is not a stylistic choice — it is what makes the Windows installer build at
-all.** Windows Installer packs `ProductVersion` as
+**`yy` is not a stylistic choice — it is a Windows Installer constraint that
+outlived the installer.** Windows Installer packs `ProductVersion` as
 `major(0-255).minor(0-255).build(0-65535)`, so the original full-year scheme was
 rejected outright by `deno desktop`:
 
@@ -28,11 +28,13 @@ error: deno.json `version` "2026.141" cannot be used as an MSI ProductVersion:
 the major field 2026 exceeds the maximum of 255.
 ```
 
-`26.196` fits (and keeps fitting until 2255). The commit count fits the minor
-field while it is ≤255; past that `version.sh` moves the count into the build
-field (`26.255.<patch>`), which stays encodable. One version serves the app, the
-updater and the installer — there is no separate MSI version to keep in sync. Do
-not "restore" the full year.
+`26.196` fits (and keeps fitting until 2255). **The scheme is exactly two parts,
+always, and the commit count is NOT bounded** — past 255 it keeps counting
+(`26.256`, `26.257`, …). The installer's *minor* bound is moot because no `.msi`
+is built any more (see below), so the three-part overflow form `26.255.<patch>` was
+deleted along with it; `version.sh` now refuses any version that is not
+`{yy}.{patch}`, so reintroducing the third field fails before it can be baked into
+a binary. Do not "restore" the full year either.
 
 The script writes the version into **both** `frontend/package.json` (the UI
 banner, via `vite.config.ts`) and `server/deno.json` (baked into the binary as

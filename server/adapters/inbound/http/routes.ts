@@ -16,20 +16,29 @@ import type {
   ListClipsUseCase,
   GetClipUseCase,
   RejectClipUseCase,
+  CreateClipUseCase,
   UpdateClipUseCase,
+  ClearExportedMarkUseCase,
   ExportClipUseCase,
+  ExportQueue,
   ManageQueueUseCase,
   SettingsUseCase,
   SetProjectLocationUseCase,
 } from "@/application/use-cases/mod.ts";
-import type { Axis, StreamStatus } from "shared/types";
+import type { Axis, StreamStatus, ExportListEntry, VideoCodec } from "shared/types";
+import { CODEC_QUALITY_BANDS, HW_QUALITY_BANDS, MEASURED_ENCODER_SPEEDS } from "shared/types";
+import {
+  type ExportProfile,
+  normaliseProfile,
+  validateExportProfile,
+} from "shared/types";
 import type { FolderPickerPort } from "@/application/ports/folder-picker.ts";
 import type { DownloadState as DownloadStateType } from "@/adapters/outbound/vod/download-orchestrator.ts";
-import type { EventBus, StreamMetadataRepository, StreamStorage, VodDownloadPort } from "@/application/ports/outbound.ts";
+import type { EventBus, MediaProbePort, StreamMetadataRepository, StreamStorage, VodDownloadPort } from "@/application/ports/outbound.ts";
 import type { SqliteExportPresetRepository } from "@/adapters/outbound/persistence/repositories.ts";
 import { parseSrt } from "@/adapters/outbound/transcribe/srt-parse.ts";
 import { cuesToSrt } from "@/adapters/outbound/transcribe/srt-write.ts";
-import { probeGpuEncoder } from "@/adapters/outbound/ffmpeg/gpu-probe.ts";
+import { listEncodersFor, probeGpuEncoder } from "@/adapters/outbound/ffmpeg/gpu-probe.ts";
 import {
   extractVodId,
   resolveQualities,
@@ -38,6 +47,10 @@ import {
 } from "@/adapters/outbound/vod/hls.ts";
 import { clampToServable, limitBytes, parseRangeHeader } from "@/adapters/inbound/http/range.ts";
 import { projectDownloadView } from "@/application/view/project-download-view.ts";
+import { resolvePlayback, resolveMediaSource } from "@/application/view/download-view.ts";
+import type { ThumbnailSource, ThumbnailCache } from "@/adapters/outbound/media/thumbnails.ts";
+import { EXPORT_CHANGED_TOPIC, STREAM_CHANGED_TOPIC } from "@/application/ports/outbound.ts";
+import type { ExportListRepository } from "@/application/ports/outbound.ts";
 import { fragmentBoundaryAt, parseIndex } from "@/adapters/outbound/vod/fmp4.ts";
 import { run, spawnChild } from "@/adapters/outbound/process/spawn.ts"
 import type { ChildHandle } from "@/adapters/outbound/process/spawn.ts";;
@@ -112,8 +125,19 @@ export interface HttpDeps {
   listClips: ListClipsUseCase;
   getClip: GetClipUseCase;
   rejectClip: RejectClipUseCase;
+  createClip: CreateClipUseCase;
+  /** Clip thumbnails: derived data whose cache IS the file (no state to keep in sync). */
+  thumbnails: ThumbnailCache;
+  /** Source media probing, for the export's source-bitrate semantics. */
+  mediaProbe: MediaProbePort;
   updateClip: UpdateClipUseCase;
+  /** Drop a clip's `exported` mark when its request is withdrawn or replaced. */
+  clearExportedMark: ClearExportedMarkUseCase;
   exportClip: ExportClipUseCase;
+  /** The durable list of clips the user means to export (references, never copies). */
+  exportList: ExportListRepository;
+  /** The durable, resumable export batch. */
+  exportQueue: ExportQueue;
   manageQueue: ManageQueueUseCase;
   settings: SettingsUseCase;
   presets: SqliteExportPresetRepository;
@@ -128,7 +152,8 @@ export interface HttpDeps {
   touchDownload: (streamId: string) => void;
   /** Remove a project's downloaded media directory. */
   purgeArtifacts: (streamId: string) => Promise<{ bytes: number }>;
-  cancelDownload: (streamId: string, kind?: "proxy" | "hq" | "chat") => Promise<boolean>;
+  /** Stop a whole download and KEEP its files (the cancel verb, distinct from the delete below). */
+  cancelDownload: (streamId: string) => Promise<{ stopped: boolean; queued: boolean }>;
   cancelPiece: (streamId: string, kind: "proxy" | "hq" | "chat") => Promise<boolean>;
   deleteVideo: (streamId: string) => Promise<{ deleted: boolean }>;
   deleteProxy: (streamId: string) => Promise<{ deleted: boolean }>;
@@ -147,6 +172,42 @@ export interface HttpDeps {
 // bottleneck. Cache the parsed + mapped messages by file path + mtime.
 const chatCache = new Map<string, { mtime: number; msgs: { t: number; user: string; body: string }[] }>();
 
+/**
+ * Which file a clip's thumbnail should be extracted from, and at what second.
+ *
+ * The choice reuses the DOWNLOAD VIEW's own playback resolution rather than re-deriving
+ * "which file is the video" here — the view is the one owner of that answer, and a second
+ * derivation is the two-owners bug this codebase keeps producing. That also means the proxy is
+ * preferred automatically (it is what review plays, and it is a fraction of the I/O for one
+ * 320px frame), with the HQ render as the fallback for a project that never had a proxy.
+ *
+ * Returns null when there is nothing on disk: the route then answers 404 and the UI shows a
+ * placeholder, which is the honest outcome.
+ */
+async function thumbnailSourceFor(
+  deps: HttpDeps,
+  streamId: string,
+  atSec: number,
+): Promise<ThumbnailSource | null> {
+  const dl = await deps.downloadState(streamId);
+  const stream = await deps.getStream.execute(streamId);
+  const present = (p: string) => Deno.stat(p).then(() => true).catch(() => false);
+
+  // ONE source rule shared with the player (see resolveMediaSource): a frame drawn from a
+  // different file than the user is watching is worse than no frame. A folder-imported project
+  // is the case that matters — media on disk with NO download state, so `vodPath` is its only
+  // candidate and a download-state-only rule would report "no media" for a file sitting there.
+  const path = await resolveMediaSource({
+    proxyMp4: dl.proxyMp4,
+    proxyPath: dl.proxyPath,
+    hqMp4: dl.hqMp4,
+    hqPath: dl.hqPath,
+    vodPath: stream?.vodPath ?? null,
+    present,
+  });
+  return path ? { path, timeSec: atSec } : null;
+}
+
 async function loadChat(chatPath: string): Promise<{ t: number; user: string; body: string }[]> {
   const stat = await Deno.stat(chatPath);
   const mtime = stat.mtime?.getTime() ?? 0;
@@ -163,10 +224,20 @@ async function loadChat(chatPath: string): Promise<{ t: number; user: string; bo
   return msgs;
 }
 
-/** Domain errors → HTTP status codes. */
+/**
+ * Domain errors → HTTP status codes.
+ *
+ * A refusal the USER can act on is a 400, not a 500: a 500 says "the server broke", and there is
+ * nothing the user can do with that. Two of these reached the UI as 500s on ordinary actions —
+ * clearing the Name field, and exporting with captions enabled on a stream that has no transcript —
+ * so both are named here and return the reason for the page to show.
+ */
 function errorStatus(msg: string): 400 | 404 | 500 {
   if (/not found|not available/i.test(msg)) return 404;
-  if (/already terminal|can only reorder|invalid|unsupported|not yet downloaded/i.test(msg)) return 400;
+  if (
+    /already terminal|can only reorder|invalid|unsupported|not yet downloaded|a clip name cannot be empty|captions enabled|no video file to export from/i
+      .test(msg)
+  ) return 400;
   return 500;
 }
 
@@ -274,6 +345,27 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   // Delete a download: abort any in-flight run, remove its artifacts, reset
   // the state to idle (also clears stuck/orphaned states — the old "cancel"
   // was a no-op for those).
+  // ── Cancel a whole download ──
+  //
+  // PAUSE the transfer and KEEP the files. This used to be `DELETE /download`, which swept the
+  // artifact directory: the owner reported that pressing Cancel "deletes the proxy and chat as
+  // well", and a cancel may not destroy the work it is cancelling. Discarding is the DELETE below,
+  // and the two are now separate verbs.
+  app.post("/api/streams/:id/download/cancel", async (c) => {
+    const streamId = c.req.param("id");
+    try {
+      const result = await deps.cancelDownload(streamId);
+      return c.json({ ok: true, ...result });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  // ── Delete a download ──
+  //
+  // Aborts every live run, sweeps the artifacts and resets the state to idle (also clears
+  // stuck/orphaned states — the old "cancel" was a no-op for those). ?piece=<kind> does the same
+  // for ONE artifact.
   app.delete("/api/streams/:id/download", async (c) => {
     const streamId = c.req.param("id");
     // ?piece=<kind> cancels just that piece: it aborts the run AND removes the
@@ -394,6 +486,11 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
 
   app.delete("/api/streams/:id", async (c) => {
     const id = c.req.param("id");
+    // STOP THE DOWNLOAD FIRST. Deleting the project record while a run was live left that run
+    // writing chunks into a directory the very next line purges, and — with the record gone —
+    // nothing left in any UI to cancel it with. The owner saw exactly that: "even deleting the
+    // project doesn't stop the downloading".
+    await deps.cancelDownload(id);
     await deps.deleteStream.execute(id);
     // Media artifacts live outside the storage tree — purge them too, or the
     // downloaded gigabytes stay on disk after the project is gone (and remain
@@ -485,31 +582,203 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     return c.json(clips);
   });
 
+  /**
+   * Create a clip BY HAND at a playhead position — no engine involved.
+   *
+   * `endTime` is optional: the server computes it (next clip's start, else the VOD's end) so
+   * the rule lives in one place instead of being re-derived in the browser. The response
+   * carries the created clip, since the client cannot know the computed end.
+   *
+   * Publishes `stream:changed`, because a clip appearing in the panel is exactly the case the
+   * skill's refresh model warns about: a mutation that writes the DB without announcing makes
+   * the UI lag until an unrelated poll happens.
+   */
+  app.post("/api/streams/:id/clips", async (c) => {
+    const streamId = c.req.param("id");
+    const body = await c.req.json().catch(() => ({}));
+    const clip = await deps.createClip.execute(streamId, {
+      startTime: body?.startTime,
+      endTime: body?.endTime,
+    });
+    bus.publish(STREAM_CHANGED_TOPIC, { type: "stream_changed", streamId, reason: "clip" });
+    return c.json(clip, 201);
+  });
+
   app.get("/api/clips/:id", async (c) => {
     const clip = await deps.getClip.execute(c.req.param("id"));
     if (!clip) return c.json({ error: "Clip not found" }, 404);
     return c.json(clip);
   });
 
+  /**
+   * One frame at the clip's start, extracted on first request and cached thereafter.
+   *
+   * A 404 is a legitimate answer here (no video on disk yet, or the file vanished) and the UI
+   * renders a placeholder for it. It is deliberately NOT a fabricated image: the panel must
+   * never show a thumbnail for media that is not there.
+   */
+  app.get("/api/clips/:id/thumbnail", async (c) => {
+    const clip = await deps.getClip.execute(c.req.param("id"));
+    if (!clip) return c.json({ error: "Clip not found" }, 404);
+
+    const bytes = await deps.thumbnails.get(
+      clip.streamId,
+      clip.id,
+      clip.startTime,
+      await thumbnailSourceFor(deps, clip.streamId, clip.startTime),
+    );
+    if (!bytes || bytes.length === 0) return c.json({ error: "No thumbnail available" }, 404);
+    // `new Uint8Array(...)` re-wraps into a non-shared ArrayBuffer: `Deno.readFile` returns
+    // `Uint8Array<ArrayBufferLike>`, which Hono's `c.body` overload rejects (it wants
+    // `Uint8Array<ArrayBuffer>`), and TS reports that as a missing-overload error rather than
+    // a type mismatch at the call.
+    return c.body(new Uint8Array(bytes), 200, {
+      "Content-Type": "image/jpeg",
+      // The cache KEY includes the clip's start time, so a frame drawn from a stale start can
+      // never be served — there is no invalidation step to get wrong. The browser still needs
+      // its own copy busted when the start changes, which the `?at=` query does.
+      "Cache-Control": "private, max-age=300",
+    });
+  });
+
   app.post("/api/clips/:id/reject", async (c) => {
     const clip = await deps.rejectClip.execute(c.req.param("id"));
+    // Rejecting REMOVES the clip from the review surface, so every surface showing it must be
+    // told — this is the same publish the delete path needs, and its absence was the class of
+    // bug where a mutation took up to 30s to appear.
+    bus.publish(STREAM_CHANGED_TOPIC, { type: "stream_changed", streamId: clip.streamId, reason: "clip" });
     return c.json(clip);
   });
 
   // Persist review edits (trim endpoints).
   app.patch("/api/clips/:id", async (c) => {
     const body = await c.req.json();
-    const patch: { startTime?: number; endTime?: number } = {};
+    const patch: { startTime?: number; endTime?: number; title?: string | null } = {};
     if (body.startTime !== undefined) patch.startTime = Number(body.startTime);
     if (body.endTime !== undefined) patch.endTime = Number(body.endTime);
+    // The clip's NAME. Not `axis`: that column is an engine enum (see the 0.8.0 migration).
+    if (body.title !== undefined) patch.title = body.title === null ? null : String(body.title);
     const clip = await deps.updateClip.execute(c.req.param("id"), patch);
     return c.json(clip);
   });
 
   app.post("/api/clips/:id/export", async (c) => {
     const body = await c.req.json();
-    const result = await deps.exportClip.execute({ clipId: c.req.param("id"), ...body });
+    const clipId = c.req.param("id");
+    const result = await deps.exportClip.execute({ clipId, ...body });
+    // "Export this clip" REPLACES the clip's file, exactly like the batch route: the previous run's
+    // `exported` mark is stale the moment this one succeeds, so the badge must not keep claiming a
+    // finished export while the new file sits there unverified by the UI.
+    await deps.clearExportedMark.execute(clipId);
     return c.json(result, 201);
+  });
+
+  // ── The export LIST: durable references to the clips the user means to export ──
+  //
+  // References, not copies: the clip's boundaries, name and axis live in `clips`, and a snapshot
+  // here would be a second owner that drifts the moment either side is edited.
+  app.get("/api/export/list", async (c) => {
+    const rows = await deps.exportList.list();
+    const entries: ExportListEntry[] = [];
+    for (const row of rows) {
+      const clip = await deps.getClip.execute(row.clipId);
+      // A clip the list points at but which no longer exists is reported with clip: null rather
+      // than dropped — silently omitting it would make the list length disagree with what the user
+      // added, and the page can then say so.
+      const stream = clip ? await deps.getStream.execute(clip.streamId) : null;
+      entries.push({
+        clipId: row.clipId,
+        streamId: clip?.streamId ?? "",
+        streamTitle: stream?.title ?? "Unavailable",
+        position: row.position,
+        addedAt: row.addedAt,
+        clip,
+      });
+    }
+    return c.json({ entries });
+  });
+
+  app.post("/api/export/list", async (c) => {
+    const body = await c.req.json() as { clipIds?: string[] };
+    const clipIds = Array.isArray(body.clipIds) ? body.clipIds.filter((id) => typeof id === "string") : [];
+    if (clipIds.length === 0) return c.json({ error: "clipIds is required" }, 400);
+    await deps.exportList.add(clipIds);
+    bus.publish(EXPORT_CHANGED_TOPIC, { type: "export_list", reason: "added" } as never);
+    return c.json({ ok: true, added: clipIds.length });
+  });
+
+  app.delete("/api/export/list/:clipId", async (c) => {
+    const clipId = c.req.param("clipId");
+    await deps.exportList.remove(clipId);
+    // Taking a clip OFF the list withdraws the request, so the `exported` mark must go with it.
+    //
+    // The mark says "a file was produced for this", and the user has just said they are not sending
+    // it — leaving the badge up next to a clip they removed states the opposite of their own action.
+    // The FILE is deliberately left alone: it is the user's, and a list edit must not delete an
+    // export they still hold.
+    await deps.clearExportedMark.execute(clipId);
+    bus.publish(EXPORT_CHANGED_TOPIC, { type: "export_list", reason: "removed" } as never);
+    return c.json({ ok: true });
+  });
+
+  app.delete("/api/export/list", async (c) => {
+    // Same rule for the whole list: every entry is being withdrawn, so every mark goes with it.
+    const clearing = await deps.exportList.liveIds();
+    await deps.exportList.clear();
+    for (const clipId of clearing) await deps.clearExportedMark.execute(clipId);
+    bus.publish(EXPORT_CHANGED_TOPIC, { type: "export_list", reason: "cleared" } as never);
+    return c.json({ ok: true });
+  });
+
+  // ── The export BATCH: durable, resumable, cancellable ──
+  app.get("/api/export/queue", async (c) => c.json(await deps.exportQueue.view()));
+
+  app.post("/api/export/queue", async (c) => {
+    const body = await c.req.json().catch(() => ({})) as {
+      profile?: ExportProfile;
+      outputDir?: string | null;
+      filename?: string | null;
+      clipIds?: string[];
+    };
+    // A profile the client sent is validated and refused BY NAME, exactly as the single-clip route
+    // does: normalising it here would hand back a file labelled as something the user did not ask
+    // for.
+    if (body.profile) {
+      const check = validateExportProfile({
+        container: body.profile.container,
+        videoCodec: body.profile.videoCodec,
+        audioCodec: body.profile.audioCodec,
+        maxHeight: body.profile.maxHeight,
+      });
+      if (!check.ok) return c.json({ error: `Invalid export profile: ${check.reason}` }, 400);
+    }
+    // The clips this batch will actually re-encode, resolved BEFORE enqueueing so the ids are the
+    // real set (the body may omit `clipIds` and mean "everything on the list").
+    const batchClipIds = body.clipIds ?? await deps.exportList.liveIds();
+    const result = await deps.exportQueue.enqueueAll({
+      profile: normaliseProfile(body.profile ?? {}),
+      outputDir: body.outputDir ?? null,
+      filename: body.filename ?? null,
+      ...(body.clipIds ? { clipIds: body.clipIds } : {}),
+    });
+    // A re-send REPLACES the file, so the previous run's `exported` mark stops being true the moment
+    // this one is accepted. Leaving it up showed `✓ exported` for a clip whose new encode had not
+    // even started. Done after the enqueue so a refused enqueue cannot clear a mark for work the
+    // server never took on.
+    for (const clipId of batchClipIds) await deps.clearExportedMark.execute(clipId);
+    return c.json(result, 201);
+  });
+
+  app.delete("/api/export/queue", async (c) => {
+    // Cancels every INCOMPLETE item and deletes the partial artifacts they left. Completed clips are
+    // untouched — the owner's rule, and the reason this is not a "clear the queue" verb.
+    const result = await deps.exportQueue.cancelIncomplete();
+    return c.json({ ok: true, ...result });
+  });
+
+  app.delete("/api/export/queue/:clipId", async (c) => {
+    const ok = await deps.exportQueue.cancelItem(c.req.param("clipId"));
+    return c.json({ ok }, ok ? 200 : 404);
   });
 
   // ── Chat density (per-second message counts) for signal terrain ──
@@ -1326,13 +1595,50 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   // ── Export presets (P0-7) ──
   app.get("/api/presets", async (c) => c.json(await deps.presets.list()));
   app.put("/api/presets/:id", async (c) => {
-    const body = await c.req.json();
+    const body = await c.req.json() as { name?: string; profile?: unknown };
+    if (!body.name || typeof body.name !== "string") {
+      return c.json({ error: "name is required" }, 400);
+    }
     // Upsert with the URL id — the body cannot mint arbitrary ids.
-    await deps.presets.save({ ...body, id: c.req.param("id") });
+    const id = c.req.param("id");
+    const existing = (await deps.presets.list()).find((p) => p.id === id);
+    // A preset IS a profile, so the profile is NORMALISED on the way in and out: every field filled,
+    // the quality clamped to the codec's useful band, and an unencodable codec/container pair
+    // degraded to the container's default. Same policy as reading a stored row, because that is
+    // exactly what this is — a stored row. (A REQUEST to export is validated instead; see
+    // ExportClipUseCase.)
+    await deps.presets.save({
+      id,
+      name: body.name,
+      profile: normaliseProfile((body.profile ?? {}) as Partial<ExportProfile>),
+      createdAt: existing?.createdAt ?? new Date().toISOString(),
+      // A preset created through this endpoint is the USER's by definition; the seeded ones come from
+      // the container's DEFAULT_PRESETS and are inserted with `seeded`. An existing row keeps its
+      // origin (the repo does not update the column on conflict), so this cannot promote a seeded
+      // preset into a deletable one by re-saving over it.
+      origin: existing?.origin ?? "user",
+    });
+    bus.publish(EXPORT_CHANGED_TOPIC, { type: "export_list", reason: "added" } as never);
     return c.json({ ok: true }, 201);
   });
   app.delete("/api/presets/:id", async (c) => {
-    await deps.presets.delete(c.req.param("id"));
+    const id = c.req.param("id");
+    /**
+     * A SEEDED preset is refused BY NAME, and the refusal is the point of this route rather than an
+     * extra guard on it.
+     *
+     * These are the starting points the app guarantees, not the user's artefacts: deleting one removes
+     * a profile that every future export is offered, and nothing restores it short of a reinstall. The
+     * UI only hides the button for them, and a hidden button is not a policy — any client can call
+     * this, and the server is where the data lives.
+     */
+    const origin = await deps.presets.originOf(id);
+    if (origin === "seeded") {
+      return c.json({ error: `Preset '${id}' ships with the app and cannot be deleted` }, 409);
+    }
+    if (origin === null) return c.json({ error: `No such preset: ${id}` }, 404);
+    await deps.presets.delete(id);
+    bus.publish(EXPORT_CHANGED_TOPIC, { type: "export_list", reason: "removed" } as never);
     return c.json({ ok: true });
   });
 
@@ -1379,8 +1685,57 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
   // Surface the detected encode path so Settings can show what the proxy
   // will use. Probed live (test-encode), not assumed from vendor strings.
   app.get("/api/system/gpu-encoder", async (c) => {
-    const cap = await probeGpuEncoder();
-    return c.json({ backend: cap.backend, detail: cap.reason ?? "" });
+    // Per codec: which hardware encoder exists differs by codec, and so does the answer. The speed is
+    // the MEASURED one for that encoder, or null when nothing was measured — the UI distinguishes
+    // "no hardware here" from "hardware here, speed unmeasured" rather than inventing a number.
+    const codec = (c.req.query("codec") ?? "h264") as VideoCodec;
+    const cap = await probeGpuEncoder({ codec });
+    const speed = cap.backend === "cpu"
+      ? null
+      : (HW_QUALITY_BANDS[codec].speed ?? null);
+    return c.json({ backend: cap.backend, encoder: cap.encoder ?? null, speed, detail: cap.reason ?? "" });
+  });
+
+  /**
+   * What the SOURCE video is: codec, bitrate, fps, dimensions.
+   *
+   * The export UI needs it for two decisions it cannot make honestly without it: whether the source's
+   * bitrate can be reused at all (only when the output format matches the source's codec), and what
+   * "the original bitrate" actually is as a number.
+   */
+  app.get("/api/streams/:id/source-media", async (c) => {
+    const stream = await deps.getStream.execute(c.req.param("id"));
+    if (!stream) return c.json({ error: "Stream not found" }, 404);
+    // The FULL-QUALITY source, not the proxy: the proxy is a low-bitrate preview and its bitrate would
+    // be presented as "the original", which would be wrong by an order of magnitude.
+    const path = stream.vodPath;
+    if (!path) return c.json(null);
+    try {
+      await Deno.stat(path);
+    } catch {
+      // A recorded path is a claim; the folder may have moved. Report unmeasured rather than 500.
+      return c.json(null);
+    }
+    return c.json(await deps.mediaProbe.probeSourceMedia(path));
+  });
+
+  /**
+   * Every encoder the user could pick for a codec on THIS machine.
+   *
+   * Distinct from `/gpu-encoder`, which answers "what should we use by default?" and stops at the
+   * first working family. This one tries every family and reports each that genuinely encodes, so the
+   * picker offers the machine's real options instead of one winner — or, previously, none at all for
+   * every codec whose hardware was not nvenc.
+   */
+  app.get("/api/system/encoders", async (c) => {
+    const codec = (c.req.query("codec") ?? "h264") as VideoCodec;
+    const options = await listEncodersFor({ codec });
+    return c.json(options.map((o) => ({
+      ...o,
+      // Keyed by the ENCODER, not the backend: this host's `h264_nvenc` and `h264_vaapi` are
+      // different silicon, and lending one's measurement to the other would read as measured.
+      speed: MEASURED_ENCODER_SPEEDS[o.encoder] ?? null,
+    })));
   });
 
   // ── Video file serving (range requests for <video>) ──
@@ -1408,12 +1763,18 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
       // unplayable; its .mp4 twin (kept in the download state) is the playable form of
       // the same bytes.
       const dl = await deps.downloadState(c.req.param("streamId"));
-      const pickPlayable = async (p: string | null | undefined) =>
-        p && await Deno.stat(p).then(() => true).catch(() => false) ? p : null;
-      const playableTwin = (await pickPlayable(dl.proxyMp4))
-        ?? (await pickPlayable(dl.proxyPath))
-        ?? (await pickPlayable(dl.hqMp4))
-        ?? (await pickPlayable(dl.hqPath));
+      const present = (p: string) => Deno.stat(p).then(() => true).catch(() => false);
+      // The SAME rule the clip-thumbnail route uses (resolveMediaSource). It lives in one place
+      // because two consumers now exist, and because it is the only ordering that also covers a
+      // folder-imported project: media on disk with no download state at all.
+      const playableTwin = await resolveMediaSource({
+        proxyMp4: dl.proxyMp4,
+        proxyPath: dl.proxyPath,
+        hqMp4: dl.hqMp4,
+        hqPath: dl.hqPath,
+        vodPath: stream.vodPath ?? null,
+        present,
+      });
       if (playableTwin) {
         mediaPath = playableTwin;
       }

@@ -6,6 +6,8 @@ import {
   STREAM_STATUS_TOPIC,
   DOWNLOAD_PROGRESS_TOPIC,
   STREAM_CHANGED_TOPIC,
+  EXPORT_CHANGED_TOPIC,
+  EXPORT_PROGRESS_TOPIC,
 } from "@/application/ports/outbound.ts";
 import type { WsEvent } from "shared/types";
 
@@ -15,6 +17,8 @@ const TOPICS = [
   STREAM_STATUS_TOPIC,
   DOWNLOAD_PROGRESS_TOPIC,
   STREAM_CHANGED_TOPIC,
+  EXPORT_CHANGED_TOPIC,
+  EXPORT_PROGRESS_TOPIC,
 ];
 
 /**

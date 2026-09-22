@@ -198,6 +198,15 @@ export class StartJobUseCase {
             peakTime: event.peak,
             justification: event.justification,
             signals: hasRealSignals(event.signals) ? event.signals : null,
+            // The matched axis IS this clip's name, from the moment it is created.
+            //
+            // The engine knows why it kept this moment and a human reading the library does not, so
+            // the axis is the honest name for a detected clip — and it is what `{name}` renders into
+            // a filename. Written here rather than left as null because nothing later can recover the
+            // fact: `clips.title` is the only column a user can rename, and it must start out saying
+            // what the clip was detected AS. A hand-made clip has no axis and so keeps a null title,
+            // which is the distinction the whole manual-clip design rests on.
+            title: event.axis,
           },
           null,
         );

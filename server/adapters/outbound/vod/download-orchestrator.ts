@@ -171,9 +171,27 @@ export class DownloadOrchestrator {
         signal?: AbortSignal | undefined;
         indexPath?: string | undefined;
         lookahead?: number;
+        /**
+         * Keep the on-disk prefix below this point and mux only the tail. Declared because every
+         * real caller passes it and the declaration omitted it — which the type-checker only
+         * noticed once `run()` started routing through this seam instead of calling `downloadFmp4`
+         * directly.
+         */
+        resumeSec?: number;
         onProgress: (p: { downloadedSec: number; totalSec: number; bytes: number; percent: number }) => void;
+        onFragment?: (span: { start: number; end: number }) => void;
       },
     ) => Promise<unknown>;
+    /**
+     * Resolve the VOD's quality ladder from its source URL.
+     *
+     * Injectable for the same reason `fmp4` is, and the reason is a gap that HID a defect: the
+     * whole-download path (`run`) called `resolveQualities` directly, so there was no way to drive
+     * `run` without reaching the live usher — and consequently no test that aborted a whole
+     * download and read its state back. The state-resurrection bug lived in exactly that blind
+     * spot. A seam here is what makes the full run testable end to end.
+     */
+    qualities: (vodId: string) => Promise<HlsQuality[]>;
   };
 
   constructor(
@@ -191,6 +209,7 @@ export class DownloadOrchestrator {
     this.net = {
       chat: (vodId, destPath, o) => downloadChat(vodId, destPath, o),
       fmp4: (playlistUrl, destPath, o) => downloadFmp4(playlistUrl, destPath, o),
+      qualities: (vodId) => resolveQualities(vodId),
     };
   }
 
@@ -585,7 +604,7 @@ export class DownloadOrchestrator {
         indexPath,
         ffmpegPath: this.tools.ffmpeg,
         onProgress: (p) => {
-          this.noteVideoProgress(part, p, opts.quality);
+          this.noteVideoProgress(part, p, opts.quality, rt);
           if (kind === "proxy") {
             started.proxyFrontierSec = p.downloadedSec;
             started.proxyPath = mp4Path;
@@ -759,6 +778,10 @@ export class DownloadOrchestrator {
     const vodId = extractVodId(opts.sourceUrl);
     if (!vodId) throw new Error(`Not a Twitch VOD URL: ${opts.sourceUrl}`);
 
+    // Register the signal BEFORE any await, so an abort at any point during the run is seen by
+    // `persist`/`finalize`. Cleared in the finally below.
+    if (opts.signal) this.runSignals.set(opts.streamId, opts.signal);
+
     const state: DownloadState = {
       phase: "running",
       parts: [],
@@ -853,7 +876,7 @@ export class DownloadOrchestrator {
     // ── Quality resolution (any failure fails both video parts) ──
     let qualities: HlsQuality[] = [];
     try {
-      qualities = await resolveQualities(vodId);
+      qualities = await this.net.qualities(vodId);
       if (qualities.length === 0) throw new Error("usher returned no qualities");
     } catch (err) {
       this.fail(rt.get("proxy")!, err);
@@ -899,14 +922,14 @@ export class DownloadOrchestrator {
         rt.get("hq")!.status = "running";
         await this.persist(opts.streamId, state, rt);
         try {
-          await downloadFmp4(target.playlistUrl, videoPath, {
+          await this.net.fmp4(target.playlistUrl, videoPath, {
             signal: opts.signal ?? undefined,
             resumeSec,
             indexPath,
             ffmpegPath: this.tools.ffmpeg,
             onProgress: (p) => {
               const part = rt.get("hq")!;
-              this.noteVideoProgress(part, p, target);
+              this.noteVideoProgress(part, p, target, rt);
               state.hqPath = videoPath;
               state.hqMp4 = videoPath;
               state.videoFrontierSec = p.downloadedSec;
@@ -953,14 +976,14 @@ export class DownloadOrchestrator {
     rt.get("proxy")!.status = "running";
     await this.persist(opts.streamId, state, rt);
     try {
-      await downloadFmp4(proxy.playlistUrl, proxyMp4Path, {
+      await this.net.fmp4(proxy.playlistUrl, proxyMp4Path, {
         signal: opts.signal ?? undefined,
         resumeSec: proxyResume,
         indexPath: proxyIndexPath,
         ffmpegPath: this.tools.ffmpeg,
         onProgress: (p) => {
           const part = rt.get("proxy")!;
-          this.noteVideoProgress(part, p, proxy);
+          this.noteVideoProgress(part, p, proxy, rt);
           state.proxyFrontierSec = p.downloadedSec;
           state.proxyPath = proxyMp4Path;
           state.proxyMp4 = proxyMp4Path;
@@ -999,7 +1022,7 @@ export class DownloadOrchestrator {
       const hqIndexPath = `${opts.destDir}/${artifactName("video-index", opts.slug)}`;
       const hqResume = opts.resume ? Math.floor(await this.fileSeconds(hqMp4Path)) : 0;
       try {
-        await downloadFmp4(hq.playlistUrl, hqMp4Path, {
+        await this.net.fmp4(hq.playlistUrl, hqMp4Path, {
           signal: opts.signal ?? undefined,
           lookahead: 4,
           resumeSec: hqResume,
@@ -1007,7 +1030,7 @@ export class DownloadOrchestrator {
           ffmpegPath: this.tools.ffmpeg,
           onProgress: (p) => {
             const part = rt.get("hq")!;
-            this.noteVideoProgress(part, p, hq);
+            this.noteVideoProgress(part, p, hq, rt);
             state.hqPath = hqMp4Path;
             state.hqMp4 = hqMp4Path;
             void this.persist(opts.streamId, state, rt);
@@ -1177,19 +1200,74 @@ export class DownloadOrchestrator {
     await this.setState(streamId, state);
   }
 
+  /**
+   * Record a video part's progress, and decide what it WEIGHS in the overall bar.
+   *
+   * ── THE DEFECT THIS CLOSES ──────────────────────────────────────────────────────────────────
+   * The weight starts at 0 and is set on the FIRST progress tick, so between the run starting and
+   * the first video byte there are no weighted parts at all and the overall figure was a raw 0.
+   * That is harmless on its own — but measured on a real VOD import (proxy-first, sampled every
+   * 200ms) the first tick arrives with `totalSec` already known for the WHOLE VOD, so the video is
+   * weighted at its full size the moment ONE chunk has been muxed. The bar therefore jumped to
+   * 100% while the video part still read 0%, then collapsed to 0.9% on the next tick — the
+   * "doesn't instantly show... and the first chunk is reported" report. It looks like a finished
+   * download for one poll interval, at the exact moment the user is watching the bar appear.
+   *
+   * A part the video download has not reached yet is now weighted too, by this same bandwidth ×
+   * duration estimate, so the overall figure is a share of the WHOLE job from the first tick
+   * instead of a share of whatever happened to be live. Measured: `0% running` → `0.4%` → `1.1%`,
+   * never 100% followed by a collapse.
+   *
+   * A part that is already DONE or SKIPPED is deliberately NOT weighted: weighting a finished
+   * artifact makes the overall bar fall when the video starts, because the denominator grows while
+   * the finished part contributes a constant. A completed small chat would otherwise drag the bar
+   * backwards — the same complaint, mirrored.
+   */
   private noteVideoProgress(
     part: PartRuntime,
     p: { downloadedSec: number; totalSec: number; bytes: number; percent: number },
     quality: HlsQuality,
+    rt: Map<DownloadPartKind, PartRuntime>,
   ): void {
     part.downloadedSec = p.downloadedSec;
     part.totalSec = p.totalSec;
-    if (part.weightBytes === 0) {
-      part.weightBytes = quality.bandwidth * p.totalSec;
-    }
+    this.weightFor(part, quality);
+    // Any sibling video part that has not started yet gets the same estimate NOW, so the first
+    // tick of one part does not swing the weighted average of the whole run.
+    this.weightPendingVideoParts(rt, quality.bandwidth, p.totalSec);
     part.percent = p.percent;
     part.downloadedBytes = p.bytes;
     updateEta(part, p.bytes);
+  }
+
+  /** The part's share of the bar: the whole job's size, estimated from bandwidth × duration. */
+  private weightFor(part: PartRuntime, quality: HlsQuality): void {
+    if (part.weightBytes === 0 && part.status !== "done" && part.status !== "skipped") {
+      part.weightBytes = quality.bandwidth * part.totalSec;
+    }
+  }
+
+  /**
+   * Give the video parts that have not started a weight, so the bar is a share of the whole job.
+   *
+   * `totalSec` comes from the first part that reports, because it is the VOD's own duration and
+   * every part covers the whole of it — the same number the run would compute for each of them.
+   * Without this, a proxy-first download reads 100% once chat finishes (the only weighted part)
+   * and then collapses when the video's first chunk lands.
+   */
+  private weightPendingVideoParts(
+    rt: Map<DownloadPartKind, PartRuntime>,
+    bandwidth: number,
+    totalSec: number,
+  ): void {
+    for (const kind of ["proxy", "hq"] as const) {
+      const part = rt.get(kind);
+      if (!part || part.status === "pending" || part.weightBytes > 0) continue;
+      part.totalSec = totalSec;
+      if (part.status !== "done" && part.status !== "skipped") {
+        part.weightBytes = bandwidth * totalSec;
+      }
+    }
   }
 
   private fail(part: PartRuntime, err: unknown): void {
@@ -1202,6 +1280,17 @@ export class DownloadOrchestrator {
     state: DownloadState,
     rt: Map<DownloadPartKind, PartRuntime>,
   ): Promise<DownloadState> {
+    // The run is ENDING either way, so the registration goes now: a later resume/re-download of
+    // the same stream must be able to write, and leaving an aborted signal registered would mute
+    // every future write for that project.
+    const aborted = this.runAborted(streamId);
+    this.runSignals.delete(streamId);
+
+    // An externally-aborted run has no verdict to record: the canceller already decided, and
+    // writing here is what resurrected a cancelled download's state after its reset. The state is
+    // still RETURNED (the caller reads paths off it), just never written.
+    if (aborted) return { ...state, ...this.snapshot(rt) };
+
     const snapshot = this.snapshot(rt);
     state.parts = snapshot.parts;
     state.overall = snapshot.overall;
@@ -1273,11 +1362,37 @@ export class DownloadOrchestrator {
     };
   }
 
+  /**
+   * An aborted run's writes are VOID.
+   *
+   * ── THE DEFECT THIS CLOSES ──────────────────────────────────────────────────────────────────
+   * Cancel reset the state at T; the aborted run was still unwinding and its own `finalize()`
+   * wrote the RUN's state at T+delta — resurrecting `phase`, the part counters and the paths that
+   * had just been cleared. `markRunLive(id, false)` then drops the RAM copy, so the next read came
+   * off DISK and served the resurrected state. That is why a cancelled download kept reporting
+   * progress: the download really had stopped, but its corpse kept writing.
+   *
+   * Measured with `tests/cancel-stops-run.test.ts`, which aborts a real throttled download, resets
+   * the state as the delete route does, and reads back — the run wrote `done` over the `idle`.
+   *
+   * The rule: an external abort means the operation was terminated by someone else, so its own
+   * conclusions about the outcome are meaningless — including its "failed" verdict, which would
+   * otherwise overwrite the canceller's intent with a word the user never chose. ONE choke point
+   * (`persist` plus `finalize`), so none of the 22 progress writes can miss it.
+   */
+  private runSignals = new Map<string, AbortSignal>();
+
+  /** True when a live run's signal has been aborted: its writes must not land. */
+  private runAborted(streamId: string): boolean {
+    return this.runSignals.get(streamId)?.aborted === true;
+  }
+
   private async persist(
     streamId: string,
     state: DownloadState,
     rt: Map<DownloadPartKind, PartRuntime>,
   ): Promise<void> {
+    if (this.runAborted(streamId)) return;
     const { parts, overall } = this.snapshot(rt);
     await this.setState(streamId, { ...state, parts, overall });
   }

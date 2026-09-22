@@ -281,11 +281,18 @@
     return null;
   }
 
-  /** Hit-test: is the cursor near a clip mark? */
+  /**
+   * Hit-test: is the cursor over a clip?
+   *
+   * Tests the clip's RANGE, not its peak. The range is what is drawn (fill plus two boundaries), so
+   * the whole highlighted band is hoverable; testing the peak alone meant a clip could only be
+   * hovered within ~8px of a tick, and for a clip whose peak has gone stale that point is not even
+   * inside the clip any more.
+   */
   function clipAt(t: number): Clip | null {
-    const threshold = viewSpan / (containerEl?.clientWidth ?? 1) * 8;
+    const pad = (viewSpan / (containerEl?.clientWidth ?? 1)) * 8;
     for (const clip of clips) {
-      if (Math.abs(clip.peakTime - t) < threshold) return clip;
+      if (t >= clip.startTime - pad && t <= clip.endTime + pad) return clip;
     }
     return null;
   }
@@ -476,47 +483,69 @@
     }
 
     // ── Clip marks ──
-    for (const clip of clips) {
-      const x = timeToX(clip.peakTime);
-      if (x < -10 || x > w + 10) continue;
-      const isSelected = clip.id === currentClipId;
-      if (isSelected) {
-        // Selected clip bracket + glow
-        const grad = ctx.createRadialGradient(x, h / 2, 0, x, h / 2, 40);
-        grad.addColorStop(0, 'rgba(204, 0, 0, 0.15)');
-        grad.addColorStop(1, 'rgba(204, 0, 0, 0)');
-        ctx.fillStyle = grad;
-        ctx.fillRect(x - 40, 0, 80, h);
-        // Peak tick
-        ctx.strokeStyle = '#cc0000';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, h);
-        ctx.stroke();
-        // Start/end bracket
-        const startX = timeToX(clip.startTime);
-        const endX = timeToX(clip.endTime);
-        ctx.strokeStyle = 'rgba(204, 0, 0, 0.6)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(startX, 0);
-        ctx.lineTo(startX, h);
-        ctx.moveTo(endX, 0);
-        ctx.lineTo(endX, h);
-        ctx.stroke();
-        // Endpoint handles (drawn in HTML for better hit targets)
+    //
+    // THREE separate marks used to be drawn for one clip: the PEAK tick, a START line and an END
+    // line. The peak tick is the one that failed to follow the clip, because it was positioned at
+    // `clip.peakTime`, which is a RECORDED fact that goes stale the moment the clip is trimmed —
+    // so it sat at the old creation point while the start line moved. Two timestamps is what a clip
+    // has; a third mark derived from a stale field is the bug. The start line IS the start, and the
+    // end line is drawn thicker so the pair reads as one range.
+    //
+    // EVERY clip's range is drawn (filled + both boundaries), selected or not: the ranges are the
+    // overview of the cut, and hiding them until selection made the timeline unreadable.
+    const drawRange = (clip: Clip, selected: boolean) => {
+      const startX = timeToX(clip.startTime);
+      const endX = timeToX(clip.endTime);
+      if (endX < 0 || startX > w) return;
+      const x0 = Math.max(0, startX);
+      const x1 = Math.min(w, endX);
+
+      // Highlight fill between the endpoints: this is what shows the clip's DURATION. A clip with
+      // no highlight is a bare tick, which is why a freshly created clip looked like it had no
+      // length at all.
+      const grad = ctx.createLinearGradient(0, 0, 0, h);
+      if (selected) {
+        grad.addColorStop(0, 'rgba(204, 0, 0, 0.22)');
+        grad.addColorStop(1, 'rgba(204, 0, 0, 0.10)');
       } else {
-        // Non-selected: zinc tick, height ∝ score
-        const tickH = 4 + clip.score * (h * 0.35);
-        const isHovered = hoveredClip?.id === clip.id;
-        ctx.strokeStyle = isHovered ? '#a1a1aa' : 'rgba(161, 161, 170, 0.5)';
-        ctx.lineWidth = isHovered ? 2 : 1;
-        ctx.beginPath();
-        ctx.moveTo(x, h - tickH);
-        ctx.lineTo(x, h);
-        ctx.stroke();
+        grad.addColorStop(0, 'rgba(161, 161, 170, 0.16)');
+        grad.addColorStop(1, 'rgba(161, 161, 170, 0.07)');
       }
+      ctx.fillStyle = grad;
+      ctx.fillRect(x0, 0, Math.max(1, x1 - x0), h);
+
+      // The two boundaries. The END is the thicker line so a glance separates them; both are
+      // solid, and neither is derived from `peakTime`.
+      ctx.strokeStyle = selected ? '#cc0000' : 'rgba(161, 161, 170, 0.85)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(startX) + 0.5, 0);
+      ctx.lineTo(Math.round(startX) + 0.5, h);
+      ctx.stroke();
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(endX) + 0.5, 0);
+      ctx.lineTo(Math.round(endX) + 0.5, h);
+      ctx.stroke();
+
+      if (selected) {
+        // Subtle glow so the selected range is findable without adding a third mark.
+        const glow = ctx.createRadialGradient((x0 + x1) / 2, h / 2, 0, (x0 + x1) / 2, h / 2, 40);
+        glow.addColorStop(0, 'rgba(204, 0, 0, 0.12)');
+        glow.addColorStop(1, 'rgba(204, 0, 0, 0)');
+        ctx.fillStyle = glow;
+        ctx.fillRect((x0 + x1) / 2 - 40, 0, 80, h);
+      }
+    };
+
+    for (const clip of clips) {
+      const isSelected = clip.id === currentClipId;
+      drawRange(clip, isSelected);
+      // NO peak/confidence tick. `peakTime` is where the clip was CREATED (the engine's detection
+      // point), which is a THIRD timestamp beside the start and the end: for a hand-made clip it is
+      // literally the same value as the start, so it drew a second thin line under the start line
+      // and looked like the start line had failed to follow the clip. Only two positions exist —
+      // the boundaries — and the confidence number lives in the inspector, where it can be read.
     }
 
     // ── Hover cursor line (seek preview) ──
@@ -746,9 +775,11 @@
       style="left: {Math.min(Math.max(hoverX, 60), (containerEl?.clientWidth ?? 0) - 60)}px; top: 2px;"
     >
       {#if hoveredClip}
-        <span class="text-accent">{hoveredClip.axis.toUpperCase()}</span>
-        <span class="text-ash"> · {hoveredClip.score.toFixed(2)} · </span>
-        <span class="text-ash-dim">{fmtTime(hoveredClip.peakTime)}</span>
+        <span class="text-accent">{hoveredClip.title ?? (hoveredClip.axis ?? 'manual').toUpperCase()}</span>
+        <span class="text-ash"> · {hoveredClip.score === null ? 'unranked' : hoveredClip.score.toFixed(2)} · </span>
+        <!-- The clip's RANGE, not a third timestamp: start and end are the only two positions a clip
+             has, and showing `peakTime` here restated the creation point as if it were a third one. -->
+        <span class="text-ash-dim">{fmtTime(hoveredClip.startTime)} → {fmtTime(hoveredClip.endTime)}</span>
       {:else if hoveredMarker}
         <span class="text-warning">⚑</span>
         <span class="text-ash">{hoveredMarker.label || 'chapter'} · </span>

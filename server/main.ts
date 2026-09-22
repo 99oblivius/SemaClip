@@ -205,6 +205,23 @@ adoptWindowLifecycle({
   );
 }
 
+// ── Resume an interrupted export batch ──
+//
+// A batch is a claim about deliverables the user asked for. Every `running` row is a LIE once this
+// process is gone: the ffmpeg child died with the previous one and no file is being written, so a
+// row left as "running" would report progress that can never advance — the exact defect the
+// download path had ("the backend still shows progress and chunks being written without ever
+// stopping"). `resume()` returns those rows to `queued` and deletes their partial files.
+//
+// Wrapped, not awaited bare: a resume failure must not stop the server from serving. The work is
+// still recorded in the database and the next boot will try again.
+try {
+  const resumed = await container.exportQueue.resume();
+  if (resumed.requeued > 0) console.log(`export queue: resumed ${resumed.requeued} interrupted item(s)`);
+} catch (err) {
+  console.error(`export queue: resume failed — ${err instanceof Error ? err.message : err}`);
+}
+
 Deno.serve({ port: PORT, hostname: "127.0.0.1" }, app.fetch);
 
 // Report the address that is ACTUALLY serving. Inside a desktop app the runtime

@@ -132,7 +132,26 @@ export class SettingsUseCase {
     const raw = await this.repo.get(SETTINGS_KEY);
     const settings = raw === null ? structuredClone(DEFAULT_SETTINGS) : this.parse(raw);
     if (!settings.vodDir) settings.vodDir = this.defaultVodDir;
+    // The two user-entered paths are RESOLVED on the way OUT as well as on the way in.
+    //
+    // `update` resolves them before storing, but a value written by an older build (or by hand) can
+    // still hold a literal `~`, and every READER of this must get something the OS can use — the
+    // export path was the reported failure: settings said `~/Videos/SemaClip` while the export wrote
+    // to the process default, so the user's own path never appeared and was never created. A refused
+    // value is reported as-is rather than thrown: reading settings must not fail because a stored
+    // path is malformed, and the writer refuses it at save time.
+    settings.exportDir = this.resolveOrKeep(settings.exportDir, DEFAULT_SETTINGS.exportDir);
+    if (settings.vodDir) settings.vodDir = this.resolveOrKeep(settings.vodDir, this.defaultVodDir);
     return settings;
+  }
+
+  /** `resolveUserPath`, but an unusable stored value falls back instead of throwing on a read. */
+  private resolveOrKeep(value: string, fallback: string): string {
+    try {
+      return resolveUserPath(value);
+    } catch {
+      return fallback;
+    }
   }
 
   private parse(raw: string): AppSettings {

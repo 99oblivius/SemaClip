@@ -11,7 +11,7 @@
 import type { EventBus, StreamRepository, StreamMetadataRepository, FileSystemPort } from "@/application/ports/outbound.ts";
 import type { Stream } from "shared/types";
 import { STREAM_CHANGED_TOPIC } from "@/application/ports/outbound.ts";
-import { DownloadOrchestrator, type DownloadState } from "@/adapters/outbound/vod/download-orchestrator.ts";
+import { DownloadOrchestrator, type DownloadPartKind, type DownloadState } from "@/adapters/outbound/vod/download-orchestrator.ts";
 import { resolveQualities, pickProxyQuality, pickBestQuality, extractVodId, type HlsQuality } from "@/adapters/outbound/vod/hls.ts";
 import { artifactName, indexPathFor, LEGACY_NAMES, streamSlug } from "@/application/use-cases/artifact-naming.ts";
 import { scanArtifactNames, type ArtifactDirScan } from "@/application/use-cases/reconcile-stream.ts";
@@ -37,6 +37,101 @@ export class MediaActionsUseCase {
      */
     private readonly bus?: EventBus,
   ) {}
+
+  /**
+   * The PIPELINE's abort register (ImportStream's own), injected after construction because that
+   * use-case is built later. Optional: a caller may legitimately drive this use-case with only the
+   * per-piece register available.
+   */
+  pipelineAbort?: (id: string) => boolean;
+
+  /**
+   * Stop EVERY live download for this project (pipeline + per-piece), KEEPING its files.
+   *
+   * This is the "cancel" verb, and it is deliberately not a delete: the user's partial download is
+   * the work of however many minutes, and destroying it on a cancel is data loss. `deleteDownload`
+   * is the discard verb and it sweeps.
+   *
+   * BOTH abort registers are consulted because there are two — a cancel that reached only one of
+   * them is precisely how "it does not actually stop" survived. Whatever was aborted is left to
+   * unwind before the state is settled, so a still-returning run cannot overwrite the reset.
+   */
+  async cancelEverything(streamId: string): Promise<{ stopped: boolean; queued: boolean }> {
+    const queued = this.pipelineAbort?.(streamId) ?? false;
+    const piece = this.pieceAborts.get(streamId);
+    if (piece) {
+      piece.abort();
+      this.pieceAborts.delete(streamId);
+    }
+    const stopped = Boolean(piece) || queued;
+    if (!stopped) return { stopped: false, queued: false };
+
+    // Let the aborted writers release their handles AND let the aborted run's suppressed finalize
+    // land, so the settling below is the LAST word on the state.
+    await new Promise((r) => setTimeout(r, 300));
+
+    // ── Clear out what was in flight ──
+    //
+    // The owner's rule: "cancel should clear out the item(s) that was downloading and being muxed.
+    // Nothing else." So the partial media this run wrote and its resume index go, while chat and a
+    // part that genuinely finished are left alone — a cancel may not destroy work it did not
+    // interrupt.
+    //
+    // Read the state to learn WHICH parts this cancel actually interrupted. A part that reached
+    // "done" is data the user has, not debris.
+    const state = await this.orchestrator.getState(streamId);
+    const interrupted = new Set<DownloadPartKind>(
+      state.parts.filter((p) => p.status !== "done" && p.status !== "skipped").map((p) => p.kind),
+    );
+    // "hq" also covers a single-file download, which records its one media file in the proxy slot.
+    const mediaRoles = ["proxy", "video"].filter((role) =>
+      interrupted.has(role === "proxy" ? "proxy" : "hq")
+    );
+    for (const role of mediaRoles) {
+      try {
+        if (role === "proxy") await this.deleteProxy(streamId);
+        else await this.deleteVideo(streamId);
+      } catch {
+        // Best effort: a file that cannot be unlinked (permissions, a missing folder) must not
+        // turn a cancel into a failure. The state below is still settled, which is what the UI
+        // reads to decide the download has stopped.
+      }
+    }
+    // The interrupted part must not read as having a file on disk — `reconcile()` hydrates the
+    // phase to "done" for any state holding a playable path, which is how a cancelled download
+    // reported "download complete". Re-read AFTER the deletes, because they reset the slots.
+    const settled = await this.orchestrator.getState(streamId);
+    for (const part of settled.parts) {
+      if (part.status === "running" || part.status === "failed") {
+        part.status = "pending";
+        part.percent = 0;
+        part.downloadedBytes = 0;
+        part.downloadedSec = 0;
+        part.error = "cancelled";
+      }
+    }
+    // ── The phase and the percentage are STATED here, not inherited ──
+    //
+    // Measured on a real VOD: at the moment of the cancel the phase already read "done" and the
+    // overall percentage was the aborted run's last figure (83.9%), so a cancelled download sat
+    // there reporting COMPLETE with a percentage for a file that had just been deleted. Only
+    // downgrading `running`/`queued`/`starting` could not catch that, because "done" is none of
+    // them — the state has to be decided from what is actually left, not adjusted from what it
+    // happened to say.
+    //
+    // `overall` is a STORED field, not something `getState` recomputes, so it kept the dead run's
+    // number; it is derived from the parts that survived this cancel instead.
+    const keptMedia = settled.parts.some(
+      (p) => (p.kind === "proxy" || p.kind === "hq") && p.status === "done",
+    );
+    settled.phase = keptMedia ? "done" : "idle";
+    settled.overall = { percent: keptMedia ? 1 : 0, etaSec: null };
+    await this.orchestrator.setState(streamId, settled);
+    // The RAM copy must go, or the next read serves the running state back to the UI.
+    this.orchestrator.markRunLive(streamId, false);
+    this.announce(streamId, "download");
+    return { stopped, queued };
+  }
 
   /**
    * Tell the client something about this stream's stored state changed.
