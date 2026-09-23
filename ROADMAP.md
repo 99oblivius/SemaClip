@@ -465,7 +465,18 @@ hovering it to discover it could be removed. It stays dim so it does not compete
 brightens (to `--error` hue) on hover. The row's `group` class was the only consumer of `group-hover`
 in the file, so it went too.
 
+**10. The delete dialog's project name is selectable again (26.262).** A REGRESSION from item 5, not a
+new request: the app-wide `user-select: none` default took copyability away from the one block of text
+the user is required to RETYPE verbatim. The dialog gates deletion on typing the project name — which
+is the VOD title, the longest and least typeable string in the app — so the copy was the difference
+between a paste and transcribing a title by eye in a destructive dialog. Opted back in with
+`.selectable`. The general rule this sharpens: a name the user must reproduce exactly is copyable text,
+and a global default must leave an escape hatch for the text it cannot foresee. A test asserts the
+opt-in AND the confirm gate it exists for, plus a scan for any OTHER typed-confirm dialog that would
+need the same treatment (there is none).
+
 Exit gate: **487 server tests** green, detection **20/0**, svelte-check **0 errors and 0 warnings**,
-frontend `npm test` green (17 files, 337 assertions), `deno check` clean, `npm run build` clean. The
-frontend suites were each falsified by reintroducing the fault — including all three follow-ups
-(Peak row restored, endpoints re-stacked, cross re-hidden) — and confirming red.
+frontend `npm test` green (17 files, 341 assertions), `deno check` clean, `npm run build` clean. The
+frontend suites were each falsified by reintroducing the fault — including all three follow-ups to item
+6 (Peak row restored, endpoints re-stacked, cross re-hidden) and this regression (opt-in removed,
+confirm gate removed) — and confirming red.

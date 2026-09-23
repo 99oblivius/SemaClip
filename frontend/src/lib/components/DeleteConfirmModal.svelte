@@ -44,7 +44,14 @@
       The original video and chat files on disk will not be deleted.
     </p>
 
-    <div class="mb-4 rounded-md border border-border bg-surface-2 px-3 py-2">
+    <!--
+      SELECTABLE. The project name is the thing the user has to type to confirm, and a paste-able
+      copy of it is how you avoid transcribing a long VOD title by hand. The app-wide
+      `user-select: none` default removed that, which made a destructive dialog harder to get
+      through for no gain — a name you must retype verbatim is exactly the text that has to be
+      copyable.
+    -->
+    <div class="selectable mb-4 rounded-md border border-border bg-surface-2 px-3 py-2">
       <div class="font-mono text-xs text-ash-dim mb-1">Project</div>
       <div class="text-sm text-ink">{stream.title ?? 'Untitled Stream'}</div>
       {#if stream.streamer}

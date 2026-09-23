@@ -26,6 +26,7 @@ const REVIEW_PAGE = read('../src/routes/stream/[id]/+page.svelte');
 const TIMELINE = read('../src/lib/components/Timeline.svelte');
 const CLIP_DETAIL = read('../src/lib/components/ClipDetail.svelte');
 const CHAT = read('../src/lib/components/ChatView.svelte');
+const DELETE_MODAL = read('../src/lib/components/DeleteConfirmModal.svelte');
 const APP_CSS = read('../src/app.css');
 const BUILD_CSS = (() => {
   // The emitted bundle is what the browser actually gets; a Tailwind-layer mistake shows up here
@@ -173,6 +174,46 @@ console.log('\n=== 5. Text selectability ===');
     !/overflow-hidden select-none/.test(CHAT),
     'a container-wide select-none cancels the per-message opt-in',
   );
+  // ── The regression the default caused: a name you must RETYPE has to be copyable ──
+  // The project name is what the delete dialog asks the user to type verbatim to confirm. Making
+  // the whole app non-selectable silently removed the ability to copy it, so a long VOD title —
+  // the worst case for hand-transcription, in a destructive dialog — had to be typed by eye.
+  check(
+    'the delete dialog\'s project block is selectable',
+    /class="selectable[^"]*"/.test(DELETE_MODAL),
+    'the name the user must retype to confirm must be copy-able',
+  );
+  check(
+    'the project block still renders the stream title',
+    /\{stream\.title \?\? /.test(DELETE_MODAL),
+  );
+  check(
+    'the dialog still requires the name to be typed (the copy is for THAT field)',
+    /const canDelete = \$derived\(typed === confirmText\)/.test(DELETE_MODAL),
+    'if the confirm gate went away, copyability would be moot',
+  );
+  check(
+    'no other destructive dialog asks for a typed name (so no second site is missing it)',
+    (() => {
+      const { readdirSync } = require('node:fs');
+      const dir = new URL('../src/', import.meta.url);
+      const found = [];
+      const walk = (d) => {
+        for (const e of readdirSync(d, { withFileTypes: true })) {
+          const p = new URL(e.name, d.href.endsWith('/') ? d : new URL(d.href + '/'));
+          if (e.isDirectory()) walk(p);
+          else if (e.name.endsWith('.svelte')) {
+            const s = readFileSync(p, 'utf8');
+            if (/type the .*name/i.test(s)) found.push(e.name);
+          }
+        }
+      };
+      walk(dir);
+      return found.length <= 1;
+    })(),
+    'a second typed-confirm dialog would need the same opt-in',
+  );
+
   if (BUILD_CSS) {
     console.log('  (built CSS found — asserting the emitted rules too)');
     check('the bundle emits user-select:none', /user-select:none/.test(BUILD_CSS));

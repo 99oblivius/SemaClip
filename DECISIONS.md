@@ -750,3 +750,10 @@ server, with its own test file covering the all-exported and dangling-reference 
   invisible until the interaction it enabled had already been guessed. It is always rendered, dim at
   rest, brightening on hover. With no `group-hover` left in the file the row's `group` marker class
   was dead and removed.
+- **A name the user must REPRODUCE EXACTLY is copyable text, and the global selection default broke
+  that.** The delete dialog gates deletion on typing the project name — the VOD title, the longest
+  string in the app — and `user-select: none` made it impossible to copy, so confirming a destructive
+  action meant transcribing a title by eye. Reinstated with `.selectable` on that block. The lesson is
+  about the SHAPE of the default: turning selection off globally is right for a desktop tool, but the
+  exception list has to be found before the default ships, not after a user hits it. The escape hatch
+  is the feature; the default is only safe because an opt-in exists.
