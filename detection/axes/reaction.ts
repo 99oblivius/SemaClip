@@ -2,7 +2,7 @@
  * Reaction axis (Phase 1 v0.1): moments where the STREAMER's own behavior
  * changes — energy jump or reaction wording — independent of chat.
  *
- * Signal design (validated on the 4h ironmouse subathon fixture):
+ * Signal design (validated on the 4h dense-chat subathon fixture):
  * - Raw mix RMS is dominated by game audio (p90: burst slice 0.134 < quiet
  *   0.162 — inverted vs voice energy), so energy must be VOICE-GATED: the
  *   transcript's speech regions are the voice mask.

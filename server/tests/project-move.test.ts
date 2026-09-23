@@ -264,7 +264,7 @@ Deno.test("setProjectLocation: a project with no record paths still records its 
 // This test reproduces that project exactly: a state with no video slot, a folder
 // holding `- video.mp4`, and no recorded state path pointing at it.
 Deno.test("setProjectLocation: fills a state slot the state never recorded (the live failure)", async () => {
-  const projectDir = "/moved/drive/leyley-minecraft-2026-09-20-0634";
+  const projectDir = "/moved/drive/examplestreamer-examplegame-2026-09-20-0634";
   const videoFile = `${projectDir}/will-lock-in-if-milk-is-involved-links - video.mp4`;
   const state = { phase: "idle", hqPath: null, hqMp4: null, proxyPath: null, proxyMp4: null, vodPath: null };
 
@@ -289,13 +289,13 @@ Deno.test("setProjectLocation: fills a state slot the state never recorded (the 
 
   const repo = new Repo({
     ...baseStream,
-    id: "leyley",
+    id: "examplestreamer",
     vodPath: "", // the record does not point at it either
     chatPath: null,
     projectDir: null,
   });
   const useCase = new SetProjectLocationUseCase(repo, fs, orch);
-  await useCase.execute("leyley", projectDir);
+  await useCase.execute("examplestreamer", projectDir);
 
   assertEquals(written.length > 0, true, "the state must be written when a slot is filled");
   const after = written[written.length - 1]!;

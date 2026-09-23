@@ -12,12 +12,16 @@ import { HypeDetector } from "../axes/hype.ts";
 import { runDetection } from "../pipeline.ts";
 import type { FeatureTable, Baselines } from "../types.ts";
 
+// Invented metadata on purpose. A real channel's name, login, id, VOD title or game
+// must never appear in the codebase: it is someone's account, it dates the fixture to
+// one import, and it leaks who this tool was built against. The fixture only needs to
+// be shaped like TwitchDownloader's output.
 const FIXTURE = JSON.stringify({
   FileInfo: { Version: { Major: 1, Minor: 4, Patch: 0 } },
-  streamer: { name: "SoulCamera", login: "soulcamera", id: 67698098 },
+  streamer: { name: "ExampleStreamer", login: "examplestreamer", id: 10000001 },
   video: {
-    title: "Test VOD", id: "2827417958", length: 20852, game: "Overwatch",
-    chapters: [{ startMilliseconds: 0, lengthMilliseconds: 12717000, description: "Overwatch" }],
+    title: "Test VOD", id: "1000000001", length: 20852, game: "ExampleGame",
+    chapters: [{ startMilliseconds: 0, lengthMilliseconds: 12717000, description: "ExampleGame" }],
   },
   comments: [
     { content_offset_seconds: 19, commenter: { display_name: "A" }, message: { body: "hello" } },
@@ -33,7 +37,7 @@ Deno.test("chat parser: TwitchDownloader fixture → sorted events, metadata, sk
   const p = parseTwitchChatJson(FIXTURE);
   assertEquals(p.events.length, 5);
   assertEquals(p.skipped, 1);
-  assertEquals(p.streamer, "soulcamera");
+  assertEquals(p.streamer, "examplestreamer");
   assertEquals(p.durationSec, 20852);
   assertEquals(p.chapters.length, 1);
   assertEquals(p.events[0]!.t <= p.events[4]!.t, true);

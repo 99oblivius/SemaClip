@@ -18,7 +18,7 @@ data/training/*.wav
 data/testing/*.mp4
 data/testing/*.wav
 # Subdirectories too: the single-level rules above do not match
-# data/testing/ironmouse_4h/video.mp4, which is exactly how a 5.5GB VOD ended up
+# a fixture subdirectory's video.mp4, which is exactly how a 5.5GB VOD ended up
 # committed and had to be stripped from history before the repo could be pushed.
 data/**/*.mp4
 data/**/*.wav

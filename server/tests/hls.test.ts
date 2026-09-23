@@ -17,7 +17,7 @@ describe("extractVodId", () => {
 
   it("accepts bare ids, rejects garbage", () => {
     assert.equal(extractVodId("2867755087"), "2867755087");
-    assert.equal(extractVodId("https://twitch.tv/ironmouse"), null);
+    assert.equal(extractVodId("https://twitch.tv/examplestreamer"), null);
     assert.equal(extractVodId("no digits 42"), null);
   });
 });

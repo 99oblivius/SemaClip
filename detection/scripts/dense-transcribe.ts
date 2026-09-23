@@ -6,7 +6,7 @@ const adapter = new TranscribeAdapter({
   vadModelFile: "ggml-silero-v5.1.2.bin",
 }, "ffmpeg");
 const t0 = performance.now();
-const { segments } = await adapter.transcribe("/tmp/iron_slice.wav", { workers: 16 });
+const { segments } = await adapter.transcribe("/tmp/dense_slice.wav", { workers: 16 });
 const wall = (performance.now() - t0) / 1000;
 console.log(`segments=${segments.length} wall=${wall.toFixed(1)}s for 900s (${(900 / wall).toFixed(0)}x realtime)`);
 // Show transcript around the welp-om burst (slice starts at 2700; burst at 2796 → slice-relative 96s)

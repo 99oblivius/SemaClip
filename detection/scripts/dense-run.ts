@@ -4,7 +4,15 @@ import { computeBaselines } from "/home/livia/Projects/SemaClip/detection/baseli
 import { HypeDetector } from "/home/livia/Projects/SemaClip/detection/axes/hype.ts";
 import { runDetection } from "/home/livia/Projects/SemaClip/detection/pipeline.ts";
 
-const raw = await Deno.readTextFile("/home/livia/Projects/SemaClip/data/testing/ironmouse_4h/chat.json");
+// The fixture path is supplied by the caller: the dense-chat slice is a real
+// channel's data and is gitignored, so no script may hardcode where it lives (or
+// whose it is). Usage: deno run -A scripts/dense-run.ts <path/to/chat.json>
+const chatPath = Deno.args[0];
+if (!chatPath) {
+  console.error("usage: dense-run.ts <path/to/chat.json>");
+  Deno.exit(2);
+}
+const raw = await Deno.readTextFile(chatPath);
 const t0 = performance.now();
 const parsed = parseTwitchChatJson(raw);
 console.log(`parsed ${parsed.events.length} events in ${((performance.now()-t0)/1000).toFixed(2)}s, duration=${parsed.durationSec}s`);

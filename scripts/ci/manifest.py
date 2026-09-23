@@ -114,7 +114,7 @@ def cmd_artifact(path: str, version: str, platform: str, name: str, sha: str, ur
     return 0
 
 
-def cmd_check(path: str, version: str) -> int:
+def cmd_check(path: str, version: str, artifact_name: str = "") -> int:
     """Validate what is actually being SERVED, not what we meant to write."""
     with open(path) as fh:
         manifest = json.load(fh)
@@ -135,7 +135,39 @@ def cmd_check(path: str, version: str) -> int:
         if not isinstance(name, str) or not name:
             fail(f"patches[{frm}].name is missing")
 
-    print(f"live manifest ok: version={version} patches={list(patches)}")
+    # The whole-payload entries must describe THIS version's bytes. A manifest whose
+    # `version` advanced while its `artifacts` still name the previous release is the
+    # worst shape there is: the client is offered an update, downloads the file it is
+    # already running, and offers again on the next launch, for ever. MEASURED: the
+    # patch job merged into a stale CDN copy of the manifest and republished it, so
+    # 26.256 shipped advertising `download/v26.255/...AppImage` at 26.255's sha256 —
+    # and this check passed anyway, because every url resolved and every digest was
+    # well-formed. Well-formed is not the same as CURRENT; the version token in the
+    # name and the url is what ties an entry to the release it belongs to.
+    if artifact_name:
+        artifacts = manifest.get("artifacts")
+        if not isinstance(artifacts, dict) or not artifacts:
+            fail("live manifest carries no `artifacts` — no client could resolve a payload")
+        for plat, entry in artifacts.items():
+            if not isinstance(entry, dict):
+                fail(f"artifacts[{plat}] is not an object")
+            name, url = entry.get("name"), entry.get("url")
+            if not isinstance(name, str) or not name:
+                fail(f"artifacts[{plat}].name is missing")
+            url_s = url if isinstance(url, str) else ""
+            sha = entry.get("sha256")
+            if not isinstance(sha, str) or not SHA256_RE.match(sha):
+                fail(f"artifacts[{plat}].sha256 is not 64 lowercase hex: {sha!r}")
+            # The AppImage keeps an unversioned filename, so its url must name the
+            # release directory; every other artifact carries the version in its name.
+            marker = f"v{version}" if name == artifact_name else version
+            if marker not in name and marker not in url_s:
+                fail(
+                    f"artifacts[{plat}] does not belong to {version}: "
+                    f"name={name!r} url={url!r} — a client would download the wrong build"
+                )
+
+    print(f"live manifest ok: version={version} patches={list(patches)} artifacts={list(manifest.get('artifacts') or {})}")
     return 0
 
 
@@ -173,6 +205,45 @@ def self_test() -> int:
         else:
             raise AssertionError("version drift was accepted")
 
+        # THE SHIPPED DEFECT, pinned. A manifest whose `version` advanced while its
+        # `artifacts` still name the previous release is what made a client download
+        # the build it was already running and re-offer the update for ever. It passed
+        # the old check because every url resolved and every digest was well-formed —
+        # so the check must key on the version the entry BELONGS to, not on validity.
+        cmd_artifact(p, "2026.142-nightly.43", "linux-x64", "SemaClip.AppImage", "c" * 64,
+                     "https://example.test/releases/download/v2026.142-nightly.43/SemaClip.AppImage")
+        cmd_check(p, "2026.142-nightly.43", "SemaClip.AppImage")
+        # Now the exact stale shape: version moved on, artifact left behind.
+        stale = dict(doc := json.load(open(p)))
+        doc["version"] = "2026.143-nightly.44"
+        doc["artifacts"]["linux-x64"]["url"] = \
+            "https://example.test/releases/download/v2026.142-nightly.43/SemaClip.AppImage"
+        with open(p, "w") as fh:
+            json.dump(doc, fh)
+        try:
+            cmd_check(p, "2026.143-nightly.44", "SemaClip.AppImage")
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("a stale artifact entry was accepted — a client would download the previous build")
+        # And a versioned filename is checked by its own name, not only by its url.
+        doc["artifacts"]["win-x64"] = {"name": "SemaClip-2026.142-nightly.43-win-x64-portable.zip",
+                                       "sha256": "d" * 64, "url": "https://example.test/x"}
+        with open(p, "w") as fh:
+            json.dump(doc, fh)
+        try:
+            cmd_check(p, "2026.143-nightly.44", "SemaClip.AppImage")
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("a stale versioned artifact name was accepted")
+        # Restore a consistent manifest so the remaining assertions start clean.
+        cmd_artifact(p, "2026.143-nightly.44", "linux-x64", "SemaClip.AppImage", "e" * 64,
+                     "https://example.test/releases/download/v2026.143-nightly.44/SemaClip.AppImage")
+        cmd_artifact(p, "2026.143-nightly.44", "win-x64", "SemaClip-2026.143-nightly.44-win-x64-portable.zip",
+                     "d" * 64, "https://example.test/x")
+        cmd_check(p, "2026.143-nightly.44", "SemaClip.AppImage")
+
         # artifact: additive to `patches`, replaced in place, digest validated.
         cmd_artifact(p, "2026.142-nightly.43", "win-x64", "payload.zip", "a" * 64)
         doc = json.load(open(p))
@@ -206,7 +277,7 @@ def main() -> int:
         "init": (cmd_init, 2),
         "merge": (cmd_merge, 5),
         "artifact": (cmd_artifact, (5, 6)),
-        "check": (cmd_check, 2),
+        "check": (cmd_check, (2, 3)),
     }
     if cmd not in table:
         print(__doc__, file=sys.stderr)

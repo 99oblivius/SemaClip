@@ -660,6 +660,18 @@ jobs:
             "latest.json" \
             "landing/index.html" "index.html"
 
+      # Hand the manifest to the `patch` job as an artifact. The manifest is a
+      # function of THIS release, so the copy publish built is the only correct base
+      # for patch to merge its entry into — and it cannot be re-fetched from Pages,
+      # which serves a CDN-cached copy that is still the previous release's at this
+      # point (that stale fetch is exactly how 26.256 came to advertise 26.255's
+      # AppImage, see the patch job's merge step).
+      - uses: actions/upload-artifact@v7
+        with:
+          name: manifest
+          path: dist/latest.json
+          retention-days: 7
+
       # ── Ed25519 manifest signing: WIRED BUT NOT ACTIVE ──────────────────────
       # No key exists yet, and SEMACLIP_UPDATE_PUBKEY is unset, so today's clients
       # verify nothing. server/adapters/outbound/platform/auto-update.ts reads
@@ -863,22 +875,33 @@ jobs:
             "work/${{ steps.diff.outputs.name }}" \
             "work/${{ steps.diff.outputs.name }}.sha256"
 
+      - name: Download the manifest publish built for this release
+        # Unconditional: publish always uploads it, and the republish step below
+        # publishes whatever dist/latest.json holds.
+        uses: actions/download-artifact@v8
+        with:
+          name: manifest
+          path: dist
+
       - name: Merge the patch entry into latest.json
         if: steps.prev.outputs.found == 'true'
         run: |
           set -euo pipefail
           mkdir -p dist
-          # Fetch what is actually live rather than the copy publish wrote: this
-          # job is also the path that repairs a manifest, and merging into a stale
-          # local copy would drop any entry added in between.
-          curl -sSfL --max-time 60 \
-            "${{ env.MANIFEST_BASE_URL }}/latest.json" \
-            -o dist/latest.json
 
-          # Manifest shape: {version, patches: {"<fromVersion>": {name, sha256}}}.
-          # Entries are keyed by the version a user is currently on, so every
-          # supported prior version needs its own entry; only users listed here can
-          # update, and sha256 is mandatory (the runtime refuses a mismatch).
+          # Merge into the manifest PUBLISH built, NEVER a re-fetch from Pages.
+          # MEASURED FAILURE — `$MANIFEST_BASE_URL/latest.json` returns a CDN-cached
+          # copy, which at this moment is still the PREVIOUS release's. Merging the
+          # patch entry into that copy and republishing it produced
+          # `{"version":"26.256","artifacts":{"linux-x64":{"url":
+          # ".../download/v26.255/..."}}}`, so a client is told 26.256 exists,
+          # downloads 26.255, installs it, and is offered 26.256 again on the next
+          # launch, for ever. 26.256 shipped that way.
+          #
+          # The manifest is a function of the RELEASE, so the release's own copy is
+          # the only correct base — both jobs must agree on one source. (The republish
+          # step below is itself gated on a previous release existing, so on a
+          # first-ever release the downloaded file is simply left untouched.)
           python3 scripts/ci/manifest.py merge \
             dist/latest.json \
             "${{ needs.version.outputs.version }}" \
@@ -1008,7 +1031,7 @@ jobs:
           fi
 
           python3 scripts/ci/manifest.py check \
-            back/live-latest.json "${{ needs.version.outputs.version }}"
+            back/live-latest.json "${{ needs.version.outputs.version }}" SemaClip.AppImage
 
       - name: Verify the landing page and every download link it offers
         env:

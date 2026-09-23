@@ -7,7 +7,7 @@
  * trains hit 30 msg/s sustained — counting them would (a) poison the
  * adaptive floor so organic bursts stop registering, and (b) flag every
  * gift flood as a hype candidate. Measured: 16% of messages on the 4h
- * ironmouse fixture.
+ * dense-chat fixture.
  */
 import type { ChatEvent, ChatFeaturesSec } from "../types.ts";
 import { EMOTE_WEIGHTS } from "../chat.ts";

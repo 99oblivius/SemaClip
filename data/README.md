@@ -6,31 +6,29 @@
 data/
 ├── training/          # Streams used for development and calibration
 │   ├── video.mp4      # VOD file (gitignored)
-│   ├── chat.json      # Twitch chat transcript
+│   ├── chat.json      # Twitch chat transcript (gitignored)
 │   └── README.md
 └── testing/           # Intended as held-out evaluation data — see its README, it is
-    │                  # no longer clean (jfk.wav is the CI fixture, ironmouse_4h has
-    │                  # already been used for validation)
+    │                  # no longer clean (jfk.wav is the CI fixture, and the dense-chat
+    │                  # case has already been used for validation)
     ├── fixtures/jfk.wav         # 11s speech fixture, the engine E2E input in CI
-    └── ironmouse_4h/
-        ├── video.mp4
-        └── chat.json
+    └── <dense-chat>/            # video.mp4 + chat.json, gitignored
 ```
 
-Files here are placed by hand. Nothing in the repo downloads them.
+Files here are placed by hand. Nothing in the repo downloads them. No fixture's
+actual channel name, VOD id or game is recorded in this repository: the local files
+are a real channel's data and stay local, and only their SHAPE matters to the code.
 
-## Current data
+## What the fixtures are for
 
-| VOD | Streamer | Game | Duration | Chat Messages | Avg Msg/h |
-|---|---|---|---|---|---|
-| [2827417958](https://www.twitch.tv/videos/2827417958) | SoulCamera | Overwatch | 5.8h | 110 | ~19 |
+Two cases matter, and they are opposite ends of the chat-signal range:
 
-This is an intentionally sparse test case — a small streamer with very low chat
-engagement (~1 message every 3 minutes). This stress-tests the architecture's ability
-to rely on the voice signal when chat is unreliable.
+- a **sparse** case — a channel with very low chat engagement (~1 message every 3
+  minutes), which stress-tests relying on the voice signal when chat is unreliable;
+- a **dense** case — a multi-hour stream with tens of thousands of comments, used to
+  validate the detectors against dense chat.
 
-`data/testing/ironmouse_4h` is the opposite: 4.01h with 17,473 comments, used to
-validate the detectors against dense chat.
+Record the measured figures in the local copy, not here.
 
 ## Chat JSON structure
 

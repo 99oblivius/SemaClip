@@ -20,17 +20,17 @@ import { looksLikeFilenameTemplate, renderFilenameTemplate } from "shared/types"
 import { uniqueName, vodFolderName } from "../application/use-cases/artifact-naming.ts";
 
 const FACTS = {
-  channel: "SoulCamera",
+  channel: "ExampleStreamer",
   name: "Take One",
   startTime: 1144,
-  streamTitle: "DODS EMERGENCY DONOTHON DAY 11",
+  streamTitle: "Example Stream Title",
   // Pinned so the date token cannot make this test fail tomorrow.
   now: new Date("2026-09-22T12:00:00Z"),
 };
 
 Deno.test("the template renders to a NAME, never to the literal token text", () => {
   const out = renderFilenameTemplate("{date}-{channel}-{name}-{ts}", FACTS);
-  assertEquals(out, "2026-09-22-soulcamera-Take-One-1904");
+  assertEquals(out, "2026-09-22-examplestreamer-Take-One-1904");
   // The bug in one line: a raw template must NOT survive into the output.
   assert(!out.includes("{"), "no token may survive the render");
 });
@@ -40,7 +40,7 @@ Deno.test("a raw template is RECOGNISED — this is what the server keys on", ()
   // exported file is named after the template text, which is the reported `date---channel---...`.
   assert(looksLikeFilenameTemplate("{date}-{channel}-{name}-{ts}"));
   assert(looksLikeFilenameTemplate("clip-{ts}"));
-  assert(!looksLikeFilenameTemplate("2026-09-22-soulcamera-Take-One-1904"));
+  assert(!looksLikeFilenameTemplate("2026-09-22-examplestreamer-Take-One-1904"));
   assert(!looksLikeFilenameTemplate("My Clip"), "free text is not a template");
 });
 
@@ -71,8 +71,8 @@ Deno.test("the export SUBSHELF is the project-folder name, built from the stream
   const createdAt = "2026-09-22T19:02:23.991Z";
   const folder = vodFolderName({
     id: "ba173ffc-26a2-4c05-bd5e-fbd651452caf",
-    streamer: "SoulCamera",
-    game: "ELDEN RING NIGHTREIGN",
+    streamer: "ExampleStreamer",
+    game: "ExampleGame",
     createdAt,
   });
   // The date in a folder name is LOCAL time, deliberately: the folder is meant to read as the
@@ -83,12 +83,12 @@ Deno.test("the export SUBSHELF is the project-folder name, built from the stream
   const d = new Date(createdAt);
   const p = (n: number) => String(n).padStart(2, "0");
   const localDay = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-  assertEquals(folder, `soulcamera-elden-ring-nightreign-${localDay}-${p(d.getHours())}${p(d.getMinutes())}`);
+  assertEquals(folder, `examplestreamer-examplegame-${localDay}-${p(d.getHours())}${p(d.getMinutes())}`);
   // What the folder name must be independent of zone: slugged, and anchored on that local day.
-  assertStringIncludes(folder, "soulcamera-elden-ring-nightreign-");
+  assertStringIncludes(folder, "examplestreamer-examplegame-");
   assertStringIncludes(folder, localDay);
   // Parts that sanitise to nothing are OMITTED, not left as an empty segment.
-  const partial = vodFolderName({ id: "abc12345", streamer: "SoulCamera", game: null, createdAt: "2026-09-22T19:02:00Z" });
+  const partial = vodFolderName({ id: "abc12345", streamer: "ExampleStreamer", game: null, createdAt: "2026-09-22T19:02:00Z" });
   assert(!partial.includes("--"), "an absent part must not leave a doubled separator");
   // No usable part at all still yields a name, so a folder always exists.
   const bare = vodFolderName({ id: "abcdef123456", streamer: "!!!", game: "???", createdAt: null });
@@ -98,13 +98,13 @@ Deno.test("the export SUBSHELF is the project-folder name, built from the stream
 Deno.test("two exports of the same name do NOT overwrite each other", () => {
   // The reported symptom: three clips, one file. `uniqueName` is the counter-rule.
   const taken: string[] = [];
-  const first = uniqueName("2026-09-22-soulcamera-MGS-1904", taken);
-  assertEquals(first, "2026-09-22-soulcamera-MGS-1904");
+  const first = uniqueName("2026-09-22-examplestreamer-ExampleGame-1904", taken);
+  assertEquals(first, "2026-09-22-examplestreamer-ExampleGame-1904");
   taken.push(first);
-  const second = uniqueName("2026-09-22-soulcamera-MGS-1904", taken);
-  assertEquals(second, "2026-09-22-soulcamera-MGS-1904-2");
+  const second = uniqueName("2026-09-22-examplestreamer-ExampleGame-1904", taken);
+  assertEquals(second, "2026-09-22-examplestreamer-ExampleGame-1904-2");
   taken.push(second);
-  assertEquals(uniqueName("2026-09-22-soulcamera-MGS-1904", taken), "2026-09-22-soulcamera-MGS-1904-3");
+  assertEquals(uniqueName("2026-09-22-examplestreamer-ExampleGame-1904", taken), "2026-09-22-examplestreamer-ExampleGame-1904-3");
 });
 
 Deno.test("the collision check is case-insensitive, because the filesystem may be", () => {

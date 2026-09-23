@@ -95,18 +95,18 @@ Deno.test("vodFolderName: streamer, game and the VOD's own date", () => {
 
 Deno.test("vodFolderName: the same VOD always yields the same name", () => {
   const when = new Date("2026-09-18T20:26:03.294Z");
-  const a = vodFolderName({ streamer: "SoulCamera", game: "Just Chatting", createdAt: when });
-  const b = vodFolderName({ streamer: "SoulCamera", game: "Just Chatting", createdAt: when.toISOString() });
+  const a = vodFolderName({ streamer: "ExampleStreamer", game: "ExampleGame", createdAt: when });
+  const b = vodFolderName({ streamer: "ExampleStreamer", game: "ExampleGame", createdAt: when.toISOString() });
   assertEquals(a, b, "re-importing a VOD must reuse its folder, not create a second copy");
 });
 
 Deno.test("vodFolderName: a part that sanitises to nothing is OMITTED, not left empty", () => {
   const when = new Date("2026-09-20T04:34:10.672Z");
   const stamp = vodTimestamp(when)!;
-  assertEquals(vodFolderName({ streamer: "LeyLey", game: null, createdAt: when }), `leyley-${stamp}`);
-  assertEquals(vodFolderName({ streamer: "LeyLey", game: "!!!", createdAt: when }), `leyley-${stamp}`);
+  assertEquals(vodFolderName({ streamer: "ExampleStreamer", game: null, createdAt: when }), `examplestreamer-${stamp}`);
+  assertEquals(vodFolderName({ streamer: "ExampleStreamer", game: "!!!", createdAt: when }), `examplestreamer-${stamp}`);
   assertEquals(vodFolderName({ streamer: "", game: "Minecraft", createdAt: when }), `minecraft-${stamp}`);
-  assert(!vodFolderName({ streamer: "LeyLey", game: null, createdAt: when }).includes("--"));
+  assert(!vodFolderName({ streamer: "ExampleStreamer", game: null, createdAt: when }).includes("--"));
 });
 
 Deno.test("vodFolderName: unsafe characters never reach the filesystem", () => {
@@ -133,7 +133,7 @@ Deno.test("vodFolderName: degenerate input still yields a usable folder name", (
   assertEquals(vodFolderName({ id: "66a6bc0a-d90d-450c-8f3b-c5e2348a677a" }), "vod-66a6bc0a");
   assertEquals(vodFolderName({ id: "" }), "vod");
   // A date-less import still names itself from what it has.
-  assertEquals(vodFolderName({ streamer: "LeyLey", id: "abcdef12" }), "leyley");
+  assertEquals(vodFolderName({ streamer: "ExampleStreamer", id: "abcdef12" }), "examplestreamer");
 });
 
 Deno.test("vodTimestamp: an unusable date is null, not 'NaN-NaN-NaN'", () => {
