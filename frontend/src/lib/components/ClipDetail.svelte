@@ -135,18 +135,29 @@
     </div>
   {/if}
 
-  <!-- Endpoints -->
+  <!--
+    Endpoints: ONE ROW, not a stack of rows.
+
+    Start / End / Dur are three facts about the same span, so giving each its own row claimed three
+    times the vertical space for one idea — and what that space is FOR is engine data that does not
+    exist yet. Laying them inline leaves the column's height available for the engine's own fields
+    (a new row here, or a new column beside it) instead of pre-spending it on labels.
+
+    `Peak` is GONE from the panel. It was the engine's argmax — the hottest second inside the
+    detected window — and it earned its place when selecting a clip jumped the playhead there and
+    the timeline drew a tick for it. Both of those were removed (selecting now seeks to the clip's
+    START, and the tick went because it restated the start line), which left a number nothing acted
+    on. It was also misleading for a manual clip, where it is set to `startTime`, and it went stale
+    on any trim: it is a RECORDED fact about where the clip was created, not about the clip as it
+    now stands. The field stays on the wire and in the DB — it is engine evidence, and the engine is
+    going to need somewhere to put the rest of it.
+  -->
   <div class="col-span-1">
     <div class="mb-2 font-mono text-xs text-ash-dim uppercase">Endpoints</div>
-    <div class="flex flex-col gap-1 font-mono text-xs">
-      <div class="flex justify-between"><span class="text-ash-dim">Start</span><span class="text-ink">{fmtTime(clip.startTime)}</span></div>
-      <!-- A clip with no engine behind it has no detected peak; showing Start again would be a
-           fabricated field. -->
-      {#if clip.peakTime !== clip.startTime}
-        <div class="flex justify-between"><span class="text-ash-dim">Peak</span><span class="text-accent">{fmtTime(clip.peakTime)}</span></div>
-      {/if}
-      <div class="flex justify-between"><span class="text-ash-dim">End</span><span class="text-ink">{fmtTime(clip.endTime)}</span></div>
-      <div class="flex justify-between border-t border-border pt-1"><span class="text-ash-dim">Dur</span><span class="text-ink">{(clip.endTime - clip.startTime).toFixed(0)}s</span></div>
+    <div class="flex flex-wrap items-baseline gap-x-6 gap-y-1 font-mono text-xs">
+      <span><span class="text-ash-dim">Start</span> <span class="text-ink">{fmtTime(clip.startTime)}</span></span>
+      <span><span class="text-ash-dim">End</span> <span class="text-ink">{fmtTime(clip.endTime)}</span></span>
+      <span><span class="text-ash-dim">Dur</span> <span class="text-ink">{(clip.endTime - clip.startTime).toFixed(0)}s</span></span>
     </div>
   </div>
 

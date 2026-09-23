@@ -252,6 +252,68 @@ console.log('\n=== 6. The preview clip panel ===');
     'the prop declaration alone would satisfy a naive /onExport/ check',
   );
   check('the Endpoints column remains', /Endpoints/.test(markup));
+
+  // ── Follow-ups to item 6 ────────────────────────────────────────────────────────────────────────
+  console.log('\n=== 6b. Peak removed, endpoints inline, cross always visible ===');
+
+  // `Peak` is gone from the panel: it earned its place when selecting a clip jumped the playhead
+  // there and the timeline drew a tick, and both of those were removed, leaving a number nothing
+  // acted on. It also went stale on any trim.
+  check(
+    'no Peak row in the clip panel',
+    !/Peak/.test(markup),
+    'the panel must not render a peak row',
+  );
+  check(
+    'the frontend no longer READS clip.peakTime anywhere (comments excepted)',
+    ![...CLIP_DETAIL.replace(/<!--[\s\S]*?-->/g, '').matchAll(/clip\.peakTime/g)].length,
+    'a field displayed nowhere and acted on nowhere is dead surface',
+  );
+  check(
+    'peakTime is still on the wire type (engine evidence, not deleted data)',
+    /peakTime/.test(read('../..//shared/types.ts')) || /peakTime/.test(read('../../shared/types.ts')),
+    'removing a FIELD would lose engine evidence; only the UI row was removed',
+  );
+
+  // The three span facts share ONE row now, so the column's height is free for engine data.
+  const endpointsBlock = markup.match(/Endpoints<\/div>\s*<div class="([^"]+)"/);
+  check('the endpoints block was found', !!endpointsBlock);
+  if (endpointsBlock) {
+    check(
+      'the endpoints row is INLINE (a wrapping row), not a stacked column',
+      /flex/.test(endpointsBlock[1]) && !/flex-col/.test(endpointsBlock[1]),
+      `class was "${endpointsBlock[1]}" — flex-col stacks one fact per row`,
+    );
+  }
+  check(
+    'Start, End and Dur all render in that one row',
+    /\bStart\b/.test(markup) && /\bEnd\b/.test(markup) && /\bDur\b/.test(markup),
+  );
+  check(
+    'the old per-fact justify-between rows are gone',
+    !/justify-between"><span class="text-ash-dim">Start/.test(markup),
+    'three separate justify-between rows is the stacked layout that was replaced',
+  );
+  check(
+    'no border-t divider on a Dur row (there is no longer a last row to divide)',
+    !/border-t border-border pt-1/.test(markup),
+  );
+
+  // The export list's remove control must be visible at rest.
+  check(
+    'the export-list cross is always visible (no opacity-0 gate)',
+    !/opacity-0[^"]*group-hover/.test(EXPORT_PAGE),
+    'a hover-revealed control does not exist until you already know it is there',
+  );
+  check(
+    'the remove button still calls removeFromExportList',
+    /removeMutation\.mutate\(item\.clipId\)/.test(EXPORT_PAGE),
+  );
+  check(
+    'the orphaned `group` class was removed from the row',
+    !/class="group relative/.test(EXPORT_PAGE),
+    'with the only group-hover gone, the marker class is dead',
+  );
 }
 
 console.log(`\n=== RESULT ===\n  ${failures === 0 ? 'ALL PASS' : `${failures} FAILURE(S)`}`);

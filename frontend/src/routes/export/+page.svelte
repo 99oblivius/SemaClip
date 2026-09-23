@@ -960,7 +960,7 @@
         {#each acceptedClips as item (item.clipId)}
           {@const job = jobsByClip.get(item.clipId)}
           <div
-            class="group relative flex items-stretch rounded-md transition-colors
+            class="relative flex items-stretch rounded-md transition-colors
             {selected?.clip.id === item.clip.id ? 'bg-surface-2' : 'hover:bg-surface-2/50'}"
           >
             <button
@@ -1020,8 +1020,14 @@
                 {fmtTime(item.clip.startTime)} → {fmtTime(item.clip.endTime)}
               </span>
             </button>
+            <!--
+              ALWAYS visible, never hover-revealed. A control that appears only under the pointer
+              does not exist until you already know it is there — the row has to be found by
+              hovering it to discover it can be removed. It stays dim so it does not compete with
+              the filename, and brightens on hover.
+            -->
             <button
-              class="px-2 font-mono text-[11px] text-ash-dim opacity-0 transition-opacity hover:text-ink group-hover:opacity-100 focus:opacity-100"
+              class="px-2 font-mono text-[11px] text-ash-dim transition-colors hover:text-error"
               onclick={() => removeMutation.mutate(item.clipId)}
               title="Remove from the export list (the clip itself is untouched)"
               aria-label="Remove from the export list"

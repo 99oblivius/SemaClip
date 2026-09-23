@@ -723,3 +723,30 @@ server, with its own test file covering the all-exported and dangling-reference 
 - **Both clip boundaries are drawn at one width.** The end was 3px against the start's 2px, and the
   asymmetry read as a different KIND of mark. Which handle is which is answered by position and the
   hit-test, not by thickness.
+
+## 2026-09-23 — Peak is removed from the UI; the wire type keeps it
+
+- **A number nothing acts on is not information.** `peakTime` is the axis score's `argmax` — the
+  hottest second inside a detected window. It was displayed beside Start and End while three things
+  made it meaningful: selection jumped the playhead to it, the timeline drew a tick for it, and the
+  inspector named it. The first two were removed on their own merits (selection now seeks to the
+  clip's START so the playhead agrees with the start line; the tick went because it restated the start
+  line as a third timestamp), which left the inspector row as the only trace of a value the UI no
+  longer uses.
+- **It was also wrong in two ways the display could not express.** On a manual clip it is set to
+  `startTime` — a fabricated peak, hidden behind an equality guard rather than not stored. And it goes
+  STALE: it records where the clip was CREATED, so trimming the start past the peak leaves the panel
+  naming a second that is no longer inside the clip.
+- **The field is NOT deleted, and that distinction is the decision.** `peakTime` stays on the wire
+  type, in the schema and in the repositories. It is engine evidence — the only record of WHERE inside
+  a window the engine found the action — and deleting data to match a UI change would destroy the
+  engine's own output. Only the row is removed; the engine will get its own surface for this and the
+  rest of its fields.
+- **One row for the endpoints, because the height is for engine data.** Start/End/Dur are three facts
+  about one span; three rows spent the column's height on labels. Inline leaves somewhere for the
+  engine's fields to land, which is what the space is being held for.
+- **A hover-revealed control is not a control.** The export list's remove cross appeared only under
+  `group-hover`, so the row had to be hovered to discover it could be removed — the affordance was
+  invisible until the interaction it enabled had already been guessed. It is always rendered, dim at
+  rest, brightening on hover. With no `group-hover` left in the file the row's `group` marker class
+  was dead and removed.

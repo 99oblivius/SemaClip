@@ -441,7 +441,31 @@ the header without bringing the duplicate Export back.
 An early edit of item 6 removed BOTH export controls instead of the duplicate; the test written for it
 caught that before it left the tree.
 
+### Three follow-ups to item 6 (26.261)
+
+**7. `Peak` is removed from the clip panel.** It was the engine's `argmax` — the hottest second inside
+the detected window — and it earned its place while selecting a clip jumped the playhead there and the
+timeline drew a tick for it. Both of those were removed for their own reasons (selecting now seeks to
+the clip's START; the tick went because it restated the start line), which left a number nothing acted
+on. It was also misleading on a manual clip, where `createManualClip` sets it to `startTime` and the
+panel hid it with an equality guard, and it went stale on any trim: it records where the clip was
+CREATED, not where the clip now stands. **The field is NOT deleted** — it stays on the wire type, in
+the schema and in the repository — because it is engine evidence and the engine is going to need
+somewhere to put the rest of it. Only the UI row is gone.
+
+**8. The Endpoints column is ONE ROW.** `Start` / `End` / `Dur` are three facts about the same span, so
+one row each claimed three times the height for one idea — and the height is what the OWNER wants back
+for engine data: "this way there is space below for future data coming from the engine". Inline, with
+the column free to grow a new row (or a sibling column) when the engine has something to say. The
+`border-t` divider went with the last row it divided.
+
+**9. The export list's remove cross is always visible.** It was `opacity-0` until `group-hover`, which
+means the control did not exist until you already knew it was there — the row had to be found by
+hovering it to discover it could be removed. It stays dim so it does not compete with the filename and
+brightens (to `--error` hue) on hover. The row's `group` class was the only consumer of `group-hover`
+in the file, so it went too.
+
 Exit gate: **487 server tests** green, detection **20/0**, svelte-check **0 errors and 0 warnings**,
-frontend `npm test` green (17 files, 326 assertions — 88 of them newly added by this wave),
-`deno check` clean, `npm run build` clean. The two new frontend suites were each falsified by
-reintroducing the fault and confirming red.
+frontend `npm test` green (17 files, 337 assertions), `deno check` clean, `npm run build` clean. The
+frontend suites were each falsified by reintroducing the fault — including all three follow-ups
+(Peak row restored, endpoints re-stacked, cross re-hidden) — and confirming red.
