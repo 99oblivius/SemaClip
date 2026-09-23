@@ -621,3 +621,32 @@ partly-exported list is told why some rows did not run.
 
 The rule lives in `selectImplicitBatch` — pure, in `ClipUseCases.ts`, so it is testable without a
 server, with its own test file covering the all-exported and dangling-reference cases.
+
+## 2026-09-23 — A release asset is fetched by RELEASE ID, never by pattern
+
+- **`releases/tags/<tag>.assets[]` is EMPTY for these releases while the assets exist.** Measured with
+  a bare `curl` (not `gh`, so it is the API's response): the embedded array returned 10 entries for
+  v26.256 and **0** for v26.257 and v26.258, while `/releases/<id>/assets` returned 8 for each and
+  `releases/download/<tag>/<name>` served every file with a 200. Two consecutive releases, so it is
+  systematic rather than a one-off.
+- **`gh release download --pattern` and `gh release view --json assets` both read that embedded array.**
+  That is why the patch job died at `Download both runtime dylibs` with `no assets to download` on
+  every release from v26.257 on, taking the manifest republish and all of `verify` with it.
+- **The louder failure was the milder one.** The step BEFORE it scanned for the previous release with
+  the same call, so it was silently walking past the real previous release: for v26.258 it chose
+  v26.256 as the diff base, skipping v26.257. A wrong diff base produces a patch that reproduces
+  nothing — a silent wrong answer is worse than a skipped check, and only measuring both endpoints
+  showed it.
+- **`scripts/ci/releases.py` resolves every asset through `/releases/<id>/assets`.** One helper, called
+  by both steps, with a self-test the job runs before it needs it. The name selector is EXPLICIT
+  (`+name` / `+suffix`) because inferring the mode from the string mis-classified
+  `-linux-x64-runtime.so` as an exact filename and failed the fetch for a release whose dylib was
+  present.
+- **No fallback.** The pattern-based path is REMOVED from both steps rather than kept beside the new
+  one (owner directive). A retained fallback would quietly restore the wrong diff base the moment the
+  new path had trouble, which is the failure being fixed.
+- **A fetch is sized before it is used.** The step asserts a byte floor on both dylibs, so a truncated
+  or empty download fails at the fetch instead of producing a patch that reproduces nothing.
+- **Nothing in the app reads `manifest.patches`** (only the runtime's `Deno.autoUpdate` consumes it),
+  so the missed patch hops never stranded a user — the cost was bandwidth, not an update path. That is
+  why the defect was invisible to users and visible only in CI.

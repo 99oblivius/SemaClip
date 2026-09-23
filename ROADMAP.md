@@ -331,6 +331,44 @@ Exit gate: **487 server tests** green in both UTC and CEST, detection 20/0, svel
 `npm test` all pass, `deno check` clean. The export-all rule has its own test file, including the
 all-exported and dangling-reference cases.
 
+## Phase 8 — the patch job's asset fetch, and six review-UI fixes (26.259, 26.260)
+
+Two commits: the CI fix first, then the UI wave. Both are in the tree; the RENDERED outcomes are the
+owner's to GUI-verify, and nothing here claims a screen was seen.
+
+### The release patch job fetched assets by a path that returns nothing (26.259)
+
+The `patch` job failed at `Download both runtime dylibs` on EVERY release from v26.257 on, and took
+the manifest republish and all of `verify` with it.
+
+Root cause, measured with a bare `curl` rather than through `gh`: the `assets[]` array EMBEDDED in
+`releases/tags/<tag>` comes back EMPTY for these releases while `/releases/<id>/assets` returns all
+eight and `releases/download/<tag>/<name>` serves them with a 200.
+
+| endpoint | v26.256 | v26.257 | v26.258 |
+|---|---|---|---|
+| `releases/tags/<tag>` embedded `assets[]` | 10 | **0** | **0** |
+| `releases/<id>/assets` | 10 | **8** | **8** |
+
+`gh release download --pattern` and `gh release view --json assets` both read that embedded array, so
+the download step died with `no assets to download` — and the step before it, scanning for the
+previous release with the same call, had been silently WALKING PAST the real previous release: for
+v26.258 it chose v26.256 as the diff base, skipping v26.257. A wrong diff base is a patch that
+reproduces nothing, which is worse than the visible failure.
+
+The fix is `scripts/ci/releases.py`: every asset is resolved through `/releases/<id>/assets`, with the
+name selector EXPLICIT (`+name` for an exact filename, `+suffix` for a suffix) because inferring the
+mode from the string mis-classified `-linux-x64-runtime.so` as an exact name and broke the fetch. The
+workflow calls it for both steps and self-tests it before the job needs it, and the fetch now has a
+size floor so a truncated download fails at the fetch instead of producing an empty patch.
+
+**No fallback**: the pattern path is gone from both steps rather than kept beside the new one, so the
+failure cannot silently return.
+
+Verified against the real releases: `previous v26.258` returns **v26.257** (the one the old loop
+skipped), and both dylibs fetch and size-check through the asset API (190,933,944 and 190,945,248
+bytes).
+
 ## Standing rules
 - No phase starts before the previous exit gate is demonstrably met.
 - Anything that would fabricate success (stub returning victory) is a CI-blocking review reject.

@@ -733,6 +733,9 @@ jobs:
             exit 1
           fi
 
+      - name: Self-test the release-asset helpers
+        run: python3 scripts/ci/releases.py self-test
+
       - name: Install qbsdiff
         run: |
           set -euo pipefail
@@ -781,17 +784,23 @@ jobs:
           # `patches` object as "first release, nothing to verify" and passes. The result
           # was that no Linux client could ever update: the manifest served `patches: {}`
           # forever while the release that should have been its diff base sat right there.
-          prev=""
-          for tag in $(gh release list --repo "$GITHUB_REPOSITORY" --limit 30 \
-                         --exclude-drafts --json tagName,isPrerelease,createdAt \
-                         --jq 'sort_by(.createdAt) | reverse | .[] | .tagName'); do
-            [ "$tag" = "$CUR" ] && continue
-            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
-                 --jq '.assets[].name' | grep -q -- '-linux-x64-runtime\.so$'; then
-              prev="$tag"
-              break
-            fi
-          done
+          # The search itself lives in scripts/ci/releases.py, and it asks
+          # `releases/<id>/assets` whether a release carries a dylib — NOT the `assets[]`
+          # array embedded in the release, which comes back EMPTY for newer releases here
+          # while the files are present and downloadable. Measuring that is what showed the
+          # old `gh release view --json assets` loop was silently walking past the real
+          # previous release: for v26.258 it picked v26.256 as the diff base, skipping
+          # v26.257. `releases/<id>/assets` returns the true list for every release.
+          #
+          # DO NOT reintroduce `gh release download`, `gh release view --json assets`, or
+          # `--exclude-drafts` here: the first two read that empty array, and the third is
+          # fine but is now handled in the script (which also pages explicitly, so a short
+          # page cannot hide a valid base).
+          set +e
+          prev="$(python3 scripts/ci/releases.py previous "$CUR")"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then prev=""; fi
 
           if [ -z "$prev" ]; then
             # First run of the channel. `patches` stays empty and every user stays
@@ -814,21 +823,33 @@ jobs:
           V="${{ needs.version.outputs.version }}"
           PREV="${{ steps.prev.outputs.version }}"
           mkdir -p work
-          # Kept in separate directories: both files share a name, so a flat
-          # download would have one silently overwrite the other.
-          mkdir -p work/old work/new
+          # Fetched by explicit name through scripts/ci/releases.py, which resolves the asset
+          # via `releases/<id>/assets` and streams it from the asset API. `gh release
+          # download --pattern` was used here and FAILED on every release from v26.257 on,
+          # with `no assets to download`, for a release whose dylibs are present and served:
+          # `gh` reads the `assets[]` array embedded in the release, which comes back empty
+          # for newer releases on this repo (measured with a bare curl, so it is the API's
+          # response and not a `gh` quirk). That failure took the whole patch job with it —
+          # including the manifest republish and the entire `verify` job.
+          #
+          # Separate directories are no longer needed (each fetch names its own destination),
+          # but the names are kept distinct because the two files share a filename.
+          mkdir -p work
 
-          gh release download "${{ steps.prev.outputs.tag }}" \
-            --repo "$GITHUB_REPOSITORY" --pattern '*-linux-x64-runtime.so' --dir work/old
-          gh release download "${{ needs.version.outputs.tag }}" \
-            --repo "$GITHUB_REPOSITORY" --pattern '*-linux-x64-runtime.so' --dir work/new
+          python3 scripts/ci/releases.py fetch "${{ steps.prev.outputs.tag }}" \
+            +suffix '-linux-x64-runtime.so' "work/old-$PREV.so"
+          python3 scripts/ci/releases.py fetch "${{ needs.version.outputs.tag }}" \
+            +suffix '-linux-x64-runtime.so' "work/new-$V.so"
 
-          OLD="$(find work/old -type f | head -n 1)"
-          NEW="$(find work/new -type f | head -n 1)"
-          [ -n "$OLD" ] && [ -n "$NEW" ] || { echo "::error::could not fetch both dylibs"; exit 1; }
-
-          cp "$OLD" "work/old-$PREV.so"
-          cp "$NEW" "work/new-$V.so"
+          # Sized before use: a truncated or empty fetch must fail HERE, not produce a patch
+          # that reproduces nothing.
+          for f in "work/old-$PREV.so" "work/new-$V.so"; do
+            size=$(wc -c < "$f" 2>/dev/null || echo 0)
+            if [ "$size" -lt 1000000 ]; then
+              echo "::error::$f is only ${size} bytes — the fetch failed or truncated"
+              exit 1
+            fi
+          done
           ls -la work
           echo "old=$(wc -c < "work/old-$PREV.so") new=$(wc -c < "work/new-$V.so") bytes"
 
