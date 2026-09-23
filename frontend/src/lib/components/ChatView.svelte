@@ -358,7 +358,7 @@
               onclick={() => jumpToMessage(msg)}
             >
               <span class="font-mono text-xs text-ash-dim shrink-0">{fmtTime(msg.t)}</span>
-              <span class="text-xs text-ash truncate"><span class="text-ink">{msg.user}</span>: {msg.body}</span>
+              <span class="selectable text-xs text-ash truncate"><span class="text-ink">{msg.user}</span>: {msg.body}</span>
             </button>
           {/each}
         </div>
@@ -379,7 +379,7 @@
   {:else}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div
-      class="flex-1 overflow-hidden select-none"
+      class="flex-1 overflow-hidden"
       onwheel={handleWheel}
       onmousedown={handleMouseDown}
       role="log"
@@ -397,7 +397,7 @@
           <div
             class="px-3 py-0.5 transition-colors {isLive ? 'bg-accent/10' : ''}"
           >
-            <span class="text-xs leading-relaxed break-words">
+            <span class="selectable text-xs leading-relaxed break-words">
               <span class="font-medium text-ink">{msg.user}</span><span class="text-ash">: {msg.body}</span><span class="text-ash-dim text-[10px] ml-1.5">· {fmtTime(msg.t)}</span>
             </span>
           </div>

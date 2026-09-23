@@ -9,14 +9,13 @@
     clip: Clip;
     clipIndex: number;
     streamId: string;
-    onPlay: () => void;
     onExport: () => void;
     onDiscard: () => void;
     /** Persist a new name for this clip. */
     onRename: (axis: string) => void;
   }
 
-  let { clip, clipIndex, streamId, onPlay, onExport, onDiscard, onRename }: Props = $props();
+  let { clip, clipIndex, streamId, onExport, onDiscard, onRename }: Props = $props();
 
   /**
    * The clip's NAME, held locally while it is being typed.
@@ -81,9 +80,14 @@
   </div>
   <div class="flex items-center gap-2">
     <!--
-      No Accept button. Accepting marked a clip reviewed and advanced; candidates stay visible until
-      discarded, so there is nothing an Accept would record that the panel acts on — and two verbs
-      that both mean "keep this" made the review flow say the same thing twice.
+      One Export, not two. There was a second `Export` in the panel header beside this one, wired to
+      the same `onExport` — the same verb twice on one screen, and the header copy carried no extra
+      meaning (it did not even say which clip). The panel's own export button at the bottom is the
+      one that stays, because that is where the clip's other actions live.
+
+      No Accept button either. Accepting marked a clip reviewed and advanced; candidates stay visible
+      until discarded, so there is nothing an Accept would record that the panel acts on — and two
+      verbs that both mean "keep this" made the review flow say the same thing twice.
     -->
     <button
       class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-ash transition-colors hover:border-border-strong hover:text-ink"
@@ -106,7 +110,13 @@
   <p class="mb-3 text-sm text-ash leading-relaxed">{clip.justification}</p>
 {/if}
 
-<div class="grid grid-cols-3 gap-4">
+<!--
+  The grid used to be three equal columns: Signals, Endpoints, Actions. With the Actions column
+  removed (its two buttons were both redundant — see above) a `grid-cols-3` would leave Endpoints in
+  a third of the panel with two thirds empty, so the column template now adapts: Endpoints takes the
+  whole width when there is no Signals column beside it.
+-->
+<div class="grid gap-4 {clip.signals ? 'grid-cols-2' : 'grid-cols-1'}">
   <!--
     Signals: real engine evidence, or NOTHING AT ALL. A clip with no signals gets no column — the
     heading plus an apology was four fifths empty space claiming a metric that does not exist.
@@ -140,22 +150,21 @@
     </div>
   </div>
 
-  <!-- Actions -->
-  <div class="col-span-1 flex flex-col gap-2">
-    <div class="mb-2 font-mono text-xs text-ash-dim uppercase">Actions</div>
-    <button
-      class="flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-xs text-ash transition-colors hover:border-accent hover:text-accent"
-      onclick={onPlay}
-    >
-      <Icon name="play" size={12} fill /> Play from start
-    </button>
-    <button
-      class="flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-xs text-ash transition-colors hover:border-border-strong hover:text-ink"
-      onclick={onExport}
-    >
-      <Icon name="upload" size={12} /> Export clip
-    </button>
-  </div>
+  <!--
+    The Actions column is GONE, and its two buttons with it.
+
+    `Play from start` and `Export clip` both duplicated something the panel already offers: the
+    export button in the header (same `onExport`), and playback, which the player's own controls and
+    Space already drive. The column also held nothing else, so the owner's request to let Endpoints
+    take the whole width is the same change.
+
+    Worth recording what `Play from start` actually did, because its label undersold it and it is the
+    one deliberate loss here: it seeked to the clip's start, PLAYED, and auto-paused at the clip's end
+    — then advanced to the next clip (`onClipEnd` -> `nextClip`). No other control does that chain:
+    Space plays from wherever the playhead is and does not stop at the boundary. It is one keystroke
+    to reproduce (J/K to select, then Space), and the chain can come back in ClipDetail's header
+    without restoring the duplicate Export beside it, if the owner wants it.
+  -->
 </div>
 
 <!-- Captions (P0-8): line-level transcript editing for this clip's window -->

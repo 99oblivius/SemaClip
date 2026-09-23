@@ -647,6 +647,79 @@ server, with its own test file covering the all-exported and dangling-reference 
   new path had trouble, which is the failure being fixed.
 - **A fetch is sized before it is used.** The step asserts a byte floor on both dylibs, so a truncated
   or empty download fails at the fetch instead of producing a patch that reproduces nothing.
+- **The `verify` job had the SAME defect, and only running it would have revealed it.** All three of
+  its reads (the artifact download and both dylib fetches in the patch-reproducibility loop) used
+  `gh release download --pattern`, i.e. the empty embedded array. It was invisible because `verify` was
+  SKIPPED for three consecutive releases — `patch` failed first, and the job's guard accepts
+  `skipped`/`cancelled` but not `failure`. A fix to `patch` alone would therefore have converted a
+  red `patch` job into a red `verify` job. Fixing a defect found the identical defect one job
+  downstream: when a job has been silently skipped, its inputs are UNEXERCISED, not working.
+- **`--pattern` was worse than the helper for a second reason.** It cannot require a match, so a
+  selector that stopped matching would leave the file absent and be reported by the following check as
+  the PUBLISH having lost an asset — the wrong diagnosis. The helper fails on an unmatched selector
+  (`fetch-many` requires every one to resolve), so "we asked for the wrong thing" cannot be mistaken
+  for "the release is missing it".
 - **Nothing in the app reads `manifest.patches`** (only the runtime's `Deno.autoUpdate` consumes it),
   so the missed patch hops never stranded a user — the cost was bandwidth, not an update path. That is
   why the defect was invisible to users and visible only in CI.
+
+## 2026-09-23 — The help overlay is generated from the handler, not maintained by hand
+
+- **A hand-audited list drifted in BOTH directions, and every row of that drift was a lie to the
+  user.** `A` (accept) was documented and handled nowhere; `Q` was documented as a working filter
+  with no `q` branch and a state (`unreviewedOnly`) that was never assigned; `Enter (on marker)`
+  described a keystroke for what is a mouse click; `[`/`]` and `N` were real and missing. The fix is
+  not a better hand-audit — it is `frontend/tests/keybind-help-parity.test.mjs`, which reads the keys
+  out of `handleKey`'s own `case` labels and the rows out of the overlay's own literal and fails when
+  either side has something the other lacks.
+- **Aliases and named keys are asserted, never assumed.** One `case` label can accept two forms of the
+  same key (`case ',': case '<'`), so aliases are declared and each is checked to resolve to a
+  documented canonical key; arrow keys are matched against their named cases. A silent exemption is
+  exactly how `Q` stayed wrong.
+- **Removing a dead key means removing what it drove.** `Q`'s target state was unreachable, so the
+  state, its filter and its stale comment went with the key. A dead branch left behind reads as a
+  feature nobody finished.
+- **Snoozed clips SORT to the end; nothing hides them.** S (`snoozeClip`) stays honest because the
+  ordering makes it visible. The documented behaviour now matches that rather than promising a filter
+  that does not exist.
+
+## 2026-09-23 — One export button, and what "Play from start" actually did
+
+- **Two controls with the same verb on one screen is a defect, not redundancy-for-convenience.** The
+  preview panel's header `Export` and its Actions column's `Export clip` were both wired to the same
+  `onExport`. The header copy survives (the panel's actions live there); the Actions column is deleted
+  and Endpoints takes the width, which is the same change.
+- **`Play from start` undersold itself, and that is recorded rather than silently dropped.** It seeked
+  to the clip's start, PLAYED, auto-paused at the clip's END, then advanced to the NEXT clip
+  (`onClipEnd` -> `nextClip`). No other control chains that — Space plays from wherever the playhead
+  is and does not stop at the boundary — so it is a real capability change, reproducible in one
+  keystroke (J/K to select, then Space) and restorable in the header without the duplicate Export.
+- **The dead chain went with it.** `playClip` on the page, `VideoPlayer.playClip`, `autoAdvanceClip`
+  and the `onClipEnd` prop were all reachable only from that button, so all four were removed; a dead
+  mechanism left in place implies a feature that no longer has a trigger.
+- **An early edit removed BOTH export controls.** The test written for this item caught it before it
+  left the tree — and the first version of that test counted LABELS, which passed while a button still
+  said "Export" but had been rewired to `onDiscard`. The assertion now counts controls wired to
+  `onExport`, and both falsifications go red.
+
+## 2026-09-23 — "Export this clip" rides the queue, and the UI is not a document
+
+- **The single-clip export was SILENT because the route is synchronous.** `POST /api/clips/:id/export`
+  runs the entire encode before it answers, so there is no progress to report and the button looks
+  inert for the length of an encode. The queue already reports progress, ETA and cancel, and a batch
+  of one is still a batch: the button enqueues with an explicit `clipIds` (so it is a deliberate
+  re-send that bypasses the already-exported rule) and no `filename` (a rendered name has no tokens
+  left, so the server would stamp it verbatim on every item).
+- **The timeline is not focusable, because it takes no keyboard input.** `tabindex={0}` made it a tab
+  stop whose focus ring outlived the interaction. Its gestures are all mouse events — there is no
+  keydown handler in the component — so the `slider` role promised keys that do not exist. Both are
+  gone; `role="application"` and the `aria-label` stay, because removing focusability must not remove
+  the accessible name. The endpoint handles lost the same tabindex: they are drag targets.
+- **Selection is OFF by default and opted into where copying is the point.** A desktop tool is not a
+  document. The global `user-select: none` carries explicit opt-ins for form fields and
+  `contenteditable` (typing needs selection), `pre`/`code`, error text (users copy it into a report)
+  and chat messages. Chat's scroll container had a blanket `select-none` that would have cancelled the
+  per-message opt-in, so it was removed — the exception belongs on the text, not on its container.
+- **Both clip boundaries are drawn at one width.** The end was 3px against the start's 2px, and the
+  asymmetry read as a different KIND of mark. Which handle is which is answered by position and the
+  hit-test, not by thickness.

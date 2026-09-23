@@ -988,14 +988,23 @@ jobs:
           # bytes that never made it out. Patches are deliberately NOT fetched
           # here — one step below fetches them over the public URL, which is the
           # path the runtime actually uses.
-          gh release download "${{ needs.version.outputs.tag }}" \
-            --repo "$GITHUB_REPOSITORY" --dir back \
-            --pattern 'SemaClip.AppImage' \
-            --pattern 'SemaClip.AppImage.sha256' \
-            --pattern "SemaClip-$V-win-x64-portable.zip" \
-            --pattern "SemaClip-$V-win-x64-portable.zip.sha256" \
-            --pattern "SemaClip-$V-linux-x64-runtime.so" \
-            --pattern "SemaClip-$V-linux-x64-runtime.so.sha256"
+          #
+          # Via scripts/ci/releases.py, NOT `gh release download --pattern`: that
+          # reads the `assets[]` array embedded in the release, which comes back
+          # EMPTY for newer releases here while the files are present and served
+          # (measured: 0 for v26.257 and v26.258, 8 via `/releases/<id>/assets`).
+          # `--pattern` also cannot require a match, so a selector that stopped
+          # matching would leave the file absent and be reported by the loop below
+          # as if the PUBLISH had lost it. This job was skipped for three
+          # releases because the patch job failed first, so its first download
+          # would have hit the same empty array.
+          python3 scripts/ci/releases.py fetch-many "${{ needs.version.outputs.tag }}" back \
+            +name 'SemaClip.AppImage' \
+            +name 'SemaClip.AppImage.sha256' \
+            +name "SemaClip-$V-win-x64-portable.zip" \
+            +name "SemaClip-$V-win-x64-portable.zip.sha256" \
+            +name "SemaClip-$V-linux-x64-runtime.so" \
+            +name "SemaClip-$V-linux-x64-runtime.so.sha256"
           ls -la back
 
           fail=0
@@ -1194,11 +1203,11 @@ jobs:
 
             olddir="back/old-$frm"
             mkdir -p "$olddir"
-            gh release download "v$frm" --repo "$GITHUB_REPOSITORY" \
-              --pattern '*-linux-x64-runtime.so' --dir "$olddir" \
+            python3 scripts/ci/releases.py fetch "v$frm" \
+              +suffix '-linux-x64-runtime.so' "$olddir/dylib.so" \
               || { echo "::error::cannot fetch the $frm runtime dylib to check the patch against"; exit 1; }
-            old="$(find "$olddir" -name '*-linux-x64-runtime.so' -print -quit)"
-            [ -n "$old" ] || { echo "::error::no runtime dylib in the $frm release"; exit 1; }
+            old="$olddir/dylib.so"
+            [ -s "$old" ] || { echo "::error::no runtime dylib in the $frm release"; exit 1; }
 
             if [ "$to" = "$V" ]; then
               # This run's own artifact, already downloaded back.
@@ -1210,11 +1219,11 @@ jobs:
               # the chain is unreproducible for anyone on that version.
               todir="back/to-$to"
               mkdir -p "$todir"
-              gh release download "v$to" --repo "$GITHUB_REPOSITORY" \
-                --pattern '*-linux-x64-runtime.so' --dir "$todir" \
+              python3 scripts/ci/releases.py fetch "v$to" \
+                +suffix '-linux-x64-runtime.so' "$todir/dylib.so" \
                 || { echo "::error::cannot fetch the $to runtime dylib that $name must reproduce"; exit 1; }
-              target="$(find "$todir" -name '*-linux-x64-runtime.so' -print -quit)"
-              [ -n "$target" ] || { echo "::error::no runtime dylib in the $to release"; exit 1; }
+              target="$todir/dylib.so"
+              [ -s "$target" ] || { echo "::error::no runtime dylib in the $to release"; exit 1; }
             fi
 
             qbspatch "$old" back/patched.so "back/$name"

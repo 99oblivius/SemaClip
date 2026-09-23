@@ -73,6 +73,53 @@
     overflow: hidden;
   }
 
+  /*
+   * TEXT IS NOT SELECTABLE BY DEFAULT.
+   *
+   * This is a desktop app whose surface is mostly chrome — buttons, tabs, clip rows, timeline
+   * labels, times, badges. Nearly none of it is text a user would ever want to copy, and leaving it
+   * selectable meant a drag across the UI smeared a blue highlight over half the window (and, on the
+   * timeline, competed with the drag gestures). Opting IN to selection is the correct default here:
+   * the set of things worth copying is small, known, and enumerated below.
+   *
+   * `::selection` styling stays, because the elements that DO opt in still need it.
+   */
+  body {
+    user-select: none;
+  }
+
+  /*
+   * The exceptions, and why each one is here.
+   *
+   *  - `input`, `textarea`, `[contenteditable]`: editing requires selection. A clip name, a
+   *    filename template, a caption, the search box.
+   *  - `.selectable`: the explicit opt-in for prose and identifiers worth copying.
+   *  - `pre`, `code`: monospace blocks that are quoted elsewhere — log output.
+   *
+   * `user-select: text` on a parent does NOT re-enable it for a child of a `none` parent in every
+   * engine, so these are declared together at the highest level rather than nested.
+   */
+  input,
+  textarea,
+  [contenteditable='true'],
+  .selectable,
+  pre,
+  code {
+    user-select: text;
+  }
+
+  /*
+   * Error text is copyable WITHOUT an extra class on every site.
+   *
+   * `text-error` is the app's one semantic for "something went wrong", and a user pasting that
+   * message into a report is the single most likely reason to select anything in this UI. Keying the
+   * rule to the colour is what makes it cover all of them without touching each component — and it
+   * is safe because the class carries no other meaning.
+   */
+  .text-error {
+    user-select: text;
+  }
+
   ::selection {
     background: var(--color-accent);
     color: var(--color-ink);
@@ -98,6 +145,10 @@
 @layer components {
   .font-display { font-family: var(--font-display); }
   .font-mono { font-family: var(--font-mono); }
+
+  /* Opt IN to text selection: prose and identifiers the user may want to copy (a path, a filename,
+     a transcript line). Everything else is non-selectable — see the rule in @layer base. */
+  .selectable { user-select: text; }
 
   /* A project whose folder is not there (an unmounted drive, a moved folder).
      Black/grey diagonal stripes, drawn with a gradient rather than an image so it scales

@@ -6,7 +6,7 @@
   import { playerStore } from '$lib/stores/player';
   import Icon from '$lib/components/Icon.svelte';
   import { fadeIn } from '$lib/actions/gsap';
-  import type { Clip, ExportFormat, AspectRatio, AudioCodec, CaptionStyle, ExportClipInput, ExportPreset, ExportProfile, VideoCodec, EncoderChoice, QualityTier } from '$shared/types';
+  import type { Clip, ExportFormat, AspectRatio, AudioCodec, CaptionStyle, ExportPreset, ExportProfile, VideoCodec, EncoderChoice, QualityTier } from '$shared/types';
   import { CODEC_QUALITY_BANDS, AUDIO_CODECS, CONTAINER_AUDIO_MATRIX, defaultAudioFor, pairForFormat, formatForPair, MEASURED_ENCODER_DEFAULTS, QUALITY_TIERS, TIER_FRACTION, clampQuality, qualityForTier, bitsForQualityScaled, bitrateForTier, sensibleBitrateKbps } from '$shared/types';
 
   const queryClient = useQueryClient();
@@ -695,21 +695,36 @@
     },
   }));
 
+  /**
+   * "Export this clip" runs on the SAME durable queue the batch does.
+   *
+   * It used to POST `/api/clips/:id/export`, which awaits the whole encode and only then answers:
+   * no progress, no ETA, no cancel, and a button that looks inert for the length of an encode. The
+   * queue is the mechanism that already reports all three, and it takes an explicit `clipIds` — one
+   * clip is just the smallest batch. The endpoint stays for a client that wants the synchronous
+   * result, but the UI no longer uses it.
+   *
+   * `clipIds` is EXPLICIT so this is a deliberate re-send: it bypasses the "skip what is already
+   * exported" rule that export-all obeys, which is what the button means.
+   */
   const exportMutation = createMutation(() => ({
-    mutationFn: (input: ExportClipInput) => apiClient.exportClip(input),
-    onSuccess: (_data, input) => {
+    mutationFn: (input: { clipId: string }) =>
+      apiClient.enqueueExports({
+        profile: buildProfile(),
+        outputDir: null,
+        filename: null,
+        clipIds: [input.clipId],
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['export-queue'] });
+      // The route clears the re-sent clip's `exported` mark, so the clip lists are stale.
       queryClient.invalidateQueries({ queryKey: ['clips'] });
     },
   }));
 
   function handleExport() {
     if (!selected) return;
-    exportMutation.mutate({
-      clipId: selected.clip.id,
-      profile: buildProfile(),
-      outputPath: null,
-      filename: sampleName || null,
-    });
+    exportMutation.mutate({ clipId: selected.clip.id });
   }
 
   /** The profile the export controls currently describe. */
@@ -1086,9 +1101,12 @@
           {#if selected}
             <div class="flex flex-col items-end gap-0.5">
               {#if exportMutation.isError}
-                <span class="font-mono text-[10px] text-error">{exportMutation.error?.message ?? 'Export failed'}</span>
+                <span class="font-mono text-[10px] text-error">{exportMutation.error?.message ?? 'Could not queue'}</span>
               {:else if exportMutation.isSuccess}
-                <span class="font-mono text-[10px] text-success" title={exportMutation.data?.exportPath ?? ''}>✓ exported</span>
+                <!-- Queued, NOT exported: the encode has not run yet, and the per-row state in the
+                     queue panel is what reports it. Claiming `exported` here was the same lie the
+                     mark rules exist to prevent. -->
+                <span class="font-mono text-[10px] text-accent">queued</span>
               {/if}
               <span class="font-mono text-[10px] text-ash-dim">
                 {selected.clip.title ?? selected.clip.axis ?? 'manual'} · {(selected.clip.endTime - selected.clip.startTime).toFixed(0)}s

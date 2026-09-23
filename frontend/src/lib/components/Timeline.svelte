@@ -534,15 +534,17 @@
       ctx.fillStyle = grad;
       ctx.fillRect(x0, 0, Math.max(1, x1 - x0), h);
 
-      // The two boundaries. The END is the thicker line so a glance separates them; both are
-      // solid, and neither is derived from `peakTime`.
+      // The two boundaries, drawn IDENTICALLY: same colour, same width. The end used to be 3px
+      // against the start's 2px so a glance could separate them, but the asymmetry read as the end
+      // being a different KIND of mark — and with the fill already showing which side is which, the
+      // weight difference carried nothing. Which handle is which is answered by POSITION and by the
+      // hit-test, not by thickness. Neither line is derived from `peakTime`.
       ctx.strokeStyle = selected ? '#cc0000' : 'rgba(161, 161, 170, 0.85)';
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(Math.round(startX) + 0.5, 0);
       ctx.lineTo(Math.round(startX) + 0.5, h);
       ctx.stroke();
-      ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.moveTo(Math.round(endX) + 0.5, 0);
       ctx.lineTo(Math.round(endX) + 0.5, h);
@@ -861,15 +863,28 @@
   const selectedEndX = $derived(selectedClip ? timeToX(selectedClip.endTime) : -1);
 </script>
 
+<!--
+  NOT FOCUSABLE, and not a `slider` role.
+
+  `tabindex={0}` made the timeline a tab stop and a focus target, and it takes no keyboard input at
+  all — every one of its gestures is a mouse event (there is no keydown handler in this file). So the
+  tabindex bought nothing except a focus ring that outlived the interaction, which is what the owner
+  saw as "the timeline is focusable when redoing an action".
+
+  The `slider` role went with it: it is a lie for a control no keyboard can drive, and a
+  screen-reader user told "slider" would try arrow keys that do nothing. The seek keys that DO exist
+  (←/→, J/K, ,/.) live on the page, and the help overlay documents them.
+
+  `svelte-ignore` for the interaction warning, the same way ChatView declares its own drag region: the
+  element genuinely is mouse-driven, and the compiler's suggestion (make it interactive) is exactly
+  the change that is being removed here.
+-->
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
   bind:this={containerEl}
   class="relative h-full w-full cursor-text select-none"
-  role="slider"
-  aria-label="Timeline"
-  aria-valuemin={0}
-  aria-valuemax={duration}
-  aria-valuenow={player.currentTime}
-  tabindex={0}
+  role="application"
+  aria-label="Timeline — click to seek, drag the playhead, middle-drag to pan"
   onmousemove={handleMouseMove}
   onmousedown={handleMouseDown}
   onmouseup={handleMouseUp}
@@ -879,21 +894,24 @@
   <canvas bind:this={canvasEl} class="absolute inset-0 h-full w-full"></canvas>
 
 
-  <!-- Endpoint handles for selected clip (HTML for better hit targets) -->
+  <!--
+    Endpoint handles for the selected clip (HTML for better hit targets).
+
+    These carry NO tabindex and no `button` role. They are not keyboard controls: the drag is picked up
+    by the container's own `mousedown` and identified by hit-testing (`endpointAt`), so focusing one and
+    pressing Enter did nothing. As tab stops they only put two invisible rings in the tab order and
+    stole focus mid-edit, which is the focus problem the owner reported.
+  -->
   {#if selectedClip && selectedStartX >= 0}
     <div
       class="absolute top-0 h-full w-2 -translate-x-1/2 cursor-ew-resize"
       style="left: {selectedStartX}px"
-      role="button"
-      aria-label="Drag clip start"
-      tabindex={0}
+      aria-hidden="true"
     ></div>
     <div
       class="absolute top-0 h-full w-2 -translate-x-1/2 cursor-ew-resize"
       style="left: {selectedEndX}px"
-      role="button"
-      aria-label="Drag clip end"
-      tabindex={0}
+      aria-hidden="true"
     ></div>
   {/if}
 

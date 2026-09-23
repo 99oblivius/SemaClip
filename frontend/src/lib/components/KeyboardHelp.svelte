@@ -4,6 +4,28 @@
   }
   let { onClose }: Props = $props();
 
+  /**
+   * Every row here must correspond to something the code actually does.
+   *
+   * This overlay had drifted from `handleKey` (and from the mouse handling in Timeline.svelte) in
+   * both directions, and both are user-visible lies:
+   *
+   *  - `A` (accept) was documented and is handled NOWHERE — the branch went with the Accept button.
+   *  - `Enter (on marker)` never existed: Timeline.svelte has no keydown handler at all, and marker
+   *    jump is a mouse CLICK (markerClick is called only from handleMouseDown).
+   *  - `[` / `]` and `N` are real and were not listed.
+   *
+   * The mouse rows are kept, because a reader looking for "how do I jump to a marker" needs the
+   * answer to be here — but they are their own group, labelled as mouse, rather than sitting among
+   * keys under a "Timeline" heading that implied every row was a shortcut.
+   *
+   * `Q` was documented as "Hide / show snoozed clips" and is REMOVED (owner's request). It was dead
+   * twice over in the code: `handleKey` has no `q` branch at all, and the state it drove,
+   * `unreviewedOnly`, is initialised `false` and NEVER assigned anywhere else in the page — so the
+   * key could not hide anything even if the branch came back. Snoozing still works and is still
+   * visible: snoozed clips sort to the END of the queue (`visibleClips`), so the row says "Snooze
+   * clip to queue end" rather than promising a filter that does not exist.
+   */
   const groups: { title: string; keys: { key: string; action: string }[] }[] = [
     {
       title: 'Playback',
@@ -14,37 +36,42 @@
         { key: 'Shift+← / →', action: 'Seek ±1 second' },
         { key: ', / .', action: 'Frame step (±1 frame)' },
         { key: 'Shift+, / Shift+.', action: 'Step ±1 second' },
-        { key: 'I / O', action: 'Set clip in / out at playhead' },
         { key: 'M', action: 'Mute / unmute video' },
         { key: 'F', action: 'Toggle fullscreen video' },
       ],
     },
     {
-      title: 'Timeline',
+      title: 'Clips',
       keys: [
-        { key: 'Click', action: 'Seek to position (timeline is the proxy bar)' },
-        { key: 'Drag', action: 'Proxy through video' },
-        { key: 'Hover', action: 'Preview cursor + time tooltip' },
-        { key: 'Click clip mark', action: 'Select clip (does not seek)' },
-        { key: 'Drag handles', action: 'Adjust clip endpoints' },
-        { key: 'Enter (on marker)', action: 'Jump to external marker' },
-        { key: '+ / -', action: 'Zoom timeline in / out' },
-        { key: 'Scroll', action: 'Zoom timeline at cursor' },
+        { key: 'N', action: 'New clip at the playhead' },
+        { key: 'I / O', action: 'Set clip in / out at playhead' },
+        { key: '[ / ]', action: 'Same as I / O — the clip-editor keys' },
+        { key: 'D', action: 'Discard clip (marks rejected)' },
+        { key: 'U', action: 'Undo discard' },
+        { key: 'S', action: 'Snooze clip to queue end' },
+        { key: 'Ctrl+Z', action: 'Undo endpoint edit' },
+        { key: 'Ctrl+Shift+Z', action: 'Redo endpoint edit' },
+        { key: 'E', action: 'Send current clip to the export list' },
+        { key: 'Shift+E', action: 'Send every clip to the export list' },
       ],
     },
     {
-      title: 'Clips',
+      title: 'Filters & zoom',
       keys: [
-        { key: '1–7', action: 'Toggle axis filters (hype/humor/skill/awk/emot/tens/reaction)' },
-        { key: 'A', action: 'Accept clip' },
-        { key: 'D', action: 'Discard clip (marks rejected)' },
-        { key: 'U', action: 'Undo discard' },
-        { key: 'Ctrl+Z', action: 'Undo endpoint edit' },
-        { key: 'Ctrl+Shift+Z', action: 'Redo endpoint edit' },
-        { key: 'S', action: 'Snooze clip to queue end' },
-        { key: 'Q', action: 'Toggle unreviewed-only filter' },
-        { key: 'E', action: 'Export current clip' },
-        { key: 'Shift+E', action: 'Export all queued clips' },
+        { key: '1–7', action: 'Toggle axis filters (hype/humor/skill/awkward/emotional/tension/reaction)' },
+        { key: '+ / -', action: 'Zoom timeline in / out' },
+      ],
+    },
+    {
+      title: 'Timeline (mouse)',
+      keys: [
+        { key: 'Left click', action: 'Seek to position' },
+        { key: 'Left drag', action: 'Drag the playhead (continues past the edge)' },
+        { key: 'Middle drag', action: 'Pan the timeline, without moving the playhead' },
+        { key: 'Click clip mark', action: 'Select clip (does not seek)' },
+        { key: 'Drag handles', action: 'Adjust clip endpoints' },
+        { key: 'Click a flag', action: 'Jump to an external marker' },
+        { key: 'Scroll', action: 'Zoom the timeline at the cursor' },
       ],
     },
     {

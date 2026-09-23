@@ -15,8 +15,6 @@
     duration: number | null;
     clips: Clip[];
     currentClip: Clip | undefined;
-
-    onClipEnd: () => void;
   }
 
   let {
@@ -24,8 +22,6 @@
     duration,
     clips,
     currentClip,
-
-    onClipEnd,
   }: Props = $props();
 
   let videoEl = $state<HTMLVideoElement | undefined>(undefined);
@@ -40,10 +36,6 @@
   let currentTime = $state(0);
   let videoDuration = $state(0);
 
-  // Auto-advance guard: only auto-pause when playing through a clip
-  // that was explicitly started via playClip(). Manual seeks clear this.
-  let autoAdvanceClip = $state<Clip | null>(null);
-
   function handleTimeUpdate(e: Event) {
     const v = e.currentTarget as HTMLVideoElement;
     currentTime = v.currentTime;
@@ -52,11 +44,6 @@
     // (the video is already at this position, no need to seek back).
     playerStore.update((s) => ({ ...s, currentTime: v.currentTime }));
 
-    if (autoAdvanceClip && v.currentTime >= autoAdvanceClip.endTime) {
-      autoAdvanceClip = null;
-      v.pause();
-      onClipEnd();
-    }
   }
   // ── Seek bridge: apply store.currentTime to the video element. ──
   // ontimeupdate writes the video's position to the store. When the
@@ -73,7 +60,6 @@
     if (delta > 1 / 30 && (videoEl.paused || delta > 0.5)) {
       videoEl.currentTime = storeTime;
       currentTime = storeTime;
-      autoAdvanceClip = null;
     }
   });
 
@@ -371,13 +357,6 @@
 
 
   // ── Exposed methods for parent keyboard shortcuts ──
-
-  export function playClip(clip: Clip) {
-    if (!videoEl) return;
-    autoAdvanceClip = clip;
-    seek(clip.startTime);
-    void videoEl.play();
-  }
 
   export function togglePlayExported() { togglePlay(); }
   export function seekRelativeExported(delta: number) { seekRelative(delta); }

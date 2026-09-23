@@ -331,12 +331,13 @@ Exit gate: **487 server tests** green in both UTC and CEST, detection 20/0, svel
 `npm test` all pass, `deno check` clean. The export-all rule has its own test file, including the
 all-exported and dangling-reference cases.
 
-## Phase 8 — the patch job's asset fetch, and six review-UI fixes (26.259, 26.260)
+## Phase 8 — the release asset fetch, and six review-UI fixes (26.260)
 
-Two commits: the CI fix first, then the UI wave. Both are in the tree; the RENDERED outcomes are the
-owner's to GUI-verify, and nothing here claims a screen was seen.
+Two commits that ship in ONE release: the CI fix and the UI wave are pushed together, so the tip's
+commit count (260) numbers both. 26.259 is therefore never a published version — the numbering is
+derived from the commit count, not incremented per release.
 
-### The release patch job fetched assets by a path that returns nothing (26.259)
+### The release patch job fetched assets by a path that returns nothing (26.260)
 
 The `patch` job failed at `Download both runtime dylibs` on EVERY release from v26.257 on, and took
 the manifest republish and all of `verify` with it.
@@ -362,15 +363,85 @@ mode from the string mis-classified `-linux-x64-runtime.so` as an exact name and
 workflow calls it for both steps and self-tests it before the job needs it, and the fetch now has a
 size floor so a truncated download fails at the fetch instead of producing an empty patch.
 
-**No fallback**: the pattern path is gone from both steps rather than kept beside the new one, so the
-failure cannot silently return.
+**The `verify` job had the same defect and was fixed in the same pass.** Its three reads — the artifact
+download, plus the two dylib fetches in the patch-chain loop — all used `gh release download --pattern`,
+so they read the same empty array. Nothing showed it because `verify` was SKIPPED for three releases:
+`patch` failed first, and `if: needs.patch.result == 'skipped'` only tolerates a skip, not a failure.
+Fixing `patch` is what makes `verify` run, so its first download would have been the next thing to hit
+the empty array. Both jobs now go through the helper, and no `gh release download` or `gh release view`
+remains anywhere in the workflow — only `gh release upload` (a write) and `gh release list --json
+tagName` (tag names, no assets). `--pattern` was also strictly worse than the helper here: it cannot
+require a match, so a selector that stopped matching would leave a file absent and be reported as the
+PUBLISH having lost an asset.
+
+**No fallback**: the pattern path is gone from both JOBS — not kept beside the new one, and not left
+in `verify` — so the failure cannot silently return.
 
 Verified against the real releases: `previous v26.258` returns **v26.257** (the one the old loop
-skipped), and both dylibs fetch and size-check through the asset API (190,933,944 and 190,945,248
-bytes).
+skipped), both dylibs fetch and size-check through the asset API (190,933,944 and 190,945,248 bytes),
+and the `verify` job's own six selectors fetch and hash-verify against v26.258 (AppImage 100,907,512,
+win-x64 zip 110,768,427, dylib 190,945,248 — sidecars agreeing in all three cases).
 
 ## Standing rules
 - No phase starts before the previous exit gate is demonstrably met.
 - Anything that would fabricate success (stub returning victory) is a CI-blocking review reject.
 - shared/types.ts is the only wire contract; docs never fork it (STACK.md §6 lesson).
 - data/testing is no longer a clean hold-out: `fixtures/jfk.wav` is the shared CI engine fixture and the dense-chat slice has already been used for Phase 1 validation (see Phase 1's status below). Treat new data placed there as held out, but do not cite the two existing entries as unseen.
+
+## Phase 8 — six review-page items (26.260)
+
+**1. "Export this clip" exports silently.** The button POSTed the synchronous single-clip route, which
+runs the whole encode before answering — so there was no bar, no ETA and no cancel, and the button
+looked inert for the length of an encode. It now enqueues onto the same durable queue the batch uses,
+with an explicit `clipIds` (a deliberate re-send, so it bypasses the already-exported filter) and no
+`filename`, so the server renders each item's own name. The synchronous route is no longer reachable
+from the UI.
+
+**2. The help screen did not match the keys.** Audited every row against `handleKey` and against
+Timeline's mouse handling, and the drift ran in BOTH directions:
+
+- `A` (accept) was documented and handled NOWHERE — the branch went with the Accept button.
+- `Q` was documented as "Hide / show snoozed clips" and is dead twice over: there is no `q` branch at
+  all, and the state it drove (`unreviewedOnly`) was initialised `false` and never assigned, so the
+  filter could not fire even if the branch returned. Removed.
+- `Enter (on marker)` never existed: Timeline has no keydown handler and marker jump is a mouse click.
+- `[` / `]` and `N` are real and were missing.
+
+`N` is now listed, `Q` is gone, the mouse gestures are their own labelled group (they were sitting
+among keys under a heading that implied every row was a shortcut), and `Scroll` moved out of a list of
+keys because it is a wheel gesture. `frontend/tests/keybind-help-parity.test.mjs` now reads the keys
+out of `handleKey`'s own `case` labels and the rows out of the overlay's own literal and fails if
+either side has something the other lacks — the hand-audit is what let it drift, so the audit is a
+test now. Falsified four ways (dead Q row, dead A row, phantom Enter row, missing N row), each red.
+
+**3. The clip end handle was drawn 3px against the start's 2px.** Both boundaries now share one
+`lineWidth`, so the weight difference no longer implies a different kind of mark. Which handle is
+which is answered by position and the hit-test, not thickness.
+
+**4. The timeline was focusable.** `tabindex={0}` made it a tab stop and a focus target, and it takes
+no keyboard input at all — the focus ring outlived the interaction. Removed, along with the `slider`
+role it never honoured and the same tabindex on the endpoint handles (drag targets, not controls). It
+keeps `role="application"` and its `aria-label`, so removing focusability does not remove the
+accessible name.
+
+**5. Text was selectable everywhere.** The global default is now `user-select: none`, with explicit
+opt-ins for the places a user genuinely copies from: form fields and `contenteditable`, `pre`/`code`,
+error text, and chat messages. Chat's scroll container had a blanket `select-none` that would have
+cancelled the per-message opt-in, so it was removed — messages opt in individually.
+
+**6. The preview panel had two Export buttons and a redundant Play.** The header `Export` and the
+Actions column's `Export clip` were both wired to the same `onExport`, and `Play from start` sat
+beside them. The Actions column held only those two buttons, so the column is gone and Endpoints takes
+the width. Worth recording what `Play from start` actually did, because its label undersold it: it
+seeked, played, auto-paused at the clip's END and then advanced to the next clip. No other control
+chains that — Space plays from the playhead and does not stop at the boundary — so it is the one
+deliberate capability change here, reproducible in one keystroke (J/K then Space) and restorable in
+the header without bringing the duplicate Export back.
+
+An early edit of item 6 removed BOTH export controls instead of the duplicate; the test written for it
+caught that before it left the tree.
+
+Exit gate: **487 server tests** green, detection **20/0**, svelte-check **0 errors and 0 warnings**,
+frontend `npm test` green (17 files, 326 assertions — 88 of them newly added by this wave),
+`deno check` clean, `npm run build` clean. The two new frontend suites were each falsified by
+reintroducing the fault and confirming red.

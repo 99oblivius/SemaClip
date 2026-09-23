@@ -35,10 +35,6 @@
   let showKeyboardHelp = $state(false);
   let discarded = $state<Set<string>>(new Set());
   let pendingUndo = $state<{ id: string; timer: ReturnType<typeof setTimeout> } | null>(null);
-  // Q toggles: "hide the clips set aside this session". A candidate stays visible until it is
-  // discarded, so this OFF by default and reads the snooze set — which is the only thing that can
-  // currently set a clip aside.
-  let unreviewedOnly = $state(false);
 
   const allClips = $derived(clipsQuery.data ?? []);
   // Axis filters (keys 1–7): toggled sets, AND-composed across enabled axes;
@@ -51,7 +47,6 @@
       // ENGINE axes to look at, and a clip the user drew by hand is not an axis result. Treating
       // null as "no match" would make every hand-made clip vanish as soon as any filter is on.
       .filter((c) => activeAxes.size === 0 || c.axis === null || activeAxes.has(c.axis))
-      .filter((c) => !unreviewedOnly || !snoozedIds.has(c.id))
       .sort((a, b) => {
         // Snoozed clips sort last, stable within their group.
         const aSnoozed = snoozedIds.has(a.id) ? 1 : 0;
@@ -174,9 +169,9 @@
   /**
    * S: move the current candidate to the end of the audit queue.
    *
-   * `unreviewedOnly` is off by DEFAULT because a candidate must stay visible: discarding is the only
-   * thing that removes a clip from view, so starting filtered would hide every existing clip behind
-   * a toggle the user never asked for.
+   * Snoozed clips SORT to the end rather than being hidden. There is no hide-snoozed toggle: the
+   * state that would have driven one (`unreviewedOnly`) was never assigned, so its filter never
+   * fired and both are now gone. Discarding remains the only thing that removes a clip from view.
    */
   function snoozeClip() {
     if (!currentClip) return;
@@ -226,11 +221,6 @@
     if (typeof t === 'number') playerComp?.seekToExported(t);
   }
 
-  function playClip(clip: Clip) {
-    playerComp?.playClip(clip);
-    selectClip(clip.id);
-  }
-
   /**
    * Select a clip and move the playhead to it.
    *
@@ -256,10 +246,6 @@
       currentClipIndex--;
       if (currentClip) jumpToClip(currentClip);
     }
-  }
-
-  function handleClipEnd() {
-    nextClip();
   }
 
   function discardClip() {
@@ -513,11 +499,6 @@
         e.preventDefault();
         snoozeClip();
         break;
-      case 'q': case 'Q':
-        e.preventDefault();
-        unreviewedOnly = !unreviewedOnly;
-        currentClipIndex = 0;
-        break;
       case 'u': case 'U':
         e.preventDefault();
         undoDiscard();
@@ -620,7 +601,6 @@
         duration={stream?.duration ?? null}
         clips={visibleClips}
         currentClip={currentClip}
-        onClipEnd={handleClipEnd}
       />
       <!-- Signal terrain timeline -->
       <div class="relative rounded-md border border-border bg-surface h-20">
@@ -718,7 +698,6 @@
               clip={currentClip}
               clipIndex={currentClipIndex}
               {streamId}
-              onPlay={() => playClip(currentClip)}
               onExport={exportClip}
               onDiscard={discardClip}
               onRename={(axis) => renameClip(currentClip, axis)}

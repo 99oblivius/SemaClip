@@ -34,8 +34,8 @@ USAGE
   releases.py list                          # id<TAB>tag<TAB>created (newest first)
   releases.py has-dylib <tag>                # exit 0 if it carries a linux-x64 runtime
   releases.py previous <tag>                 # newest release before <tag> that has one
-  releases.py fetch <tag> <name-or-suffix> <dest-file>
-  releases.py fetch-any <tag> <suffix> <dest-file>   # first asset matching suffix
+  releases.py fetch <tag> <+name|+suffix> <value> <dest-file>
+  releases.py fetch-many <tag> <dest-dir> (<+name|+suffix> <value>)...
   releases.py self-test                      # offline checks of the selection rules
 """
 
@@ -206,6 +206,61 @@ def cmd_fetch(argv: list[str]) -> int:
     return 0
 
 
+def cmd_fetch_many(argv: list[str]) -> int:
+    """`fetch-many <tag> <dest-dir> (<+name|+suffix> <value>)...`
+
+    The multi-selector form, for a step that needs several named assets out of
+    one release (the verify job pulls the two installable artifacts and a dylib
+    with their `.sha256` sidecars). Same rules as `fetch`: every asset comes from
+    `GET /releases/{id}/assets`, and the selector is explicit.
+
+    EVERY selector must resolve. A selector that matches nothing is a failure
+    rather than a silent omission, because the caller's next step tests for the
+    files it expects and "missing asset" must not be indistinguishable from
+    "asset never existed".
+    """
+    repo = os.environ.get("GITHUB_REPOSITORY") or repo_slug()
+    if len(argv) < 3:
+        print("usage: fetch-many <tag> <dest-dir> (<+name|+suffix> <value>)...", file=sys.stderr)
+        return 2
+    tag, dest_dir, rest = argv[0], argv[1], argv[2:]
+    if len(rest) % 2 != 0:
+        print("usage: fetch-many <tag> <dest-dir> (<+name|+suffix> <value>)...", file=sys.stderr)
+        return 2
+    selectors: list[tuple[str, str]] = []
+    for i in range(0, len(rest), 2):
+        mode, value = rest[i], rest[i + 1]
+        if mode not in ("+name", "+suffix"):
+            print(f"usage: fetch-many: selector must be +name or +suffix, got {mode!r}", file=sys.stderr)
+            return 2
+        selectors.append((mode, value))
+
+    rel = next((r for r in list_releases(repo) if r["tag_name"] == tag), None)
+    if rel is None:
+        print(f"::error::release {tag} not found", file=sys.stderr)
+        return 1
+
+    os.makedirs(dest_dir, exist_ok=True)
+    # One asset listing for the whole call: this is the endpoint that is populated.
+    listing = assets_of(repo, rel["id"])
+    missing: list[str] = []
+    for mode, value in selectors:
+        if mode == "+name":
+            asset = next((a for a in listing if a["name"] == value), None)
+        else:
+            asset = next((a for a in listing if a["name"].endswith(value)), None)
+        if asset is None:
+            missing.append(f"{mode} {value!r}")
+            continue
+        dest = os.path.join(dest_dir, asset["name"])
+        n = download(repo, asset, dest)
+        print(f"{asset['name']} {n} bytes -> {dest}")
+    if missing:
+        print(f"::error::{tag} has no asset matching " + " or ".join(missing), file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_self_test(argv: list[str]) -> int:
     """Offline checks of the selection rules, against a stubbed API.
 
@@ -287,6 +342,56 @@ def cmd_self_test(argv: list[str]) -> int:
     finally:
         _get = real_get  # type: ignore[assignment]
 
+    # ── fetch-many: the multi-selector form, and its all-or-nothing rule ──────
+    # It is the shape the verify job needs (two artifacts + a dylib + sidecars),
+    # so it is exercised on the same stubbed API, including the case that matters:
+    # ONE bad selector must fail the whole call rather than quietly fetching the
+    # rest, or the caller's later "file is missing" test cannot tell "the asset
+    # was never there" from "we never asked for it correctly".
+    with tempfile.TemporaryDirectory() as td:
+        assets[3].append({"name": "SemaClip.AppImage", "url": "uAPP"})
+        assets[3].append({"name": "SemaClip.AppImage.sha256", "url": "uAPPS"})
+        downloads: list[str] = []
+
+        def fake_get2(path: str, accept: str = "application/vnd.github+json") -> bytes:
+            if "/releases?" in path:
+                return json.dumps(fake["releases"]).encode()
+            for rid, lst in fake["assets"].items():
+                if f"/releases/{rid}/assets" in path:
+                    return json.dumps(lst).encode()
+            if path.startswith("u"):
+                downloads.append(path)
+                return b"payload"
+            raise AssertionError(f"unexpected path {path}")
+
+        _get = fake_get2  # type: ignore[assignment]
+        try:
+            rc = cmd_fetch_many(["v3", td, "+name", "SemaClip.AppImage",
+                                 "+suffix", "-linux-x64-runtime.so"])
+            names = sorted(os.listdir(td))
+            check("fetch-many succeeds when every selector resolves", rc, 0)
+            check("fetch-many writes each matching asset under its own name",
+                  names, ["SemaClip-3-linux-x64-runtime.so", "SemaClip.AppImage"])
+
+            os.remove(os.path.join(td, "SemaClip.AppImage"))
+            rc = cmd_fetch_many(["v3", td, "+name", "SemaClip.AppImage",
+                                 "+name", "definitely-absent.bin",
+                                 "+suffix", "-linux-x64-runtime.so"])
+            check("fetch-many FAILS when one selector matches nothing", rc, 1)
+            # The rule under test: one bad selector is an error, not a partial run.
+            # (It may still have fetched the good ones before noticing; what must
+            # not happen is returning success.)
+            check("fetch-many still reports the missing selector", rc != 0, True)
+
+            rc = cmd_fetch_many(["v3", td, "+name", "SemaClip.AppImage", "+suffix"])
+            check("fetch-many rejects an unpaired selector", rc, 2)
+            rc = cmd_fetch_many(["v3", td, "+exact", "x"])
+            check("fetch-many rejects an unknown selector mode", rc, 2)
+            rc = cmd_fetch_many(["v-absent", td, "+name", "SemaClip.AppImage"])
+            check("fetch-many fails on an unknown tag", rc, 1)
+        finally:
+            _get = real_get  # type: ignore[assignment]
+
     if failures:
         print("\nSELF-TEST FAILURES:", file=sys.stderr)
         for f in failures:
@@ -301,6 +406,7 @@ COMMANDS = {
     "has-dylib": cmd_has_dylib,
     "previous": cmd_previous,
     "fetch": cmd_fetch,
+    "fetch-many": cmd_fetch_many,
     "self-test": cmd_self_test,
 }
 
