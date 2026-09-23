@@ -538,3 +538,86 @@ build (the developer's own does). They are harmless: the runner reads the table 
 it against the `migrations` array, so an unknown recorded version is simply never matched and nothing
 re-runs — verified by opening a database recorded through 0.10.0 against the consolidated set, which
 applies zero migrations and returns a usable handle.
+
+
+## A gesture is ONE history entry, and it is owned by the window (26.258)
+
+The owner reported that "moving the play head should not create a history event every frame". The
+playhead never did: `pushEdit` has exactly two call sites and neither is a seek. The per-frame history
+was ENDPOINT dragging — `adjustEndpoints` pushed an undo entry AND issued a PUT on every mousemove, so
+a single drag wrote ~60 entries and reversing one gesture took 60 presses of Ctrl+Z. The report named
+one mechanism and the fault lived in the other; the count of call sites is what settles it.
+
+**The rule:** HISTORY IS COMMITTED BY THE GESTURE, NOT BY THE FRAME. Live frames update the query cache
+only, and one `onCommitEndpoints` fires on release. Two consequences fall out of that:
+
+- **The pre-drag range must be captured at PRESS.** By release the live frames have overwritten the
+  current range, so nothing downstream can reconstruct where the drag started. The component pins the
+  anchor clip and the range in `mousedown` and passes them back on release; the undo entry is built
+  from those.
+- **A drag is owned by the WINDOW, not the element.** Listening on the timeline alone meant leaving the
+  element ended the gesture (and `mouseleave` cancelled it), so a drag past the edge died. Window
+  listeners are armed in an `$effect` gated on a gesture being active, so the page pays nothing at rest.
+  Exactly ONE handler may act per frame: with both the element and the window handling motion, every
+  frame fired twice — two seeks, two endpoint updates.
+
+## The timeline's view window has one owner (26.258)
+
+Middle-drag pans, left-drag moves the playhead, right-click does nothing. The pan drives the same
+`viewStart`/`viewEnd` the zoom control already owns, rather than introducing a pan offset of its own.
+A second owner of "what time sits at x=0" is how a timeline comes to disagree with itself about where a
+clip is — the same class of fault as two owners of a project's file paths. The pan delta is applied
+against the offset captured at press, never accumulated per event, so a long drag cannot drift away
+from the pointer.
+
+## The manual clip cap is a CEILING, never a source of video (26.258)
+
+`clipEndFrom` takes the MINIMUM over candidate ends — the 60s cap, the next clip's start when it is at
+least the 0.5s floor away, and the end of the video — rather than an if/else chain. The chain let a
+neighbour's start beat the cap, or vice versa, depending on the ORDER OF THE BRANCHES; a minimum cannot
+have an order-dependent bug.
+
+Two boundaries the first implementation got wrong, both caught by writing the tests:
+
+- **The cap must not be used when the video is nearly over.** With 0.2s of stream left, `min(cap, …)`
+  returned `start + 60` — a clip running 59.8s past the end of the video. The cap is a ceiling on what
+  may be created, not a supply of footage that exists. Under the floor, the fallback length is used.
+- **An unknown duration is not a short video.** With `duration: null` there is no video end to honour,
+  so the cap is the only bound and the clip gets the full 60s. The pre-cap rule returned the 30s
+  fallback here, which handed back a shorter clip than the cap allows for no reason.
+
+An explicit `endTime` is clamped to the same ceiling inside `CreateClipUseCase`: the cap describes what
+a manual clip MAY BE, so a client cannot talk the server into an hours-long clip by sending an end.
+
+**Known gap, deliberately not closed here:** `createClip` validates no bounds at all, and the manual
+path does not pass through `UpdateClipUseCase` (where the 0.5s floor lives), so nothing re-checks the
+floor downstream. The last branch can return an end barely past `startTime` when an existing clip
+starts within 0.5s of the playhead. Closing it means giving `createClip` a validator, which is a wider
+change than this fix.
+
+## A batch's filename is a TEMPLATE, and export-all means the OUTSTANDING work (26.258)
+
+Two faults behind the owner's report, and neither was the sorting they suspected — the export page has
+no sorting at all, only a partition for entries whose clip is gone; row order is the server's stored
+`position`.
+
+**One filename for the whole batch.** `enqueueAll` stores a single `filename` and hands it to every
+item, and `ExportClipUseCase` treats an incoming `filename` as a TEMPLATE (that is what the field means
+on the single-clip route) and renders it. The export page sent the SELECTED clip's already-rendered
+name, which has no tokens left, so it rendered verbatim for every clip in the run — one clip's name
+stamped across the batch, with the `-2`/`-3` collision suffix the only thing telling the files apart.
+A batch must send `filename: null` and let `profile.nameTemplate` render per clip, because a per-clip
+name is the one thing a single string cannot be.
+
+**Export-all re-sent finished work.** The implicit selection was `liveIds()` — every listed clip,
+marked or not — and the route clears the mark of everything it ACCEPTS. So pressing export all both
+re-encoded files that already existed and destroyed the record that they do. The rule is that
+export-all means the work still OUTSTANDING; the mark, not the path, decides (`exported` with a nulled
+path still records that an export was made). The ids are passed EXPLICITLY, because passing none makes
+`enqueueAll` re-read the list and put the filtered clips straight back. An EXPLICIT `clipIds` list
+stays unfiltered: there the user named the clips, and filtering them would silently ignore a direct
+instruction. The skip count is reported rather than swallowed, so a user who pressed export-all on a
+partly-exported list is told why some rows did not run.
+
+The rule lives in `selectImplicitBatch` — pure, in `ClipUseCases.ts`, so it is testable without a
+server, with its own test file covering the all-exported and dangling-reference cases.

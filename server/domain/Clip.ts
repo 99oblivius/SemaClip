@@ -78,41 +78,69 @@ export function createManualClip(input: { streamId: string; startTime: number; e
 }
 
 /**
- * Where a clip created at `startTime` should end, given the clips that already exist.
+ * The longest a hand-made clip may be, in seconds.
  *
- * The rule the owner asked for: it ends at the NEXT CLIP'S START, or the end of the video.
- * "Next" is the first clip that starts strictly after the new clip's start — a clip starting
- * exactly at `startTime` is where we already are, not what follows, and using it would
- * produce a zero-length clip.
+ * A manual clip is created from ONE click at the playhead: the end is inferred, not
+ * chosen. Unbounded inference produced clips that ran to the end of the video (hours),
+ * which is not a clip — it is the rest of the stream, and it made export and review
+ * unusable. 60s is the owner's ceiling; the user can still trim shorter, and an
+ * explicit `endTime` is still honoured up to this cap.
+ */
+export const MAX_MANUAL_CLIP_SECONDS = 60;
+
+/**
+ * Where a hand-made clip should end.
  *
- * Pure and exported so the boundary cases (no later clip, a later clip that starts before
- * the end of the VOD, a clip exactly at the playhead) are testable without a server.
+ * Bounded by THREE things, and the tightest wins: the cap above, the next clip's
+ * start (a manual clip must not swallow a neighbour), and the end of the video. When
+ * there is no room for even a minimum-length clip the fallback still returns something
+ * usable, because refusing to create a clip at the playhead is worse than one the user
+ * has to trim.
+ *
+ * KNOWN GAP: nothing re-checks the floor downstream — `createClip` accepts any range it
+ * is handed, and the manual path does not go through `UpdateClipUseCase`, which is where
+ * the 0.5s rule lives. So the last branch can return an end barely past `startTime`. It
+ * is reachable only when an existing clip starts within 0.5s of the playhead (see the
+ * test of that name), and the trim UI is the remedy.
  */
 export function clipEndFrom(input: {
   startTime: number;
   duration: number | null;
   existingStartTimes: number[];
   fallbackLength?: number;
+  maxLength?: number;
 }): number {
+  const maxLength = input.maxLength ?? MAX_MANUAL_CLIP_SECONDS;
+  /** The shortest clip worth creating; the same floor UpdateClipUseCase enforces. */
+  const FLOOR = 0.5;
   const later = input.existingStartTimes
     .filter((t) => t > input.startTime)
     .sort((a, b) => a - b);
 
-  // A later clip's start bounds the new clip. Take the earliest one, but never a start that
-  // would make the clip degenerate — 0.5s is the same floor UpdateClipUseCase enforces.
-  if (later.length > 0 && later[0]! - input.startTime >= 0.5) {
-    return later[0]!;
+  // Every candidate end is collected, then the SMALLEST is taken. Written as a minimum
+  // rather than as an if/else chain because the chain let a later clip's start win over
+  // the cap (and vice versa) depending on the order of the branches.
+  const candidates: number[] = [input.startTime + maxLength];
+
+  // A later clip's start bounds the new clip, so it cannot overlap a neighbour. A start
+  // closer than the floor cannot bound anything usable, so it is skipped rather than
+  // producing a clip too short to keep.
+  const next = later[0];
+  if (next !== undefined && next - input.startTime >= FLOOR) candidates.push(next);
+
+  if (input.duration !== null) {
+    // The playhead is at (or within the floor of) the end of the video. The CAP is not a
+    // source of video that does not exist, so it must not be used here: `min(cap, …)`
+    // would happily return a 60s clip running past the end of a stream with 0.2s left.
+    // There is no honest boundary, so a usable default length keeps the button working
+    // and the trim UI is how the user fixes it.
+    if (input.duration - input.startTime < FLOOR) {
+      return input.startTime + (input.fallbackLength ?? 30);
+    }
+    candidates.push(input.duration);
   }
 
-  // Nothing later: run to the end of the video.
-  if (input.duration !== null && input.duration - input.startTime >= 0.5) {
-    return input.duration;
-  }
-
-  // Neither a later clip nor enough video left (the playhead is at/near the end). There is no
-  // honest "next boundary" here, so give the clip a usable default length rather than
-  // refusing — and let the UI's trim fix it.
-  return input.startTime + (input.fallbackLength ?? 30);
+  return Math.min(...candidates);
 }
 
 export function rank(clip: Clip, rankValue: number): Clip {

@@ -363,14 +363,40 @@
     apiClient.updateClip(clip.id, { title: trimmed }).catch((err) => console.error('renameClip failed:', err));
   }
 
+  /**
+   * A drag in progress: move the UI, and NOTHING else.
+   *
+   * This used to push an undo entry and a PUT per mousemove — a 60Hz drag wrote ~60 history
+   * entries, so a single gesture took 60 presses of Ctrl+Z to reverse and made the undo stack
+   * useless for anything else. The live frames are deliberately local (query cache only); the
+   * gesture is committed once by `commitEndpoints` below.
+   */
   function adjustEndpoints(clip: Clip, start: number, end: number) {
-    const before = { startTime: clip.startTime, endTime: clip.endTime };
-    const after = { startTime: start, endTime: end };
-    pushEdit(clip.id, before, after);
     queryClient.setQueryData<Clip[]>(['clips', streamId], (old) =>
       old?.map((c) => (c.id === clip.id ? { ...c, startTime: start, endTime: end } : c)),
     );
-    apiClient.updateClip(clip.id, after).catch((err) => console.error('updateClip failed:', err));
+  }
+
+  /**
+   * The drag ended: ONE undo entry and ONE persist for the whole gesture.
+   *
+   * `before` comes from the component (captured at press, since the live frames above have
+   * already overwritten it); `after` is read back from the cache, which by now holds the
+   * dragged range. A drag that ends where it began pushes nothing (`pushEdit` drops it).
+   */
+  function commitEndpoints(clipId: string, before: { startTime: number; endTime: number }) {
+    const after = queryClient
+      .getQueryData<Clip[]>(['clips', streamId])
+      ?.find((c) => c.id === clipId);
+    if (!after) return;
+    const range = { startTime: after.startTime, endTime: after.endTime };
+    pushEdit(clipId, before, range);
+    apiClient.updateClip(clipId, range).catch((err) => {
+      console.error('updateClip failed:', err);
+      queryClient.setQueryData<Clip[]>(['clips', streamId], (old) =>
+        old?.map((c) => (c.id === clipId ? { ...c, ...before } : c)),
+      );
+    });
   }
 
   /** Toggle clip-follow: frame the timeline to the selected clip's bounds
@@ -606,6 +632,7 @@
             currentClipId={currentClip?.id ?? null}
             onSelectClip={(clip) => { currentClipIndex = visibleClips.findIndex((c) => c.id === clip.id); jumpToClip(clip); }}
             onAdjustEndpoints={adjustEndpoints}
+            onCommitEndpoints={commitEndpoints}
             onSeek={(time) => playerComp?.seekToExported(time)}
           />
         {:else}

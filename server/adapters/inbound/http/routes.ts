@@ -25,6 +25,7 @@ import type {
   SettingsUseCase,
   SetProjectLocationUseCase,
 } from "@/application/use-cases/mod.ts";
+import { selectImplicitBatch } from "@/application/use-cases/mod.ts";
 import type { Axis, StreamStatus, ExportListEntry, VideoCodec } from "shared/types";
 import { CODEC_QUALITY_BANDS, HW_QUALITY_BANDS, MEASURED_ENCODER_SPEEDS } from "shared/types";
 import {
@@ -754,19 +755,39 @@ export function createApp(deps: HttpDeps, bus: EventBus): Hono {
     }
     // The clips this batch will actually re-encode, resolved BEFORE enqueueing so the ids are the
     // real set (the body may omit `clipIds` and mean "everything on the list").
-    const batchClipIds = body.clipIds ?? await deps.exportList.liveIds();
+    //
+    // An IMPLICIT batch — export-all, the body omitting `clipIds` — excludes clips that already
+    // produced a file. Export-all is for the work still OUTSTANDING: re-encoding a clip that is
+    // already done wastes the encode and, because this route clears the mark of everything it
+    // accepts, destroys the only record that the file exists.
+    //
+    // An EXPLICIT `clipIds` list is filtered by nothing — there the user named the clips, so a
+    // re-send is precisely what they asked for.
+    let batchClipIds: string[];
+    let skipped = 0;
+    if (body.clipIds) {
+      batchClipIds = body.clipIds;
+    } else {
+      const listed = await deps.exportList.liveIds();
+      const resolved = await Promise.all(listed.map((id) => deps.getClip.execute(id)));
+      ({ clipIds: batchClipIds, skipped } = selectImplicitBatch(resolved));
+    }
+    // The clips are named EXPLICITLY, even though the ids came from the list: `enqueueAll` would
+    // otherwise re-read `liveIds()` and enqueue back the very clips this filter just removed.
     const result = await deps.exportQueue.enqueueAll({
       profile: normaliseProfile(body.profile ?? {}),
       outputDir: body.outputDir ?? null,
       filename: body.filename ?? null,
-      ...(body.clipIds ? { clipIds: body.clipIds } : {}),
+      clipIds: batchClipIds,
     });
     // A re-send REPLACES the file, so the previous run's `exported` mark stops being true the moment
     // this one is accepted. Leaving it up showed `✓ exported` for a clip whose new encode had not
     // even started. Done after the enqueue so a refused enqueue cannot clear a mark for work the
     // server never took on.
     for (const clipId of batchClipIds) await deps.clearExportedMark.execute(clipId);
-    return c.json(result, 201);
+    // `skipped` is reported rather than swallowed: a user who pressed Export all on a list where
+    // some rows say "exported" is owed the reason those rows did not run.
+    return c.json({ ...result, skipped }, 201);
   });
 
   app.delete("/api/export/queue", async (c) => {

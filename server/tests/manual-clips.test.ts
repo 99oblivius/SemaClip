@@ -124,44 +124,71 @@ Deno.test("the REMAINING not-nulls are not loosened along with the three", () =>
 });
 
 Deno.test("clipEndFrom: the next clip's start bounds the new clip", () => {
-  // The rule the owner asked for: end at the next clip start, or the end of the video.
+  // A neighbour INSIDE the cap wins: the new clip must not swallow it. (130 is 30s away, so it is
+  // tighter than the 60s cap; a neighbour beyond the cap cannot bound anything — that case is the
+  // test below.)
   assertEquals(
-    clipEndFrom({ startTime: 100, duration: 3600, existingStartTimes: [50, 180, 900] }),
-    180,
+    clipEndFrom({ startTime: 100, duration: 3600, existingStartTimes: [50, 130, 900] }),
+    130,
   );
 });
 
-Deno.test("clipEndFrom: nothing later → the end of the video", () => {
+Deno.test("clipEndFrom: the CAP bounds the clip when nothing is nearer", () => {
+  // Nothing later and hours of video left: this is the case that produced hour-long "clips"
+  // before the cap. Both other bounds are further away, so 60s is the answer.
   assertEquals(
     clipEndFrom({ startTime: 100, duration: 3600, existingStartTimes: [10, 50] }),
+    160,
+  );
+});
+
+Deno.test("clipEndFrom: a neighbour BEYOND the cap does not extend the clip", () => {
+  // The cap is a ceiling, not a target: a neighbour 10 minutes away must not make a 10-minute
+  // clip. This is the boundary the old code got wrong in the other direction.
+  assertEquals(
+    clipEndFrom({ startTime: 100, duration: 3600, existingStartTimes: [700] }),
+    160,
+  );
+});
+
+Deno.test("clipEndFrom: the end of the video wins over the cap near the end", () => {
+  // 40s of video left, cap 60s → the video ends first.
+  assertEquals(
+    clipEndFrom({ startTime: 3560, duration: 3600, existingStartTimes: [] }),
     3600,
   );
 });
 
 Deno.test("clipEndFrom: a clip starting AT the playhead is not 'next'", () => {
-  // A start exactly at startTime would make a zero-length clip, so it is skipped in favour of
-  // the following one. This is the boundary that a naive `>=` gets wrong.
+  // A start exactly at startTime would make a zero-length clip, so it is skipped. The clip
+  // then runs to the cap rather than to the following clip, because 240 is beyond it.
   assertEquals(
     clipEndFrom({ startTime: 100, duration: 3600, existingStartTimes: [100, 240] }),
-    240,
+    160,
   );
 });
 
 Deno.test("clipEndFrom: a degenerate 'next' start is skipped, not used", () => {
-  // A later clip 0.2s away cannot bound anything usable; fall through to the VOD end rather
-  // than producing a 0.2s clip.
+  // A later clip 0.2s away cannot bound anything usable; it is skipped rather than producing a
+  // 0.2s clip. The cap then applies — NOT the end of the video, which is where the pre-cap
+  // rule would have gone.
   assertEquals(
     clipEndFrom({ startTime: 100, duration: 3600, existingStartTimes: [100.2] }),
-    3600,
+    160,
   );
 });
 
 Deno.test("clipEndFrom: playhead at the very end yields a usable default, never a refusal", () => {
   // Less than the 0.5s floor of video left: there is no honest boundary, so a default length
-  // keeps the button working and the trim UI is how the user fixes it.
+  // keeps the button working and the trim UI is how the user fixes it. The CAP must NOT be
+  // used here — it is not a source of video that does not exist, and using it produced a 60s
+  // clip running past the end of the stream.
   assertEquals(clipEndFrom({ startTime: 3599.8, duration: 3600, existingStartTimes: [] }), 3629.8);
-  // And an unknown duration (a stream row with no duration yet) behaves the same way.
-  assertEquals(clipEndFrom({ startTime: 0, duration: null, existingStartTimes: [] }), 30);
+  // An unknown duration has no video end to honour, so the CAP is the only bound — the clip gets
+  // the full 60s rather than a shorter arbitrary default. This changed with the cap: the old rule
+  // returned `fallbackLength` (30s) here. The cap is a ceiling either way, so 60s is inside the
+  // owner's rule, and "unknown length" is not a reason to hand back a shorter clip than asked for.
+  assertEquals(clipEndFrom({ startTime: 0, duration: null, existingStartTimes: [] }), 60);
 });
 
 Deno.test("clipEndFrom: a second of video left is still a legitimate end", () => {
@@ -169,6 +196,26 @@ Deno.test("clipEndFrom: a second of video left is still a legitimate end", () =>
   // the answer rather than the fallback. Getting this wrong would silently invent a 30s clip
   // past the end of the video.
   assertEquals(clipEndFrom({ startTime: 3599, duration: 3600, existingStartTimes: [] }), 3600);
+});
+
+Deno.test("clipEndFrom: the cap is configurable, and a smaller cap still bounds", () => {
+  // `maxLength` exists so the rule can be re-stated without editing the constant; the boundary
+  // is the same shape.
+  assertEquals(
+    clipEndFrom({ startTime: 100, duration: 3600, existingStartTimes: [], maxLength: 15 }),
+    115,
+  );
+  assertEquals(
+    clipEndFrom({ startTime: 100, duration: 3600, existingStartTimes: [110], maxLength: 15 }),
+    110,
+  );
+});
+
+Deno.test("clipEndFrom: a neighbour inside the floor is skipped, not a zero-length clip", () => {
+  // The tightest boundary there is: a neighbour 0.1s away. The clip must remain creatable.
+  const end = clipEndFrom({ startTime: 100, duration: 3600, existingStartTimes: [100.1] });
+  assertEquals(end, 160);
+  assertEquals(end > 100, true);
 });
 
 Deno.test("createManualClip records ABSENCE, never a sentinel", () => {

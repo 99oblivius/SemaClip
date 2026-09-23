@@ -42,9 +42,11 @@ export class RejectClipUseCase {
 /**
  * Creates a clip BY HAND at a playhead position — the manual-clip path (no engine involved).
  *
- * The end is computed rather than supplied: it runs to the next clip's start, else to the end
- * of the video (`clipEndFrom`, which owns that rule and its boundaries). The UI may still send
- * an explicit `endTime`, which is used verbatim.
+ * The end is computed rather than supplied: it runs to the next clip's start, the end of the
+ * video, or the manual-clip cap — whichever comes first (`clipEndFrom`, which owns that rule
+ * and its boundaries). An explicit `endTime` is honoured, but still CAPPED: the cap is a
+ * property of what a manual clip may be, not a default, so a client cannot talk the server
+ * into an hours-long clip by sending an end.
  */
 export class CreateClipUseCase {
   constructor(
@@ -65,6 +67,12 @@ export class CreateClipUseCase {
     }
 
     const existing = await this.clips.listByStream(streamId);
+    // The same boundary the inferred end obeys, so both paths agree.
+    const ceiling = clipEndFrom({
+      startTime,
+      duration: stream.duration ?? null,
+      existingStartTimes: existing.map((c) => c.startTime),
+    });
 
     let endTime: number;
     if (input.endTime !== undefined) {
@@ -73,12 +81,9 @@ export class CreateClipUseCase {
       if (endTime - startTime < 0.5) {
         throw new Error("Clip too short: out must be at least 0.5s after in");
       }
+      endTime = Math.min(endTime, Math.max(ceiling, startTime + 0.5));
     } else {
-      endTime = clipEndFrom({
-        startTime,
-        duration: stream.duration ?? null,
-        existingStartTimes: existing.map((c) => c.startTime),
-      });
+      endTime = ceiling;
     }
 
     const clip = createManualClip({ streamId, startTime, endTime });
@@ -146,4 +151,28 @@ export class ClearExportedMarkUseCase {
     if (!clip.exported && clip.exportPath === null) return;
     await this.clips.update(markNotExported(clip));
   }
+}
+
+/**
+ * Which of a LIST's clips an implicit (export-all) batch should actually re-encode.
+ *
+ * ── WHY THIS EXISTS ────────────────────────────────────────────────────────────────────────────
+ * Export all re-sent clips that already carried `exported`, and because the batch route clears the
+ * mark of everything it accepts, pressing it destroyed the record of files that already exist while
+ * re-encoding them for no reason. The rule is that export-all means the work still OUTSTANDING.
+ *
+ * A dangling list reference — a clip row that is gone — is dropped rather than exported, and rather
+ * than failing the user's action.
+ *
+ * This is deliberately NOT applied to an EXPLICIT list of clip ids: there the user named the clips
+ * one by one, so re-sending one is exactly what they asked for, and filtering it away would silently
+ * ignore a direct instruction.
+ */
+export function selectImplicitBatch(clips: (Clip | null)[]): {
+  clipIds: string[];
+  skipped: number;
+} {
+  const present = clips.filter((c): c is Clip => c !== null);
+  const clipIds = present.filter((c) => !c.exported).map((c) => c.id);
+  return { clipIds, skipped: present.length - clipIds.length };
 }

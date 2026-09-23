@@ -2,7 +2,7 @@
   import { createQuery } from '@tanstack/svelte-query';
   import { apiClient } from '$lib/api/client';
   import { downloadsQuery, viewFor } from '$lib/api/downloads';
-  import { playerStore, setZoom } from '$lib/stores/player';
+  import { pan as panStore, playerStore, setZoom } from '$lib/stores/player';
   import type { Clip } from '$shared/types';
   import { onMount, onDestroy } from 'svelte';
 
@@ -12,7 +12,17 @@
     clips: Clip[];
     currentClipId: string | null;
     onSelectClip: (clip: Clip) => void;
-    onAdjustEndpoints?: (clip: Clip, start: number, end: number) => void;
+    /**
+     * Live endpoint changes while a drag is in progress. `commit` is false for every
+     * frame of the drag and the caller must NOT push an undo entry for it.
+     */
+    onAdjustEndpoints?: (clip: Clip, start: number, end: number, commit?: boolean) => void;
+    /**
+     * The drag ENDED: push ONE undo entry spanning it, from the range captured when the
+     * drag began. Separate from `onAdjustEndpoints` because the pre-drag range only
+     * exists at press time — by release the live updates have overwritten it.
+     */
+    onCommitEndpoints?: (clipId: string, before: { startTime: number; endTime: number }) => void;
     onSeek?: (time: number) => void;
   }
 
@@ -23,6 +33,7 @@
     currentClipId,
     onSelectClip,
     onAdjustEndpoints,
+    onCommitEndpoints,
     onSeek,
   }: Props = $props();
 
@@ -119,6 +130,15 @@
   let isProxybing = $state(false);
   let isDraggingEndpoint = $state(false);
   let draggingEndpoint: 'start' | 'end' | null = null;
+  let isPanning = $state(false);
+  /** View start + pointer x at press: the pan is computed against these, never accumulated. */
+  let panStartOffset = 0;
+  let panStartClientX = 0;
+  /** The clip an endpoint drag is editing, and its range BEFORE the drag — the undo entry. */
+  let draggingClip: string | null = null;
+  let draggingAnchorClip: Clip | null = null;
+  let dragStartRange: { startTime: number; endTime: number } | null = null;
+  let dragEndTime: number | null = null;
 
   // ── Streaming waveform via SSE, managed by $effect ──
   // Pre-allocate empty; resized when the server sends totalPeaks.
@@ -615,6 +635,27 @@
 
   onDestroy(() => cancelAnimationFrame(rafId));
 
+  /**
+   * A drag is owned by the WINDOW, not the element.
+   *
+   * Listening on the timeline alone meant a pointer that left the element mid-drag
+   * simply stopped moving the endpoint (and `onmouseleave` cancelled the gesture), so a
+   * drag past the edge died instead of continuing. These listeners are armed only while
+   * a gesture is active, so the page pays nothing for them at rest.
+   */
+  $effect(() => {
+    const active = isPanning || isDraggingEndpoint || isProxybing;
+    if (!active) return;
+    const move = (e: MouseEvent) => handleWindowMove(e);
+    const up = () => handleMouseUp();
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+    return () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+    };
+  });
+
   $effect(() => {
     waveformPeaks; chatQuery.data;
     draw();
@@ -628,26 +669,47 @@
     return e.clientX - containerEl.getBoundingClientRect().left;
   }
 
+  /**
+   * Pointer coordinates → a time, in ANY coordinate system.
+   *
+   * Used by the window-level listeners below, where `e.clientX` is no longer relative to
+   * the container (the pointer may be outside it entirely). Clamped to the timeline so a
+   * drag past the edge parks at 0 or the end rather than producing an impossible time.
+   */
+  function clientXToTime(clientX: number): number {
+    if (!containerEl) return 0;
+    const r = containerEl.getBoundingClientRect();
+    const x = Math.min(Math.max(clientX - r.left, 0), r.width);
+    return xToTime(x);
+  }
+
+  // ── Panning (middle mouse) ──
+  // Middle-drag pans the VIEW; it must not move the playhead, which is what makes the
+  // two gestures distinguishable. The pan moves the same view window that zoom sets
+  // (`viewStart`/`viewEnd` in the player store) rather than a second, parallel offset —
+  // two owners of "what time is at x=0" is how a timeline ends up disagreeing with itself
+  // about where a clip is.
+  function handlePanMove(e: MouseEvent) {
+    if (!containerEl) return;
+    const r = containerEl.getBoundingClientRect();
+    if (r.width <= 0) return;
+    const secPerPx = viewSpan / r.width;
+    // Dragging right moves the content right, i.e. reveals EARLIER time. The delta is
+    // applied against the offset captured at press, not accumulated per event, so the
+    // view cannot drift away from the pointer over a long drag.
+    const wanted = panStartOffset + (panStartClientX - e.clientX) * secPerPx;
+    panStore(wanted - viewStart, duration);
+  }
+
   function handleMouseMove(e: MouseEvent) {
+    // A gesture in flight belongs to the window listener below — it must keep working when the
+    // pointer leaves the element, so it is the single owner of drag motion. Handling it here as
+    // well fired every drag frame twice (two seeks, two endpoint updates per pixel).
+    if (isPanning || isDraggingEndpoint || isProxybing) return;
+
     const x = getMouseX(e);
     hoverX = x;
     const t = xToTime(x);
-
-    if (isProxybing) {
-      // Live-seek while dragging — immediate feedback.
-      if (onSeek) onSeek(t);
-      playerStore.update((s) => ({ ...s, currentTime: t, isProxybing: true }));
-      return;
-    }
-
-    if (isDraggingEndpoint && selectedClip && onAdjustEndpoints) {
-      if (draggingEndpoint === 'start') {
-        onAdjustEndpoints(selectedClip, Math.min(t, selectedClip.endTime - 1), selectedClip.endTime);
-      } else {
-        onAdjustEndpoints(selectedClip, selectedClip.startTime, Math.max(t, selectedClip.startTime + 1));
-      }
-      return;
-    }
 
     // Hover detection: endpoints first, then clip marks, then marker flags.
     const ep = endpointAt(x);
@@ -671,7 +733,49 @@
     }
   }
 
+  /**
+   * Window-level move handler: the drag continues while the button is held, even if the
+   * pointer leaves the timeline. Without this, dragging off the element silently ended the
+   * gesture (and a re-entry restarted it from wherever the pointer happened to be).
+   */
+  function handleWindowMove(e: MouseEvent) {
+    if (isPanning) { handlePanMove(e); return; }
+    if (isDraggingEndpoint) {
+      const t = clientXToTime(e.clientX);
+      dragEndTime = t;
+      if (draggingClip) {
+        const anchor = draggingAnchorClip;
+        if (anchor && onAdjustEndpoints) {
+          if (draggingEndpoint === 'start') {
+            onAdjustEndpoints(anchor, Math.min(t, anchor.endTime - 1), anchor.endTime, false);
+          } else {
+            onAdjustEndpoints(anchor, anchor.startTime, Math.max(t, anchor.startTime + 1), false);
+          }
+        }
+      }
+      return;
+    }
+    if (isProxybing) {
+      const t = clientXToTime(e.clientX);
+      if (onSeek) onSeek(t);
+      playerStore.update((s) => ({ ...s, currentTime: t, isProxybing: true }));
+    }
+  }
+
   function handleMouseDown(e: MouseEvent) {
+    // Middle button pans, and ONLY middle: it must never move the playhead.
+    if (e.button === 1) {
+      e.preventDefault();
+      if (!containerEl) return;
+      isPanning = true;
+      panStartClientX = e.clientX;
+      panStartOffset = viewStart;
+      containerEl.style.cursor = 'grabbing';
+      return;
+    }
+    // Left button only from here on: a right-click must not start a seek or a drag.
+    if (e.button !== 0) return;
+
     const x = getMouseX(e);
     const t = xToTime(x);
 
@@ -680,6 +784,15 @@
     if (ep) {
       isDraggingEndpoint = true;
       draggingEndpoint = ep;
+      // The clip being edited is PINNED at press time: the undo entry (pushed on
+      // release) needs the range as it was before the drag, and reading it later
+      // would capture a range the drag already changed.
+      draggingClip = selectedClip?.id ?? null;
+      draggingAnchorClip = selectedClip ? { ...selectedClip } : null;
+      dragStartRange = selectedClip
+        ? { startTime: selectedClip.startTime, endTime: selectedClip.endTime }
+        : null;
+      dragEndTime = null;
       return;
     }
 
@@ -705,15 +818,31 @@
   }
 
   function handleMouseUp() {
+    // Endpoint drags have moved the range live (many times). The UNDO ENTRY is pushed
+    // here, once, with the range as it was when the drag started — one history event per
+    // gesture instead of one per frame.
+    if (isDraggingEndpoint && draggingClip && dragStartRange && dragEndTime !== null && onCommitEndpoints) {
+      onCommitEndpoints(draggingClip, dragStartRange);
+    }
+    isPanning = false;
     isProxybing = false;
     isDraggingEndpoint = false;
     draggingEndpoint = null;
+    draggingClip = null;
+    draggingAnchorClip = null;
+    dragStartRange = null;
+    dragEndTime = null;
+    if (containerEl) containerEl.style.cursor = 'text';
     playerStore.update((s) => ({ ...s, isProxybing: false }));
   }
 
   function handleMouseLeave() {
     hoverX = -1;
     hoveredClip = null;
+    // A hover state ends at the edge, but a DRAG does not: the window listeners
+    // (armed while a gesture is active) keep it alive, so a pointer that leaves the
+    // timeline mid-drag comes back to the same gesture rather than a dead one.
+    if (isPanning || isDraggingEndpoint || isProxybing) return;
     handleMouseUp();
   }
 

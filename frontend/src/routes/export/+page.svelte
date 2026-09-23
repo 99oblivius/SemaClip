@@ -753,15 +753,27 @@
     // literal `{date}-{channel}-{name}-{ts}`, so every export in the batch got the SAME name and they
     // overwrote one another. The batch is per-clip, so the template cannot be resolved to one string
     // for all of them anyway — each clip's own facts produce its own name.
+    // NO `filename`: the TEMPLATE travels in the profile and the server renders it per clip.
+    //
+    // This used to send the SELECTED clip's rendered name. The server treats an incoming `filename`
+    // as a template (it has to — that is what the field means on the single-clip route), and a
+    // rendered name has no tokens left, so it rendered VERBATIM for every clip in the batch: one
+    // clip's name was stamped across the whole run, and the collision suffix `-2`/`-3` was the only
+    // thing telling the files apart. `profile.nameTemplate` is per-clip by construction, so leaving
+    // `filename` unset is what makes each item get its own name.
     mutationFn: () => apiClient.enqueueExports({
       profile: buildProfile(),
       outputDir: null,
-      filename: filenameForItem.get(selected?.clip.id ?? '') ?? null,
+      filename: null,
     }),
-    onSuccess: () => {
+    onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ['export-queue'] });
       // The batch route clears every re-sent clip's `exported` mark, so the clip lists are stale.
       queryClient.invalidateQueries({ queryKey: ['clips'] });
+      // Say WHY rows marked `exported` did not run, rather than letting them look broken.
+      batchNote = (res.skipped ?? 0) > 0
+        ? `Queued ${res.enqueued} — skipped ${res.skipped} already exported.`
+        : null;
     },
   }));
 
@@ -788,6 +800,7 @@
   }));
 
   let cancelNote = $state<string | null>(null);
+  let batchNote = $state<string | null>(null);
 
   /** Elapsed / remaining as a compact clock, for the stats line. */
   function fmtDur(sec: number | null): string {
@@ -918,6 +931,7 @@
             Cancel unfinished
           </button>
           {#if cancelNote}<span class="font-mono text-[10px] text-ash-dim">{cancelNote}</span>{/if}
+          {#if batchNote}<span class="font-mono text-[10px] text-ash-dim">{batchNote}</span>{/if}
         </div>
       </div>
     {/if}

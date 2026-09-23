@@ -208,7 +208,7 @@ export const apiClient = {
   // ── The export batch: durable, resumable, cancellable ──
   getExportQueue: () => api<ExportQueueView>('/export/queue'),
   enqueueExports: (input: { profile?: ExportProfile; outputDir?: string | null; filename?: string | null; clipIds?: string[] }) =>
-    api<{ enqueued: number }>('/export/queue', { method: 'POST', body: JSON.stringify(input) }),
+    api<{ enqueued: number; skipped?: number }>('/export/queue', { method: 'POST', body: JSON.stringify(input) }),
   cancelExports: () =>
     api<{ ok: boolean; cancelled: number; deletedArtifacts: number }>('/export/queue', { method: 'DELETE' }),
   cancelExportItem: (clipId: string) =>

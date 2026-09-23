@@ -291,6 +291,46 @@ rendered layout, the Force Bitrate toggle's hidden/enabled states, the quality t
 preview thumbnail's pixels. Control state and HTTP responses were asserted; the rendering is the
 user's to confirm.
 
+## Phase 7 — owner-reported workflow fixes (26.258)
+
+Four reports from the owner, one commit. Implementation and unit tests are complete; the GESTURES and
+the rendered outcomes are the owner's to GUI-verify.
+
+**1. Middle-drag pans the timeline; only left moves the playhead.** `e.button === 1` starts a pan and
+returns before any seek; right-click starts nothing. The pan moves the SAME view window zoom already
+owns (`viewStart`/`viewEnd` in the player store) rather than a second parallel scroll offset.
+
+**2. One history entry per gesture, and the drag survives leaving the element.** The per-frame history
+was ENDPOINT dragging, not the playhead: `adjustEndpoints` pushed an undo entry plus a PUT on every
+mousemove, so reversing one drag took ~60 presses of Ctrl+Z. Live frames now update the query cache
+only, and `onCommitEndpoints` fires once on release with the range captured at press — the live frames
+overwrite the current range, so the component pins it in `mousedown`. Window-level listeners (armed
+only while a gesture is active) keep a drag alive outside the timeline, and `handleMouseLeave` no
+longer cancels one.
+
+**3. A manual clip's end is capped at 60s.** `clipEndFrom` takes the MINIMUM of the cap, the next
+clip's start (when at least 0.5s away), and the end of the video; an explicit `endTime` is clamped to
+the same ceiling. Written as a minimum over candidates rather than an if/else chain, because the chain
+let a neighbour's start beat the cap depending on branch order. Two boundaries worth naming: the cap is
+a CEILING and not a source of video, so with under 0.5s of stream left the fallback length is used
+(`min` there produced a 60s clip running past the end of the video); and an UNKNOWN duration has no
+video end to honour, so the cap is the only bound and the clip gets the full 60s where the pre-cap rule
+returned 30s.
+
+**4. Export all re-exported finished clips, and a batch got the wrong file names.** Two separate
+faults. The batch travelled with ONE `filename` — the SELECTED clip's already-rendered name — and the
+server treats an incoming `filename` as a TEMPLATE, so a name with no tokens left rendered verbatim
+across the whole run; `filename: null` lets `profile.nameTemplate` render per clip. And the implicit
+selection was every listed clip, marked or not, while the route clears the mark of everything it
+accepts — so export all wasted the encode and destroyed the record of existing files. Now
+`selectImplicitBatch` (pure, tested) excludes already-exported clips, passes the ids EXPLICITLY (or
+`enqueueAll` re-reads the list and puts them back), and reports the skip count in the UI. An explicit
+`clipIds` list stays unfiltered: there the user named the clips.
+
+Exit gate: **487 server tests** green in both UTC and CEST, detection 20/0, svelte-check 0/0, frontend
+`npm test` all pass, `deno check` clean. The export-all rule has its own test file, including the
+all-exported and dangling-reference cases.
+
 ## Standing rules
 - No phase starts before the previous exit gate is demonstrably met.
 - Anything that would fabricate success (stub returning victory) is a CI-blocking review reject.
